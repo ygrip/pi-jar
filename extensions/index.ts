@@ -1,11 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { WORKING_FRAMES, roleFrame } from "../src/animations.js";
-import { createDefaultRoles, createDemoRoles, type RoleStatus } from "../src/roles.js";
+import { WORKING_FRAMES, roleFrame } from "../src/animations.ts";
+import { createDefaultRoles, createDemoRoles, type RoleStatus } from "../src/roles.ts";
 
 let roles: RoleStatus[] = createDefaultRoles();
 let animations = true;
 let frame = 0;
+
+const ACTIVE_STATES = new Set(["thinking", "working", "reviewing"]);
 
 function roleColor(role: RoleStatus): "accent" | "warning" | "success" | "error" | "dim" {
   if (role.state === "failed") return "error";
@@ -14,6 +16,10 @@ function roleColor(role: RoleStatus): "accent" | "warning" | "success" | "error"
   if (role.id === "petruk") return "warning";
   if (role.id === "bagong") return "success";
   return "accent";
+}
+
+function shouldAnimateRoles(): boolean {
+  return animations && roles.some((role) => ACTIVE_STATES.has(role.state));
 }
 
 function installUi(ctx: ExtensionContext): void {
@@ -26,16 +32,16 @@ function installUi(ctx: ExtensionContext): void {
 
   ctx.ui.setFooter((tui, theme, footerData) => {
     const onBranchChange = footerData.onBranchChange(() => tui.requestRender());
-    const timer = setInterval(() => {
-      frame += 1;
-      if (animations && roles.some((role) => !["idle", "waiting", "done", "failed"].includes(role.state))) {
-        tui.requestRender();
-      }
-    }, 160);
+    const timer = shouldAnimateRoles()
+      ? setInterval(() => {
+          frame += 1;
+          tui.requestRender();
+        }, 160)
+      : undefined;
 
     return {
       dispose() {
-        clearInterval(timer);
+        if (timer) clearInterval(timer);
         onBranchChange();
       },
 
@@ -93,24 +99,28 @@ export default function piJar(pi: ExtensionAPI): void {
 
       if (command === "demo") {
         roles = createDemoRoles();
+        installUi(ctx);
         ctx.ui.notify("pi-jar role demo enabled", "info");
         return;
       }
 
       if (command === "reset" || command === "demo off") {
         roles = createDefaultRoles();
+        installUi(ctx);
         ctx.ui.notify("pi-jar role demo reset", "info");
         return;
       }
 
       if (command === "animations on") {
         animations = true;
+        installUi(ctx);
         ctx.ui.notify("pi-jar animations enabled", "info");
         return;
       }
 
       if (command === "animations off") {
         animations = false;
+        installUi(ctx);
         ctx.ui.notify("pi-jar animations disabled", "info");
         return;
       }
