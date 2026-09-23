@@ -37,15 +37,19 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "themes:build": "node --experimental-strip-types scripts/build-accents.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "engines": { "node": ">=22.6" },
+  "dependencies": {
+    "@earendil-works/pi-tui": "0.85.1"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-coding-agent": "^0.85.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "latest",
-    "@earendil-works/pi-tui": "latest",
-    "typescript": "^5.9.2"
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "typescript": "5.9.2"
   }
 }

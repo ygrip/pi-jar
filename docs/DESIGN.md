@@ -15,26 +15,26 @@ The theme should feel:
 
 | Purpose | Color |
 | --- | --- |
-| base background | `#101516` |
-| surface | `#171D1F` |
-| Setara cyan | `#6AB8B5` |
-| technical blue | `#719CD6` |
-| Punakawan amber | `#CBA66B` |
-| muted green | `#8EA58B` |
-| text | `#D3D9D8` |
-| muted text | `#727E7D` |
-| error | `#C96D72` |
+| suggested terminal background | `#0B1018` |
+| surface | `#111927` |
+| Setara dark teal (default accent) | `#00C2B8` |
+| Punakawan technical blue | `#7FA8EE` |
+| Punakawan warning amber | `#E5A940` |
+| Punakawan success green | `#35C79A` |
+| text | `#F3F6FA` |
+| muted text | `#98A5B6` |
+| Punakawan danger terracotta | `#EE7A5E` |
+
+Setara's dark UI uses deep navy and teal; Punakawan's dark panel uses navy surfaces, blue, amber and green status cues. `pi-jar-dark` uses Setara teal with Punakawan dark surfaces and semantic status colors. Six complete alternate themes mirror Punakawan's **dark accent presets**: gray, pink, teal, azure, violet and amber. `/jar accent <preset>` switches a bundled theme; `default` restores Setara teal. Accent choices change accents/selection only, never success/warning/error. Native Pi themes cannot change the terminal emulator's actual background; match the suggested canvas in terminal settings for the closest appearance.
 
 ## Role language
 
-Default role accents:
+Live names and labels are publisher-supplied: `pi-jar.role.<id>` can describe any teammate. The Punakawan names inspire the visual identity but are neither reserved IDs nor fixed roles. The synthetic `/jar demo` uses clearly labeled generic Explorer, Builder and Reviewer examples; it never claims live activity. Without published state, no teammate is shown.
 
-- **Gareng:** cyan, analysis and exploration
-- **Petruk:** amber, implementation and forward motion
-- **Bagong:** green, review and verification
+State colors:
 
-State color overrides:
-
+- thinking/working → accent
+- reviewing → warning
 - done → success
 - failed → error
 - waiting/idle → dim
@@ -46,9 +46,9 @@ Animations communicate state.
 | State | Frames |
 | --- | --- |
 | idle | `◇` |
-| thinking | `◇ ◈ ◇ ◆` |
+| thinking | `◈ ◆` |
 | working | `◐ ◓ ◑ ◒` |
-| waiting | `· ◇ · ◇` |
+| waiting | `◇` |
 | reviewing | `◔ ◑ ◕ ●` |
 | done | `✓` |
 | failed | `×` |
@@ -66,20 +66,24 @@ Rules:
 ### Wide: 100+ columns
 
 ```text
-pi-jar    Claude Sonnet · medium                    feature/auth  ctx 58%
-GAR ◈ analyze     PET ◐ implement     BAG ◇ waiting
+jar claude-sonnet                                       ctx 58%
+EXP ◈ analyze  ·  BLD ◐ implement  ·  REV ◇  ·  git feature/auth
 ```
 
 ### Medium: 52–99 columns
 
 ```text
-pi-jar  Claude Sonnet     ctx 58%
-GAR ◈   PET ◐   BAG ◇
+jar claude-sonnet                    ctx 58%
+EXP ◈  ·  BLD ◐  ·  REV ◇
 ```
 
 ### Narrow: below 52 columns
 
-Only the primary footer line is shown. Role state can later collapse into a compact status segment rather than wrapping.
+```text
+jar model              EXP ◈ ctx 58%
+```
+
+Roles only appear when explicitly published or in the labeled demo. Optional detail is trimmed at the right; glyphs and text remain meaningful without color. The footer keeps context visible at every width, adds Pi-reported session cost when space allows, and shows 5-hour/weekly usage only when a valid public quota or opt-in read-only OAuth fallback resolves it. At medium widths, quota may occupy a third line. The transient welcome shows animated warm fire with muted rising fumes above a **large, multi-row mathematical π**, with an empty row between fire and symbol. A smaller multi-row π remains on narrow terminals; motion-off freezes smoke and fire without hiding the symbol. It briefly lists available project/model/context/cost details, quota opt-in state and installed manager links; at narrow widths it condenses without replacing Pi's editor or header. Working messages use Pi's observed generation/tool events: themed words and icons can animate only while active; motion-off is static and idle has no repaint timer. `/jar hub` navigates to existing Team Mode and subagent managers; `/jar tasks` is a visibly separate pi-jar-owned to-do list. Pi-jar's question cards are custom only for its own prompts, while optional composer styling preserves the native editor as a safe fallback.
 
 ## Presets
 

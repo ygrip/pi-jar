@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
-  "name": "pi-jar-dark",
+  "name": "pi-jar-dark-pink",
   "vars": {
-    "accent": "#00C2B8",
+    "accent": "#F472B6",
     "blue": "#7FA8EE",
     "green": "#35C79A",
     "red": "#EE7A5E",
@@ -11,7 +11,7 @@
     "muted": "#98A5B6",
     "dim": "#7B8797",
     "border": "#273446",
-    "selected": "#0A3134",
+    "selected": "#3B1D2D",
     "userBg": "#16202E",
     "pendingBg": "#182231",
     "successBg": "#15352E",

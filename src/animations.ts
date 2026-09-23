@@ -2,9 +2,9 @@ import type { RoleState } from "./roles.ts";
 
 const FRAMES: Record<RoleState, readonly string[]> = {
   idle: ["◇"],
-  thinking: ["◇", "◈", "◇", "◆"],
+  thinking: ["◈", "◆"],
   working: ["◐", "◓", "◑", "◒"],
-  waiting: ["·", "◇", "·", "◇"],
+  waiting: ["◇"],
   reviewing: ["◔", "◑", "◕", "●"],
   done: ["✓"],
   failed: ["×"]

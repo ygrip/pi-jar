@@ -1,134 +1,303 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { WORKING_FRAMES, roleFrame } from "../src/animations.ts";
-import { createDefaultRoles, createDemoRoles, type RoleStatus } from "../src/roles.ts";
+import { basename } from "node:path";
+import { truncateToWidth } from "@earendil-works/pi-tui";
+import { ACCENT_NAMES, selectAccent } from "../src/accent.ts";
+import { ComposerStyle } from "../src/composer.ts";
+import { promptText } from "../src/dialogs.ts";
+import { renderFooter } from "../src/footer.ts";
+import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
+import { createDemoRoles } from "../src/roles.ts";
+import { ACTIVE_STATES, collectStatuses, type JarRole } from "../src/status.ts";
+import { manageTasks } from "../src/tasks-ui.ts";
+import { TASK_ENTRY, TodoStore } from "../src/tasks.ts";
+import { formatCost, sessionCost } from "../src/usage.ts";
+import { WorkingState } from "../src/working.ts";
+import { welcomeLines } from "../src/welcome.ts";
 
-let roles: RoleStatus[] = createDefaultRoles();
-let animations = true;
-let frame = 0;
-
-const ACTIVE_STATES = new Set(["thinking", "working", "reviewing"]);
-
-function roleColor(role: RoleStatus): "accent" | "warning" | "success" | "error" | "dim" {
-  if (role.state === "failed") return "error";
-  if (role.state === "done") return "success";
-  if (role.state === "idle" || role.state === "waiting") return "dim";
-  if (role.id === "petruk") return "warning";
-  if (role.id === "bagong") return "success";
-  return "accent";
-}
-
-function shouldAnimateRoles(): boolean {
-  return animations && roles.some((role) => ACTIVE_STATES.has(role.state));
-}
-
-function installUi(ctx: ExtensionContext): void {
-  ctx.ui.setTitle("pi-jar");
-
-  ctx.ui.setWorkingIndicator({
-    frames: [...WORKING_FRAMES],
-    intervalMs: 140
-  });
-
-  ctx.ui.setFooter((tui, theme, footerData) => {
-    const onBranchChange = footerData.onBranchChange(() => tui.requestRender());
-    const timer = shouldAnimateRoles()
-      ? setInterval(() => {
-          frame += 1;
-          tui.requestRender();
-        }, 160)
-      : undefined;
-
-    return {
-      dispose() {
-        if (timer) clearInterval(timer);
-        onBranchChange();
-      },
-
-      invalidate() {},
-
-      render(width: number): string[] {
-        const model = ctx.model?.id ?? "no-model";
-        const branch = footerData.getGitBranch();
-        const usage = ctx.getContextUsage();
-        const context = usage?.percent == null ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
-
-        const left = theme.fg("accent", "pi-jar") + theme.fg("dim", `  ${model}`);
-        const rightBits = [branch ? ` ${branch}` : undefined, context].filter(Boolean).join("  ");
-        const right = theme.fg("dim", rightBits);
-        const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
-
-        const lines = [truncateToWidth(left + pad + right, width)];
-
-        if (width >= 52) {
-          const showTasks = width >= 100;
-          const roleLine = roles
-            .map((role) => {
-              const glyph = roleFrame(role.state, frame, animations);
-              const text = showTasks && role.task ? `${role.label} ${glyph} ${role.task}` : `${role.label} ${glyph}`;
-              return theme.fg(roleColor(role), text);
-            })
-            .join(theme.fg("dim", "   "));
-
-          lines.push(truncateToWidth(roleLine, width));
-        }
-
-        return lines;
-      }
-    };
-  });
-}
-
+const WELCOME_KEY = "pi-jar.welcome";
 export default function piJar(pi: ExtensionAPI): void {
-  pi.on("session_start", async (_event, ctx) => {
+  let demo = false;
+  let animations = true;
+  let enabled = true;
+  let disposeFooter: (() => void) | undefined;
+  let footerTui: { requestRender(): void } | undefined;
+  let quotaCache: QuotaCache | undefined;
+  let cost = 0;
+  let welcomeInterval: ReturnType<typeof setInterval> | undefined;
+  let welcomeTimeout: ReturnType<typeof setTimeout> | undefined;
+  let welcomeFrame = 0;
+  let welcomeTui: { requestRender(): void } | undefined;
+  let todos: TodoStore | undefined;
+  const composer = new ComposerStyle();
+  const working = new WorkingState();
+  let workingTimer: ReturnType<typeof setInterval> | undefined;
+
+  const updateTaskWidget = (ctx: ExtensionContext) => {
+    if (!ctx.hasUI || ctx.mode !== "tui") return;
+    const count = todos?.all().filter((item) => !item.done).length ?? 0;
+    try {
+      ctx.ui.setWidget("pi-jar.todos", !enabled || !count ? undefined : (_tui, theme) => ({
+        invalidate() {},
+        render(width: number) {
+          const colors = ctx.ui.theme ?? theme;
+          return [truncateToWidth(colors.fg("accent", `☐ ${count} pi-jar to-do${count === 1 ? "" : "s"}`) + colors.fg("dim", " · /jar tasks"), Math.max(0, width))];
+        }
+      }));
+    } catch { /* Optional widget; task data remains available via /jar tasks. */ }
+  };
+  const applyWorking = (ctx: ExtensionContext) => {
+    if (workingTimer) clearInterval(workingTimer);
+    workingTimer = undefined;
+    if (!ctx.hasUI || ctx.mode !== "tui") return;
+    try {
+      if (!enabled) { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); return; }
+      const display = () => {
+        const view = working.view(animations, (color, text) => ctx.ui.theme?.fg(color, text) ?? text);
+        ctx.ui.setWorkingMessage?.(view.message);
+        ctx.ui.setWorkingIndicator({ frames: view.frames, intervalMs: 240 });
+      };
+      display();
+      if (animations && (working.phase === "generating" || working.phase === "tool")) {
+        workingTimer = setInterval(display, 1300);
+      }
+    } catch { /* Working decoration must never interrupt a Pi turn. */ }
+  };
+
+  const stopWelcome = (ctx?: ExtensionContext) => {
+    if (welcomeInterval) clearInterval(welcomeInterval);
+    if (welcomeTimeout) clearTimeout(welcomeTimeout);
+    welcomeInterval = undefined;
+    welcomeTimeout = undefined;
+    welcomeTui = undefined;
+    if (ctx?.hasUI && ctx.mode === "tui") {
+      try { ctx.ui.setWidget(WELCOME_KEY, undefined); } catch { /* optional widget API */ }
+    }
+  };
+  const showWelcome = (ctx: ExtensionContext) => {
+    if (!ctx.hasUI || ctx.mode !== "tui" || !enabled) return;
+    stopWelcome(ctx);
+    welcomeFrame = 0;
+    try {
+      const contextUsage = ctx.getContextUsage();
+      const context = contextUsage?.percent != null && Number.isFinite(contextUsage.percent)
+        ? `ctx ${Math.round(contextUsage.percent)}%` : "ctx ?";
+      const commands = pi.getCommands().filter((item) => item.source === "extension");
+      const managers: ("tasks" | "subagents")[] = [];
+      if (commands.some((item) => item.name === "tasks")) managers.push("tasks");
+      if (commands.some((item) => item.name === "subagents-fleet")) managers.push("subagents");
+      const info = {
+        model: ctx.model?.id,
+        project: ctx.cwd ? basename(ctx.cwd) : undefined,
+        context,
+        cost: formatCost(cost),
+        managers,
+        quotaEnabled: quotaCache?.enabled ?? false
+      };
+      ctx.ui.setWidget(WELCOME_KEY, (tui, theme) => {
+        welcomeTui = tui;
+        return { invalidate() {}, render(width: number) {
+          return welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), info);
+        } };
+      });
+      if (animations) welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, 280);
+      welcomeTimeout = setTimeout(() => stopWelcome(ctx), 2800);
+    } catch { stopWelcome(ctx); }
+  };
+
+  const installUi = (ctx: ExtensionContext) => {
+    if (!ctx.hasUI || ctx.mode !== "tui") return;
+    if (!enabled) {
+      stopWelcome(ctx);
+      quotaCache?.stop();
+      composer.disable(ctx);
+      updateTaskWidget(ctx);
+      disposeFooter?.();
+      disposeFooter = undefined;
+      ctx.ui.setFooter(undefined);
+      applyWorking(ctx);
+      return;
+    }
+    applyWorking(ctx);
+    updateTaskWidget(ctx);
+    try {
+      ctx.ui.setFooter((tui, theme, footerData) => {
+        footerTui = tui;
+        let frame = 0;
+        let timer: ReturnType<typeof setInterval> | undefined;
+        let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+        let disposed = false;
+        const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
+        const dispose = () => {
+          if (disposed) return;
+          disposed = true;
+          if (timer) clearInterval(timer);
+          if (expiryTimer) clearTimeout(expiryTimer);
+          timer = undefined;
+          expiryTimer = undefined;
+          if (footerTui === tui) footerTui = undefined;
+          unsubscribe();
+        };
+        disposeFooter = dispose;
+        return {
+          dispose,
+          invalidate() {},
+          render(width: number): string[] {
+            try {
+              const now = Date.now();
+              const statuses = footerData.getExtensionStatuses();
+              const live = collectStatuses(statuses, now);
+              const roles: JarRole[] = demo ? createDemoRoles() : live.roles;
+              if (expiryTimer) clearTimeout(expiryTimer);
+              expiryTimer = undefined;
+              const nearest = demo ? undefined : roles.reduce<number | undefined>((min, role) =>
+                role.expiresAt != null ? Math.min(min ?? Infinity, role.expiresAt) : min, undefined);
+              if (nearest != null) expiryTimer = setTimeout(() => tui.requestRender(), Math.max(1, nearest - now));
+              const active = animations && roles.some((role) => ACTIVE_STATES.has(role.state));
+              if (active && !timer) timer = setInterval(() => { frame += 1; tui.requestRender(); }, 240);
+              else if (!active && timer) { clearInterval(timer); timer = undefined; }
+              const usage = ctx.getContextUsage();
+              const context = usage?.percent == null || !Number.isFinite(usage.percent)
+                ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
+              const quota = quotaCache?.get(ctx.model?.provider, statuses, now);
+              return renderFooter({
+                model: ctx.model?.id ?? "no-model", branch: footerData.getGitBranch(),
+                context, cost: formatCost(cost), quota, roles, extras: live.extras,
+                demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
+              }, width, ctx.ui.theme ?? theme);
+            } catch {
+              if (timer) clearInterval(timer);
+              if (expiryTimer) clearTimeout(expiryTimer);
+              timer = undefined;
+              expiryTimer = undefined;
+              return width > 0 ? ["pi-jar: UI unavailable (run /jar ui off)".slice(0, width)] : [];
+            }
+          }
+        };
+      });
+    } catch {
+      disposeFooter?.();
+      disposeFooter = undefined;
+      ctx.ui.setFooter(undefined);
+      ctx.ui.notify("pi-jar: custom footer unavailable; using Pi footer", "warning");
+    }
+  };
+
+  const updateCost = (ctx: ExtensionContext) => {
+    try { cost = sessionCost(ctx); } catch { cost = 0; }
+    footerTui?.requestRender();
+  };
+  const restoreTodos = (ctx: ExtensionContext) => {
+    try { todos?.restore(ctx.sessionManager.getBranch()); } catch { todos?.restore([]); }
+    updateTaskWidget(ctx);
+  };
+  pi.on("session_start", (_event, ctx) => {
+    demo = false;
+    composer.disable(ctx);
+    working.end();
+    quotaCache?.stop();
+    todos = new TodoStore((entry) => pi.appendEntry(TASK_ENTRY, entry));
+    restoreTodos(ctx);
+    // Quota opt-in is deliberately session-local. No credentials or consent are persisted.
+    quotaCache = new QuotaCache(
+      (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
+      () => footerTui?.requestRender()
+    );
+    updateCost(ctx);
     installUi(ctx);
+    showWelcome(ctx);
+  });
+  pi.on("agent_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
+  pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
+  pi.on("tool_execution_start", (event, ctx) => { working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx); });
+  pi.on("tool_execution_end", (event, ctx) => { working.toolEnd(event.toolCallId); applyWorking(ctx); });
+  pi.on("ui_prompt_start", (_event, ctx) => { working.prompt(true); applyWorking(ctx); });
+  pi.on("ui_prompt_end", (_event, ctx) => { working.prompt(false); applyWorking(ctx); });
+  pi.on("turn_end", (_event, ctx) => { working.end(); applyWorking(ctx); updateCost(ctx); });
+  pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
+  pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
+  pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
+  pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
+  pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
+  pi.on("session_shutdown", (_event, ctx) => {
+    stopWelcome(ctx);
+    composer.disable(ctx);
+    working.end();
+    if (workingTimer) clearInterval(workingTimer);
+    workingTimer = undefined;
+    try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
+    quotaCache?.stop();
+    quotaCache = undefined;
+    todos = undefined;
+    disposeFooter?.();
+    disposeFooter = undefined;
+    demo = false;
   });
 
   pi.registerCommand("jar", {
-    description: "Configure pi-jar or preview its role-aware UI",
+    description: "Pi-jar hub, to-dos, prompts, quota and animation controls",
     handler: async (args, ctx) => {
       const command = args.trim().toLowerCase();
-
       if (!command || command === "status") {
-        ctx.ui.notify(
-          `pi-jar: animations ${animations ? "on" : "off"}; roles ${roles.map((role) => `${role.name}:${role.state}`).join(", ")}`,
-          "info"
-        );
+        ctx.ui.notify(`pi-jar: UI ${enabled ? "on" : "off"}; animations ${animations ? "on" : "off"}; quota ${quotaCache?.enabled ? "on" : "off"} (session-only); composer ${composer.enabled ? "on" : "off"}; ${todos?.all().length ?? 0} to-dos; demo ${demo ? "on" : "off"}`, "info");
         return;
       }
-
-      if (command === "demo") {
-        roles = createDemoRoles();
-        installUi(ctx);
-        ctx.ui.notify("pi-jar role demo enabled", "info");
+      if (command === "tasks" || command.startsWith("tasks ")) {
+        if (todos) await manageTasks(args.trim().slice(5).trim(), ctx, todos, () => updateTaskWidget(ctx));
         return;
       }
-
-      if (command === "reset" || command === "demo off") {
-        roles = createDefaultRoles();
-        installUi(ctx);
-        ctx.ui.notify("pi-jar role demo reset", "info");
+      if (command === "accent") {
+        ctx.ui.notify(`Pi-jar accents: default, ${ACCENT_NAMES.join(", ")}. Current theme: ${ctx.ui.theme?.name ?? "unknown"}`, "info");
         return;
       }
-
-      if (command === "animations on") {
-        animations = true;
-        installUi(ctx);
-        ctx.ui.notify("pi-jar animations enabled", "info");
+      if (command.startsWith("accent ")) {
+        const selected = command.slice(7).trim();
+        const applied = selectAccent(ctx, selected);
+        if (applied) applyWorking(ctx);
+        ctx.ui.notify(applied ? `pi-jar accent: ${selected}` : "Accent unavailable; use /jar accent to list installed presets", applied ? "info" : "warning");
         return;
       }
-
-      if (command === "animations off") {
-        animations = false;
-        installUi(ctx);
-        ctx.ui.notify("pi-jar animations disabled", "info");
+      if (command === "composer on") {
+        ctx.ui.notify(composer.enable(ctx) ? "pi-jar composer on; /jar composer off restores Pi's editor" : "Composer unavailable in this UI", composer.enabled ? "info" : "warning");
         return;
       }
-
-      ctx.ui.notify(
-        "Usage: /jar [status|demo|reset|animations on|animations off]",
-        "error"
-      );
+      if (command === "composer off") { composer.disable(ctx); ctx.ui.notify("pi-jar composer off", "info"); return; }
+      if (command === "ask" || command.startsWith("ask ")) {
+        if (!ctx.hasUI || ctx.mode !== "tui") return;
+        const question = args.trim().slice(3).trim() || await promptText(ctx, "Ask with pi-jar", "What would you like to ask?");
+        if (!question) return;
+        const answer = await promptText(ctx, "Your answer", question);
+        if (answer) ctx.ui.pasteToEditor(answer);
+        return;
+      }
+      if (command === "hub") {
+        if (!ctx.hasUI || ctx.mode !== "tui") return;
+        const native = [
+          { name: "tasks", label: "Tasks · Team Mode (/tasks)" },
+          { name: "subagents-fleet", label: "Subagents · Fleet (/subagents-fleet)" }
+        ].filter((entry) => pi.getCommands().some((item) => item.name === entry.name && item.source === "extension"));
+        if (!native.length) { ctx.ui.notify("No task or subagent manager is installed", "info"); return; }
+        const selected = await ctx.ui.select("pi-jar · open existing manager", native.map((item) => item.label));
+        const target = native.find((item) => item.label === selected);
+        if (target && pi.getCommands().some((item) => item.name === target.name && item.source === "extension")) {
+          pi.sendUserMessage(`/${target.name}`, { expandPromptTemplates: true });
+        }
+        return;
+      }
+      if (command === "welcome") { showWelcome(ctx); return; }
+      if (command === "demo") demo = true;
+      else if (command === "reset" || command === "demo off") demo = false;
+      else if (command === "animations on") animations = true;
+      else if (command === "animations off") { animations = false; if (welcomeInterval) { clearInterval(welcomeInterval); welcomeInterval = undefined; } welcomeFrame = 0; welcomeTui?.requestRender(); }
+      else if (command === "ui on") enabled = true;
+      else if (command === "ui off") enabled = false;
+      else if (command === "quota on" && quotaCache) quotaCache.enabled = true;
+      else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaCache.stop(); }
+      else {
+        ctx.ui.notify("Usage: /jar [status|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        return;
+      }
+      installUi(ctx);
+      ctx.ui.notify(`pi-jar: ${command}`, "info");
     }
   });
 }

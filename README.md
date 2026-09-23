@@ -2,17 +2,19 @@
 
 A role-aware, animated theme and TUI extension for [Pi](https://github.com/earendil-works/pi), inspired by the visual language of Setara and the multi-agent character of Punakawan.
 
-> **Status:** early foundation. The theme and extension scaffold are usable; role integrations are the next milestone.
+> **Status:** themed footer and public-status adapter for `@earendil-works/*` Pi 0.85.1. Team Mode, Advisor Flow and SoL-Pi do not yet publish a pi-jar role contract here.
 
 ## What pi-jar is
 
 pi-jar is not just a color theme. It is a Pi package that combines:
 
-- a restrained dark theme designed for long coding sessions;
-- animated working states that communicate activity without turning the terminal into a slot machine;
-- first-class visibility for agent roles such as Gareng, Petruk, and Bagong;
-- a responsive footer for model, thinking, branch, context, role, and integration status;
-- adapters planned for Team Mode, Advisor Flow, and SoL-Pi.
+- a Setara teal × Punakawan navy dark theme with six optional Punakawan-inspired accent presets;
+- observed Pi working states with varied, theme-colored wording and animated icons (static when motion is off);
+- publisher-driven teammate names and labels (including Gareng, Petruk or Bagong if a publisher uses them);
+- a responsive footer for model, context percentage, session cost, optional 5-hour/weekly quota, branch, and extension statuses;
+- a transient welcome with rising smoke, animated fire, a gap and a large static pixel `π`, plus truthful session and installed-manager hints;
+- a first-party session-scoped to-do list and themed pi-jar question dialogs, separate from Team Mode;
+- an opt-in composer style that preserves the native editor and a truthful fallback when external integration state is unavailable.
 
 The design rule is simple: **role visibility first, useful telemetry second, decoration last.**
 
@@ -30,28 +32,35 @@ Then select the theme from Pi settings:
 /settings
 ```
 
-Choose `pi-jar-dark`.
+Choose `pi-jar-dark` (Setara teal), or a `pi-jar-dark-<accent>` theme (`gray`, `pink`, `teal`, `azure`, `violet`, `amber`). For the closest dark-surface match, set your terminal background to `#0B1018`—Pi themes cannot change the terminal emulator background.
 
 The extension is loaded by the package automatically. Use:
 
 ```text
 /jar
+/jar hub
+/jar tasks
+/jar tasks add Ship the UI
+/jar ask What should we name this?
+/jar composer on
+/jar composer off
+/jar accent violet
+/jar accent default
+/jar quota on
 /jar demo
 /jar reset
 ```
 
-`/jar demo` previews the role-aware footer while real Team Mode integration is being built.
+`/jar accent` lists the available presets; `/jar accent <gray|pink|teal|azure|violet|amber|default>` switches only bundled color themes and keeps success/warning/error meanings intact. In a source checkout, `npm run themes:build` regenerates the accent themes from the base JSON and the dark Punakawan presets. `/jar tasks` is pi-jar's **own** to-do list, persisted in Pi session entries; it does not display or synchronize Team Mode's `/tasks`. In the task view: `a` add, Space/Enter check, `e` edit, `d` delete with confirmation, `f` filter, Esc close. Headless commands include `/jar tasks list|add TITLE|done ID|open ID|edit ID TITLE|delete ID`. `/jar hub` still opens installed `/tasks` or `/subagents-fleet` managers, which retain their own state and controls. `/jar ask QUESTION` opens a pi-jar-owned answer dialog and inserts the answer into the editor without submitting it. `/jar composer on` adds a reversible composer layout; where Pi does not expose a previous editor factory, it decorates the native editor rather than replacing its behavior. `/jar composer off` restores the previous appearance. `/jar quota on` allows **session-local, read-only** quota requests for the active Codex/Anthropic OAuth provider, only when no valid public quota status is published. Requests use Pi's resolved OAuth credentials, a 5-second timeout and a 5-minute cache; unsupported/unavailable quotas are hidden. `/jar quota off` clears the cache and stops requests. Provider quota endpoints are not stable public APIs. Live role IDs, names, labels, tasks and states come from published `pi-jar.role.<id>` statuses—not from a fixed list or Team Mode internals. Without a publisher no live role appears. `/jar demo` previews **generic sample roles** and is explicitly labeled `DEMO`; it does not report live agent activity. `/jar animations off` disables role, working-indicator and welcome motion. `/jar welcome` replays the brief nonblocking smoke, flame and large-π welcome and session overview; `/jar ui off` restores Pi's built-in footer (`/jar ui on` re-enables pi-jar). The native tool views remain untouched; composer styling is opt-in and restores the prior editor on disable.
 
 ## Current preview
 
 ```text
- pi-jar                                      feature/auth
- Claude Sonnet · medium                     ctx 58%
-
- GAR ◈ analyze     PET ◐ implement     BAG ◇ waiting
+ jar DEMO  claude-sonnet                          ctx 58%
+ EXP ◈ analyze  ·  BLD ◐ implement  ·  REV ◇ waiting
 ```
 
-The final UI will adapt to terminal width instead of preserving a giant dashboard at all costs.
+The footer adapts to terminal width, prioritizing an active/failed role and context on narrow screens. Session cost uses Pi-reported assistant costs on the current session branch (it may be zero for subscription usage). With no published role signals, no role is invented. Other extensions' published status texts remain visible when space allows.
 
 ## Design direction
 
@@ -91,8 +100,8 @@ The implementation plan lives in [docs/PLAN.md](docs/PLAN.md). The major milesto
 
 1. foundation and theme;
 2. responsive role-aware footer;
-3. real Team Mode role activity;
-4. Advisor Flow and SoL-Pi integration;
+3. optional adapters when Team Mode publishes supported role events/statuses;
+4. optional Advisor Flow and SoL-Pi status adapters when public signals exist;
 5. configurable presets and packaging polish.
 
 ## Development

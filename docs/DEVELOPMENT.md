@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node.js supported by your Pi installation
+- Node.js 22.6+ (native TypeScript test runner)
 - npm
 - a current Pi installation
 
@@ -13,6 +13,7 @@ git clone https://github.com/ygrip/pi-jar.git
 cd pi-jar
 npm install
 npm run check
+npm test
 ```
 
 ## Load locally in Pi
@@ -35,7 +36,7 @@ Select:
 /settings
 ```
 
-and choose `pi-jar-dark`.
+and choose `pi-jar-dark`, or a `pi-jar-dark-<accent>` variant (gray/pink/teal/azure/violet/amber). Accents are generated from `src/accent.ts` and `themes/pi-jar-dark.json` with `npm run themes:build`. The original dark accent values are documented in `../GDN/punakawan/web/panel/src/lib/accent.ts`; do not edit that reference to change pi-jar.
 
 Pi hot-reloads custom theme files when they are loaded as normal custom themes. Package development may require `/reload` depending on how the package is loaded.
 
@@ -56,13 +57,27 @@ Useful commands:
 
 ```text
 /jar
+/jar hub
+/jar welcome
+/jar tasks
+/jar tasks add Review docs
+/jar ask How should we phrase this?
+/jar composer on
+/jar composer off
+/jar accent
+/jar accent violet
+/jar accent default
+/jar quota on
+/jar quota off
 /jar demo
 /jar reset
 /jar animations off
 /jar animations on
+/jar ui off
+/jar ui on
 ```
 
-`/jar demo` exists so the visual role system can be tuned before Team Mode integration is complete.
+`/jar demo` is a labeled preview, not a Team Mode integration. See [INTEGRATIONS.md](INTEGRATIONS.md) for the opt-in role status contract. Check 16-, 40-, 80- and 120-column terminals, animated/static smoke and flame above a separated large `π`, all seven theme choices, observed working-state messages and motion-off, task add/check/edit/filter/delete and branch/reload restoration, cancellation of pi-jar questions, composer on/off with an existing editor and preserved draft, quota opt-in cancellation, manager presence/absence, `/jar ui off` restoring Pi's footer, and session cleanup. The extension supports the current `@earendil-works/*` Pi API (tested baseline 0.85.1); older `@mariozechner/*` is not supported.
 
 ## Development rules
 

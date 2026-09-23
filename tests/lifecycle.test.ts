@@ -1,0 +1,233 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import piJar from "../extensions/index.ts";
+
+const theme = { fg: (_color: string, value: string) => value };
+
+test("idle has no timer; demo motion stops on toggle, reset and session shutdown", async () => {
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const intervals = new Set<ReturnType<typeof setInterval>>();
+  globalThis.setInterval = ((callback: () => void) => {
+    const handle = { callback } as unknown as ReturnType<typeof setInterval>;
+    intervals.add(handle);
+    return handle;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((handle: ReturnType<typeof setInterval>) => { intervals.delete(handle); }) as typeof clearInterval;
+  try {
+    const events = new Map<string, Function>();
+    const commands = new Map<string, (command: string, ctx: unknown) => Promise<void>>();
+    let footer: { render(width: number): string[]; dispose(): void } | undefined;
+    let indicator: { frames: string[] } | undefined;
+    let subscribed = 0;
+    let defaultFooter = false;
+    const statuses = new Map<string, string>();
+    const data = {
+      getExtensionStatuses: () => statuses,
+      getGitBranch: () => null,
+      onBranchChange: (_listener: () => void) => {
+        subscribed++;
+        return () => { subscribed--; };
+      }
+    };
+    const ctx = {
+      hasUI: true,
+      mode: "tui",
+      isIdle: () => true,
+      model: { id: "model" },
+      getContextUsage: () => ({ percent: 50 }),
+      ui: {
+        setWorkingIndicator: (value: { frames: string[] }) => { indicator = value; },
+        setFooter: (factory: ((tui: unknown, theme: unknown, data: unknown) => typeof footer) | undefined) => {
+          footer?.dispose();
+          footer = factory?.({ requestRender() {} }, theme, data);
+          defaultFooter = factory === undefined;
+        },
+        notify() {}
+      }
+    };
+    piJar({
+      on: (name: string, handler: Function) => { events.set(name, handler); },
+      registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) => { commands.set(name, command.handler); }
+    } as unknown as Parameters<typeof piJar>[0]);
+    events.get("session_start")?.({}, ctx);
+    footer?.render(80);
+    assert.equal(intervals.size, 0);
+    assert.equal(subscribed, 1);
+    const command = commands.get("jar")!;
+    await command("demo", ctx);
+    assert.match(footer?.render(80).join(" ") ?? "", /DEMO/);
+    assert.equal(intervals.size, 1);
+    await command("animations off", ctx);
+    assert.equal(intervals.size, 0);
+    assert.deepEqual(indicator?.frames, ["◇"]);
+    footer?.render(80);
+    assert.equal(intervals.size, 0);
+    await command("ui off", ctx);
+    assert.equal(defaultFooter, true);
+    assert.equal(subscribed, 0);
+    await command("ui on", ctx);
+    await command("demo", ctx);
+    footer?.render(80);
+    assert.equal(intervals.size, 0); // still animation-off
+    await command("animations on", ctx);
+    footer?.render(80);
+    assert.equal(intervals.size, 1);
+    events.get("session_shutdown")?.({}, ctx);
+    assert.equal(intervals.size, 0);
+    assert.equal(subscribed, 0);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test("welcome flame and smoke above large π freeze on motion-off and replay safely", async () => {
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const intervals = new Set<{ callback: () => void }>();
+  globalThis.setInterval = ((callback: () => void) => {
+    const handle = { callback };
+    intervals.add(handle);
+    return handle as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((handle: ReturnType<typeof setInterval>) => {
+    intervals.delete(handle as unknown as { callback: () => void });
+  }) as typeof clearInterval;
+  try {
+    const events = new Map<string, Function>();
+    const commands = new Map<string, Function>();
+    const widgets = new Map<string, { render(width: number): string[] }>();
+    const welcome = () => widgets.get("pi-jar.welcome");
+    const ctx = {
+      hasUI: true, mode: "tui", cwd: "/tmp/pi-jar", isIdle: () => true,
+      model: { provider: "test", id: "test-model" },
+      sessionManager: { getBranch: () => [] },
+      getContextUsage: () => ({ percent: 28 }),
+      ui: {
+        setWorkingIndicator() {}, setFooter() {}, notify() {},
+        setWidget(key: string, factory: Function | undefined) {
+          if (factory) widgets.set(key, factory({ requestRender() {} }, theme));
+          else widgets.delete(key);
+        }
+      }
+    };
+    piJar({
+      on: (name: string, handler: Function) => { events.set(name, handler); },
+      getCommands: () => [],
+      registerCommand: (name: string, command: { handler: Function }) => { commands.set(name, command.handler); }
+    } as unknown as Parameters<typeof piJar>[0]);
+    events.get("session_start")?.({}, ctx);
+    assert.equal(intervals.size, 1);
+    const still = welcome()?.render(80);
+    intervals.values().next().value?.callback();
+    assert.notDeepEqual(welcome()?.render(80)?.slice(0, 6), still?.slice(0, 6));
+    await commands.get("jar")?.("animations off", ctx);
+    assert.equal(intervals.size, 0);
+    assert.deepEqual(welcome()?.render(80), still);
+    await commands.get("jar")?.("welcome", ctx);
+    assert.equal(intervals.size, 0);
+    assert.deepEqual(welcome()?.render(80), still);
+    events.get("session_shutdown")?.({}, ctx);
+    assert.equal(welcome(), undefined);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test("Pi lifecycle drives animated words and icons without idle repaint or invented thoughts", async () => {
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const intervals = new Set<{ callback: () => void }>();
+  globalThis.setInterval = ((callback: () => void) => {
+    const handle = { callback };
+    intervals.add(handle);
+    return handle as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((handle: ReturnType<typeof setInterval>) => {
+    intervals.delete(handle as unknown as { callback: () => void });
+  }) as typeof clearInterval;
+  try {
+    const events = new Map<string, Function>();
+    let command: Function | undefined;
+    let message: string | undefined;
+    let frames: string[] = [];
+    const ctx = {
+      hasUI: true, mode: "tui", isIdle: () => true,
+      model: { provider: "test", id: "test" },
+      sessionManager: { getBranch: () => [] },
+      getContextUsage: () => ({ percent: 0 }),
+      ui: {
+        theme: { fg: (_color: string, text: string) => text },
+        setWorkingMessage(value?: string) { message = value; },
+        setWorkingIndicator(value?: { frames: string[] }) { frames = value?.frames ?? []; },
+        setWidget() {}, setFooter() {}, notify() {}
+      }
+    };
+    piJar({
+      on: (name: string, callback: Function) => { events.set(name, callback); },
+      getCommands: () => [],
+      registerCommand: (_name: string, options: { handler: Function }) => { command = options.handler; }
+    } as unknown as Parameters<typeof piJar>[0]);
+    events.get("session_start")?.({}, ctx);
+    await command?.("animations off", ctx);
+    await command?.("animations on", ctx);
+    assert.equal(intervals.size, 0);
+    events.get("agent_start")?.({}, ctx);
+    assert.match(message ?? "", /Considering/);
+    assert.ok(frames.length > 1);
+    assert.equal(intervals.size, 1);
+    intervals.values().next().value?.callback();
+    assert.match(message ?? "", /Putting an answer/);
+    events.get("tool_execution_start")?.({ toolCallId: "a", toolName: "read" }, ctx);
+    assert.match(message ?? "", /read/);
+    await command?.("animations off", ctx);
+    assert.equal(frames.length, 1);
+    assert.equal(intervals.size, 0);
+    events.get("turn_end")?.({}, ctx);
+    assert.equal(message, undefined);
+    assert.equal(intervals.size, 0);
+    events.get("session_shutdown")?.({}, ctx);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test("status provider failure renders a safe fallback", () => {
+  let startup: Function | undefined;
+  let component: { render(width: number): string[] } | undefined;
+  piJar({
+    on: (name: string, handler: Function) => { if (name === "session_start") startup = handler; },
+    registerCommand() {}
+  } as unknown as Parameters<typeof piJar>[0]);
+  startup?.({}, {
+    mode: "tui", hasUI: true,
+    ui: {
+      setWorkingIndicator() {},
+      setFooter(factory: Function) {
+        component = factory({ requestRender() {} }, theme, {
+          onBranchChange: () => () => {},
+          getExtensionStatuses: () => { throw new Error("publisher error"); }
+        });
+      },
+      notify() {}
+    }
+  });
+  assert.deepEqual(component?.render(80), ["pi-jar: UI unavailable (run /jar ui off)"]);
+});
+
+test("noninteractive contexts do not install a footer", () => {
+  let installs = 0;
+  let startup: Function | undefined;
+  piJar({
+    on: (name: string, handler: Function) => { if (name === "session_start") startup = handler; },
+    registerCommand() {}
+  } as unknown as Parameters<typeof piJar>[0]);
+  startup?.({}, {
+    mode: "rpc", hasUI: true,
+    ui: { setFooter() { installs++; }, setWorkingIndicator() { installs++; } }
+  });
+  assert.equal(installs, 0);
+});

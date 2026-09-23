@@ -15,18 +15,11 @@ export interface RoleStatus {
   task?: string;
 }
 
-export function createDefaultRoles(): RoleStatus[] {
-  return [
-    { id: "gareng", label: "GAR", name: "Gareng", state: "idle" },
-    { id: "petruk", label: "PET", name: "Petruk", state: "idle" },
-    { id: "bagong", label: "BAG", name: "Bagong", state: "idle" }
-  ];
-}
-
+/** Sample data only. Live teammates are supplied by external publishers, not by this list. */
 export function createDemoRoles(): RoleStatus[] {
   return [
-    { id: "gareng", label: "GAR", name: "Gareng", state: "thinking", task: "analyze" },
-    { id: "petruk", label: "PET", name: "Petruk", state: "working", task: "implement" },
-    { id: "bagong", label: "BAG", name: "Bagong", state: "waiting", task: "waiting" }
+    { id: "explorer", label: "EXP", name: "Explorer", state: "thinking", task: "analyze" },
+    { id: "builder", label: "BLD", name: "Builder", state: "working", task: "implement" },
+    { id: "reviewer", label: "REV", name: "Reviewer", state: "waiting", task: "waiting" }
   ];
 }
