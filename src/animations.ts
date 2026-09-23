@@ -1,4 +1,4 @@
-import type { RoleState } from "./roles.js";
+import type { RoleState } from "./roles.ts";
 
 const FRAMES: Record<RoleState, readonly string[]> = {
   idle: ["◇"],
