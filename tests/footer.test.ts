@@ -16,7 +16,12 @@ test("footer fits 16, 40, 80 and 120 terminal cells with critical role visible",
   const role = { id: "gareng", label: "GAR", name: "Gareng", state: "failed" as const, task: "analysis" };
   for (const width of [16, 40, 80, 120]) {
     const lines = renderFooter({ ...base, roles: [role], extras: ["provider: busy"] }, width, plain);
-    assert.ok(lines.length <= 2);
+    assert.ok(lines.length <= (width >= 32 ? 5 : 2));
+    if (width >= 32) {
+      assert.match(lines[0] ?? "", /^╭─/);
+      assert.match(lines.at(-1) ?? "", /╯$/);
+      assert.ok(lines.every((line) => visibleWidth(line) === width));
+    }
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
     if (width >= 40) assert.ok(lines.join(" ").includes("GAR ×"));
   }
@@ -48,7 +53,7 @@ test("live teammate names and labels are publisher-controlled; generic demo stay
   assert.deepEqual(live.roles.map((role) => [role.id, role.name, role.label]), [["release-42", "Release lead", "REL"]]);
   assert.match(renderFooter({ ...base, ...live }, 80, plain).join(" "), /REL/);
   assert.deepEqual(createDemoRoles().map((role) => role.name), ["Explorer", "Builder", "Reviewer"]);
-  assert.match(renderFooter({ ...base, roles: createDemoRoles(), demo: true }, 80, plain)[0] ?? "", /DEMO/);
+  assert.match(renderFooter({ ...base, roles: createDemoRoles(), demo: true }, 80, plain)[1] ?? "", /DEMO/);
 });
 
 test("failed role is prioritized over other roles on compact layouts", () => {
@@ -59,8 +64,8 @@ test("failed role is prioritized over other roles on compact layouts", () => {
       { id: "bagong", label: "BAG", name: "Bagong", state: "failed" }
     ]
   };
-  assert.match(renderFooter(view, 40, plain)[0] ?? "", /BAG ×/);
-  assert.match(renderFooter(view, 80, plain)[1] ?? "", /^BAG ×/);
+  assert.match(renderFooter(view, 40, plain)[1] ?? "", /BAG ×/);
+  assert.match(renderFooter(view, 80, plain)[2] ?? "", /BAG ×/);
 });
 
 test("animation off is static, demo marked and ordinary Unicode doesn't overrun", () => {
@@ -70,7 +75,10 @@ test("animation off is static, demo marked and ordinary Unicode doesn't overrun"
   const before = renderFooter({ ...view, frame: 0 }, 80, plain);
   const after = renderFooter({ ...view, frame: 7 }, 80, plain);
   assert.deepEqual(before, after);
-  assert.ok(before[0]?.includes("DEMO"));
+  assert.ok(before[1]?.includes("DEMO"));
   assert.ok(before.every((line) => visibleWidth(line) <= 80));
   assert.notEqual(roleFrame("thinking", 0, false), roleFrame("idle", 0, false));
+  const motion = renderFooter({ ...view, animations: true, frame: 1 }, 80, plain);
+  assert.notEqual(motion[0], renderFooter({ ...view, animations: true, frame: 2 }, 80, plain)[0]);
+  assert.deepEqual(motion.slice(1), renderFooter({ ...view, animations: true, frame: 1 }, 80, plain).slice(1));
 });

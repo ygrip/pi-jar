@@ -128,6 +128,19 @@ test("welcome flame and smoke above large π freeze on motion-off and replay saf
     await commands.get("jar")?.("welcome", ctx);
     assert.equal(intervals.size, 0);
     assert.deepEqual(welcome()?.render(80), still);
+    events.get("input")?.({ source: "extension", text: "automated" }, ctx);
+    assert.ok(welcome()); // Only a user's interactive prompt dismisses the welcome.
+    events.get("input")?.({ source: "interactive", text: "hello" }, ctx);
+    assert.equal(welcome(), undefined); // Motion-off hides immediately.
+    await commands.get("jar")?.("animations on", ctx);
+    await commands.get("jar")?.("welcome", ctx);
+    assert.equal(intervals.size, 1);
+    events.get("input")?.({ source: "interactive", text: "hello again" }, ctx);
+    assert.ok(welcome());
+    assert.ok((welcome()?.render(80).length ?? 0) < (still?.length ?? 0));
+    for (let step = 0; step < 4; step++) intervals.values().next().value?.callback();
+    assert.equal(welcome(), undefined);
+    assert.equal(intervals.size, 0);
     events.get("session_shutdown")?.({}, ctx);
     assert.equal(welcome(), undefined);
   } finally {
@@ -136,7 +149,7 @@ test("welcome flame and smoke above large π freeze on motion-off and replay saf
   }
 });
 
-test("Pi lifecycle drives animated words and icons without idle repaint or invented thoughts", async () => {
+test("Pi lifecycle keeps activity wording steady while icons animate without idle repaint", async () => {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
   const intervals = new Set<{ callback: () => void }>();
@@ -175,11 +188,9 @@ test("Pi lifecycle drives animated words and icons without idle repaint or inven
     await command?.("animations on", ctx);
     assert.equal(intervals.size, 0);
     events.get("agent_start")?.({}, ctx);
-    assert.match(message ?? "", /Considering/);
+    assert.equal(message, "Working");
     assert.ok(frames.length > 1);
-    assert.equal(intervals.size, 1);
-    intervals.values().next().value?.callback();
-    assert.match(message ?? "", /Putting an answer/);
+    assert.equal(intervals.size, 0);
     events.get("tool_execution_start")?.({ toolCallId: "a", toolName: "read" }, ctx);
     assert.match(message ?? "", /read/);
     await command?.("animations off", ctx);

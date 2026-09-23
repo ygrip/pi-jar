@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
+import { execFileSync } from "node:child_process";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { ComposerStyle } from "../src/composer.ts";
@@ -24,13 +25,13 @@ export default function piJar(pi: ExtensionAPI): void {
   let quotaCache: QuotaCache | undefined;
   let cost = 0;
   let welcomeInterval: ReturnType<typeof setInterval> | undefined;
-  let welcomeTimeout: ReturnType<typeof setTimeout> | undefined;
   let welcomeFrame = 0;
+  let welcomeDismiss = 0;
   let welcomeTui: { requestRender(): void } | undefined;
   let todos: TodoStore | undefined;
   const composer = new ComposerStyle();
+  let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
-  let workingTimer: ReturnType<typeof setInterval> | undefined;
 
   const updateTaskWidget = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui") return;
@@ -46,8 +47,6 @@ export default function piJar(pi: ExtensionAPI): void {
     } catch { /* Optional widget; task data remains available via /jar tasks. */ }
   };
   const applyWorking = (ctx: ExtensionContext) => {
-    if (workingTimer) clearInterval(workingTimer);
-    workingTimer = undefined;
     if (!ctx.hasUI || ctx.mode !== "tui") return;
     try {
       if (!enabled) { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); return; }
@@ -57,17 +56,12 @@ export default function piJar(pi: ExtensionAPI): void {
         ctx.ui.setWorkingIndicator({ frames: view.frames, intervalMs: 240 });
       };
       display();
-      if (animations && (working.phase === "generating" || working.phase === "tool")) {
-        workingTimer = setInterval(display, 1300);
-      }
     } catch { /* Working decoration must never interrupt a Pi turn. */ }
   };
 
   const stopWelcome = (ctx?: ExtensionContext) => {
     if (welcomeInterval) clearInterval(welcomeInterval);
-    if (welcomeTimeout) clearTimeout(welcomeTimeout);
     welcomeInterval = undefined;
-    welcomeTimeout = undefined;
     welcomeTui = undefined;
     if (ctx?.hasUI && ctx.mode === "tui") {
       try { ctx.ui.setWidget(WELCOME_KEY, undefined); } catch { /* optional widget API */ }
@@ -77,6 +71,7 @@ export default function piJar(pi: ExtensionAPI): void {
     if (!ctx.hasUI || ctx.mode !== "tui" || !enabled) return;
     stopWelcome(ctx);
     welcomeFrame = 0;
+    welcomeDismiss = 0;
     try {
       const contextUsage = ctx.getContextUsage();
       const context = contextUsage?.percent != null && Number.isFinite(contextUsage.percent)
@@ -85,22 +80,40 @@ export default function piJar(pi: ExtensionAPI): void {
       const managers: ("tasks" | "subagents")[] = [];
       if (commands.some((item) => item.name === "tasks")) managers.push("tasks");
       if (commands.some((item) => item.name === "subagents-fleet")) managers.push("subagents");
+      // Git metadata is sampled once per welcome; never spawn processes in render().
+      let branch: string | undefined;
+      let dirty = false;
+      try {
+        branch = execFileSync("git", ["branch", "--show-current"], { cwd: ctx.cwd, timeout: 800, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
+        dirty = !!execFileSync("git", ["status", "--porcelain"], { cwd: ctx.cwd, timeout: 800, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      } catch { /* Non-git projects do not show a branch. */ }
       const info = {
         model: ctx.model?.id,
         project: ctx.cwd ? basename(ctx.cwd) : undefined,
         context,
         cost: formatCost(cost),
         managers,
-        quotaEnabled: quotaCache?.enabled ?? false
+        quotaEnabled: quotaCache?.enabled ?? false,
+        tasks: todos?.all().filter((item) => !item.done).length,
+        branch, dirty
       };
       ctx.ui.setWidget(WELCOME_KEY, (tui, theme) => {
         welcomeTui = tui;
         return { invalidate() {}, render(width: number) {
-          return welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), info);
+          const statuses = welcomeStatuses();
+          const live = collectStatuses(statuses, Date.now());
+          const quota = quotaCache?.get(ctx.model?.provider, statuses, Date.now());
+          const lines = welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), {
+            ...info, roles: live.roles, advisor: statuses.get("advisor") ?? statuses.get("pi-jar.advisor"),
+            quota: quota?.week?.used ?? quota?.fiveHour?.used
+          });
+          if (!welcomeDismiss) return lines;
+          // A short upward dissolve: dim the remaining art as rows disappear.
+          const remaining = Math.max(0, Math.ceil(lines.length * (1 - welcomeDismiss / 5)));
+          return lines.slice(0, remaining).map((line) => (ctx.ui.theme ?? theme).fg("dim", line));
         } };
       });
       if (animations) welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, 280);
-      welcomeTimeout = setTimeout(() => stopWelcome(ctx), 2800);
     } catch { stopWelcome(ctx); }
   };
 
@@ -122,6 +135,7 @@ export default function piJar(pi: ExtensionAPI): void {
     try {
       ctx.ui.setFooter((tui, theme, footerData) => {
         footerTui = tui;
+        welcomeStatuses = () => footerData.getExtensionStatuses();
         let frame = 0;
         let timer: ReturnType<typeof setInterval> | undefined;
         let expiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -134,7 +148,7 @@ export default function piJar(pi: ExtensionAPI): void {
           if (expiryTimer) clearTimeout(expiryTimer);
           timer = undefined;
           expiryTimer = undefined;
-          if (footerTui === tui) footerTui = undefined;
+          if (footerTui === tui) { footerTui = undefined; welcomeStatuses = () => new Map<string, string>(); }
           unsubscribe();
         };
         disposeFooter = dispose;
@@ -204,7 +218,21 @@ export default function piJar(pi: ExtensionAPI): void {
     );
     updateCost(ctx);
     installUi(ctx);
+    composer.setMotion(animations);
+    composer.enable(ctx);
     showWelcome(ctx);
+  });
+  pi.on("input", (event, ctx) => {
+    if (event.source !== "interactive" || !welcomeTui || welcomeDismiss) return;
+    if (!animations) { stopWelcome(ctx); return; }
+    welcomeDismiss = 1;
+    if (welcomeInterval) clearInterval(welcomeInterval);
+    welcomeInterval = setInterval(() => {
+      welcomeDismiss++;
+      if (welcomeDismiss >= 5) stopWelcome(ctx);
+      else welcomeTui?.requestRender();
+    }, 90);
+    welcomeTui.requestRender();
   });
   pi.on("agent_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
   pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
@@ -222,8 +250,6 @@ export default function piJar(pi: ExtensionAPI): void {
     stopWelcome(ctx);
     composer.disable(ctx);
     working.end();
-    if (workingTimer) clearInterval(workingTimer);
-    workingTimer = undefined;
     try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
     quotaCache?.stop();
     quotaCache = undefined;
@@ -293,9 +319,9 @@ export default function piJar(pi: ExtensionAPI): void {
       if (command === "welcome") { showWelcome(ctx); return; }
       if (command === "demo") demo = true;
       else if (command === "reset" || command === "demo off") demo = false;
-      else if (command === "animations on") animations = true;
-      else if (command === "animations off") { animations = false; if (welcomeInterval) { clearInterval(welcomeInterval); welcomeInterval = undefined; } welcomeFrame = 0; welcomeTui?.requestRender(); }
-      else if (command === "ui on") enabled = true;
+      else if (command === "animations on") { animations = true; composer.setMotion(true); }
+      else if (command === "animations off") { animations = false; composer.setMotion(false); if (welcomeInterval) { clearInterval(welcomeInterval); welcomeInterval = undefined; } welcomeFrame = 0; welcomeTui?.requestRender(); }
+      else if (command === "ui on") { enabled = true; composer.enable(ctx); }
       else if (command === "ui off") enabled = false;
       else if (command === "quota on" && quotaCache) quotaCache.enabled = true;
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaCache.stop(); }

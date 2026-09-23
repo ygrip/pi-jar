@@ -77,7 +77,7 @@ Useful commands:
 /jar ui on
 ```
 
-`/jar demo` is a labeled preview, not a Team Mode integration. See [INTEGRATIONS.md](INTEGRATIONS.md) for the opt-in role status contract. Check 16-, 40-, 80- and 120-column terminals, animated/static smoke and flame above a separated large `π`, all seven theme choices, observed working-state messages and motion-off, task add/check/edit/filter/delete and branch/reload restoration, cancellation of pi-jar questions, composer on/off with an existing editor and preserved draft, quota opt-in cancellation, manager presence/absence, `/jar ui off` restoring Pi's footer, and session cleanup. The extension supports the current `@earendil-works/*` Pi API (tested baseline 0.85.1); older `@mariozechner/*` is not supported.
+`/jar demo` is a labeled preview, not a Team Mode integration. See [INTEGRATIONS.md](INTEGRATIONS.md) for the opt-in role status contract. Check 16-, 40-, 80- and 120-column terminals, animated/static smoke and flame above a separated large `π`, all seven theme choices, observed working-state messages and motion-off, task add/check/edit/filter/delete and branch/reload restoration, cancellation of pi-jar questions, default rounded composer and composer on/off with an existing editor and preserved draft, quota opt-in cancellation, manager presence/absence, `/jar ui off` restoring Pi's footer, and session cleanup. The extension supports the current `@earendil-works/*` Pi API (tested baseline 0.85.1); older `@mariozechner/*` is not supported.
 
 ## Development rules
 

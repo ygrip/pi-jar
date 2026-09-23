@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { ComposerStyle } from "../src/composer.ts";
+import { ComposerStyle, roundedInput } from "../src/composer.ts";
 import piJar from "../extensions/index.ts";
 import { promptChoice, promptText, todoView } from "../src/dialogs.ts";
 import { TASK_ENTRY, TodoStore, type TodoEvent } from "../src/tasks.ts";
@@ -15,7 +15,8 @@ test("working wording follows observed events, sanitizes tool names and stops on
   assert.equal(state.view(true, paint).message, undefined);
   state.start();
   const generating = state.view(true, paint);
-  assert.match(generating.message ?? "", /Considering/);
+  assert.equal(generating.message, "Working");
+  assert.equal(state.view(true, paint).message, "Working");
   assert.ok(generating.frames.length > 1);
   state.toolStart("one", "\u001b[31mbash\u001b[0m");
   assert.match(state.view(true, paint).message ?? "", /bash/);
@@ -27,7 +28,7 @@ test("working wording follows observed events, sanitizes tool names and stops on
   assert.match(state.view(false, paint).message ?? "", /Waiting/);
   state.prompt(false);
   state.toolEnd("two");
-  assert.match(state.view(false, paint).message ?? "", /Considering/);
+  assert.equal(state.view(false, paint).message, "Working");
   state.end();
   assert.equal(state.view(false, paint).message, undefined);
 });
@@ -112,6 +113,21 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
   assert.equal(await answer, "yes");
 });
 
+test("rounded input fits, responds to focus, and alternates focus colors", () => {
+  const paint = (phase: number, text: string) => `\x1b[${phase ? 33 : 36}m${text}\x1b[0m`;
+  const lines = ["top", "draft", "bottom"];
+  const idle = roundedInput(lines, 28, false, 0, theme as never, paint);
+  const focused = roundedInput(lines, 28, true, 0, theme as never, paint);
+  const next = roundedInput(lines, 28, true, 2, theme as never, paint);
+  assert.match(focused[0] ?? "", /╭─ pi-jar · compose/);
+  assert.match(focused[1] ?? "", /│.*draft.*│/);
+  assert.notDeepEqual(focused, next);
+  assert.notDeepEqual(idle, focused);
+  for (const width of [4, 8, 16, 28]) {
+    assert.ok(roundedInput(lines, width, true, 0, theme as never, paint).every((line) => visibleWidth(line) <= width));
+  }
+});
+
 test("composer enable failure restores a previously installed editor", () => {
   const original = () => ({ render: () => ["editor"], getText: () => "draft", setText() {}, invalidate() {}, handleInput() {} });
   let current: Function | undefined = original;
@@ -127,12 +143,12 @@ test("composer enable failure restores a previously installed editor", () => {
   assert.equal(style.enabled, false);
 });
 
-test("composer restores previous editor and draft, respects later editor owners, and keeps native fallback", () => {
+test("composer restores previous editor and draft, respects later editor owners, and replaces native with rounded input", () => {
   let draft = "keep this draft";
   let current: ((tui: unknown, theme: unknown, keys: unknown) => unknown) | undefined;
   const original = (_tui: unknown, _theme: unknown, _keys: unknown) => ({
     onSubmit: undefined, onChange: undefined, focused: false,
-    render: (_width: number) => ["native input"],
+    render: (_width: number) => ["────", "native input", "────"],
     invalidate() {}, handleInput() {}, getText: () => draft, setText: (text: string) => { draft = text; }
   });
   current = original;
@@ -163,8 +179,8 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.equal(current, newer); // do not clobber another extension
   current = undefined;
   assert.equal(style.enable(ctx as never), true);
-  assert.equal(current, undefined); // never replace Pi's unexposed built-in editor
-  assert.ok(widgets.has("pi-jar.composer"));
+  assert.notEqual(current, undefined); // CustomEditor preserves Pi's application keybindings
+  assert.equal(widgets.size, 0);
   style.disable(ctx as never);
   assert.equal(widgets.size, 0);
 });

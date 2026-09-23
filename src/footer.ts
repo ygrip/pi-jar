@@ -29,6 +29,9 @@ function roleColor(role: RoleStatus): Color {
 /** Every line is bounded in terminal cells; critical role failure takes precedence. */
 export function renderFooter(view: FooterView, width: number, theme: FooterTheme): string[] {
   if (width <= 0) return [];
+  // Keep tiny terminals unframed so context and urgent role status stay readable.
+  const framed = width >= 32;
+  const contentWidth = framed ? width - 4 : width;
   const roles = [...view.roles].sort((a, b) => Number(b.state === "failed") - Number(a.state === "failed"));
   const primary = roles.find((role) => role.state === "failed") ?? roles.find((role) => ACTIVE_STATES.has(role.state));
   const model = cleanText(view.model, 24) || "no-model";
@@ -42,35 +45,47 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   // At narrow widths reserve the right-hand slot for critical/active status, then context.
   const left = `${prefix} ${theme.fg("muted", model)}`;
   // Fixed priority: context at every width; cost and quota only when there is space.
-  const metrics = [context, ...(width >= 52 && cost ? [cost] : []), ...(width >= 90 ? windows : [])];
+  const metrics = [context, ...(contentWidth >= 52 && cost ? [cost] : []), ...(contentWidth >= 90 ? windows : [])];
   let right = theme.fg("dim", metrics.join("  ·  "));
-  if (width < 52 && attention && width >= 26) {
-    const room = Math.max(0, width - visibleWidth(prefix) - 2 - visibleWidth(right) - 2);
+  if (contentWidth < 52 && attention && contentWidth >= 26) {
+    const room = Math.max(0, contentWidth - visibleWidth(prefix) - 2 - visibleWidth(right) - 2);
     right = theme.fg(primary?.state === "failed" ? "error" : "warning", truncateToWidth(attention, Math.min(room, 14))) + " " + right;
   }
-  const availableLeft = Math.max(0, width - visibleWidth(right) - 1);
+  const availableLeft = Math.max(0, contentWidth - visibleWidth(right) - 1);
   const fittedLeft = truncateToWidth(left, availableLeft);
-  const gap = " ".repeat(Math.max(1, width - visibleWidth(fittedLeft) - visibleWidth(right)));
-  const lines = [truncateToWidth(fittedLeft + gap + right, width)];
-  if (width < 52) return lines;
+  const gap = " ".repeat(Math.max(1, contentWidth - visibleWidth(fittedLeft) - visibleWidth(right)));
+  const lines = [truncateToWidth(fittedLeft + gap + right, contentWidth)];
+  if (contentWidth < 52) return framed ? frameFooter(lines, width, view, theme) : lines;
 
   let moving = 0;
   const segments = roles.map((role) => {
     const animated = view.animations && ACTIVE_STATES.has(role.state) && moving < (view.motionBudget ?? 2);
     if (animated) moving++;
     const glyph = roleFrame(role.state, view.frame, animated);
-    const task = width >= 100 && role.task ? ` ${role.task}` : "";
+    const task = contentWidth >= 100 && role.task ? ` ${role.task}` : "";
     return theme.fg(roleColor(role), `${role.label} ${glyph}${task}`);
   });
-  const remaining = Math.max(0, view.extras.length - (width >= 100 ? 2 : 1));
-  const extras = view.extras.slice(0, width >= 100 ? 2 : 1).map((status) => theme.fg("muted", status));
+  const remaining = Math.max(0, view.extras.length - (contentWidth >= 100 ? 2 : 1));
+  const extras = view.extras.slice(0, contentWidth >= 100 ? 2 : 1).map((status) => theme.fg("muted", status));
   if (remaining) extras.push(theme.fg("dim", `+${remaining}`));
-  if (width >= 100 && view.branch) extras.push(theme.fg("dim", `git ${cleanText(view.branch, 28)}`));
+  if (contentWidth >= 100 && view.branch) extras.push(theme.fg("dim", `git ${cleanText(view.branch, 28)}`));
   const joined = [...segments, ...extras].join(theme.fg("dim", "  ·  "));
-  if (joined) lines.push(truncateToWidth(joined, width));
-  if (width >= 52 && width < 90 && windows.length) {
+  if (joined) lines.push(truncateToWidth(joined, contentWidth));
+  if (contentWidth >= 52 && contentWidth < 90 && windows.length) {
     const summary = windows.join("  ·  ");
-    if (summary) lines.push(truncateToWidth(theme.fg("dim", summary), width));
+    if (summary) lines.push(truncateToWidth(theme.fg("dim", summary), contentWidth));
   }
-  return lines;
+  return framed ? frameFooter(lines, width, view, theme) : lines;
+}
+
+function frameFooter(lines: string[], width: number, view: FooterView, theme: FooterTheme): string[] {
+  const active = view.roles.some((role) => ACTIVE_STATES.has(role.state));
+  const pulse = active && view.animations ? ["◇", "◈", "◆", "◈"][view.frame % 4] : "◇";
+  const top = theme.fg("dim", "╭─") + theme.fg(active ? "accent" : "dim", pulse)
+    + theme.fg("dim", "─".repeat(width - 4) + "╮");
+  const bottom = theme.fg("dim", "╰" + "─".repeat(width - 2) + "╯");
+  // Only the glyph changes between frames; the outline and content never shift.
+  return [top, ...lines.map((line) =>
+    theme.fg("dim", "│ ") + line + " ".repeat(Math.max(0, width - 4 - visibleWidth(line))) + theme.fg("dim", " │")
+  ), bottom];
 }
