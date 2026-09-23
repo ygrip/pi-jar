@@ -113,18 +113,18 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
   assert.equal(await answer, "yes");
 });
 
-test("rounded input fits, responds to focus, and alternates focus colors", () => {
-  const paint = (phase: number, text: string) => `\x1b[${phase ? 33 : 36}m${text}\x1b[0m`;
+test("rounded input fits and uses a steady accent while focused", () => {
+  const paint = (text: string) => `\x1b[36m${text}\x1b[0m`;
   const lines = ["top", "draft", "bottom"];
-  const idle = roundedInput(lines, 28, false, 0, theme as never, paint);
-  const focused = roundedInput(lines, 28, true, 0, theme as never, paint);
-  const next = roundedInput(lines, 28, true, 2, theme as never, paint);
+  const idle = roundedInput(lines, 28, false, theme as never, paint);
+  const focused = roundedInput(lines, 28, true, theme as never, paint);
   assert.match(focused[0] ?? "", /╭─ pi-jar · compose/);
   assert.match(focused[1] ?? "", /│.*draft.*│/);
-  assert.notDeepEqual(focused, next);
+  assert.match(focused[0] ?? "", /\x1b\[36m/);
+  assert.deepEqual(focused, roundedInput(lines, 28, true, theme as never, paint));
   assert.notDeepEqual(idle, focused);
   for (const width of [4, 8, 16, 28]) {
-    assert.ok(roundedInput(lines, width, true, 0, theme as never, paint).every((line) => visibleWidth(line) <= width));
+    assert.ok(roundedInput(lines, width, true, theme as never, paint).every((line) => visibleWidth(line) <= width));
   }
 });
 

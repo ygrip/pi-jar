@@ -218,7 +218,6 @@ export default function piJar(pi: ExtensionAPI): void {
     );
     updateCost(ctx);
     installUi(ctx);
-    composer.setMotion(animations);
     composer.enable(ctx);
     showWelcome(ctx);
   });
@@ -319,8 +318,8 @@ export default function piJar(pi: ExtensionAPI): void {
       if (command === "welcome") { showWelcome(ctx); return; }
       if (command === "demo") demo = true;
       else if (command === "reset" || command === "demo off") demo = false;
-      else if (command === "animations on") { animations = true; composer.setMotion(true); }
-      else if (command === "animations off") { animations = false; composer.setMotion(false); if (welcomeInterval) { clearInterval(welcomeInterval); welcomeInterval = undefined; } welcomeFrame = 0; welcomeTui?.requestRender(); }
+      else if (command === "animations on") { animations = true; }
+      else if (command === "animations off") { animations = false; if (welcomeInterval) { clearInterval(welcomeInterval); welcomeInterval = undefined; } welcomeFrame = 0; welcomeTui?.requestRender(); }
       else if (command === "ui on") { enabled = true; composer.enable(ctx); }
       else if (command === "ui off") enabled = false;
       else if (command === "quota on" && quotaCache) quotaCache.enabled = true;
