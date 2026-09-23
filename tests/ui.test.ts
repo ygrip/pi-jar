@@ -14,7 +14,7 @@ test("rising fumes and fire animate over a large static π; welcome and footer f
     for (const frame of [0, 1, 2, 3]) assert.ok(welcomeLines(width, frame, plain.fg, info).every((line) => visibleWidth(line) <= width));
     const text = welcomeLines(width, 0, plain.fg, info).join(" ");
     assert.ok(text.includes("pi-jar"));
-    assert.ok(text.includes("π"));
+    assert.doesNotMatch(text, /π/); // no second, literal symbol beneath the pixel artwork
     if (width >= 40) {
       assert.match(text, /test-model/);
       assert.match(text, /ctx 82%/);
@@ -31,7 +31,8 @@ test("rising fumes and fire animate over a large static π; welcome and footer f
       assert.deepEqual(before.slice(6), after.slice(6)); // gap and π never move
       assert.equal(before[6]?.slice(0, 16).trim(), "");
       assert.ok(before.slice(7, 12).some((line) => line.includes("██"))); // large, multi-row π
-      assert.equal(before[12]?.includes("π"), true);
+      assert.ok(before[11]?.includes("██")); // serif feet are the last artwork row
+      assert.equal(before[12], undefined);
       assert.match(text, /project  pi-jar/);
     }
     const view: FooterView = {

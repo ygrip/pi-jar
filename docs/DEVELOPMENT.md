@@ -26,7 +26,7 @@ pi install "$(pwd)"
 
 Or run against a temporary checkout without publishing it.
 
-Use `pi list` to verify the package is loaded.
+Use `pi list` to verify the package is loaded. Loading only `--extension ./extensions/index.ts` does not register bundled themes: either install the package and restart Pi, or also pass `--theme ./themes` for a standalone development run. Avoid loading the extension twice by combining a package install with `--extension`.
 
 ## Theme testing
 

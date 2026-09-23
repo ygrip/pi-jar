@@ -29,21 +29,18 @@ const FLAMES = [
 ] as const;
 
 // A large lowercase π: continuous top bar, two descenders and serif feet.
-// The literal π on the bottom line disambiguates terminal fonts and helps accessibility.
 const PI_LARGE = [
   "   ▄▄▄▄▄▄▄▄▄   ",
   "  ▀██▀▀▀▀██▀   ",
   "    ██   ██    ",
   "    ██   ██    ",
-  "   ▄██   ██▄   ",
-  "       π       "
+  "   ▄██   ██▄   "
 ] as const;
 const PI_COMPACT = [
   "  ▄▄▄▄▄▄▄  ",
   "  ███████  ",
   "   █   █   ",
-  "  ▄█   █▄  ",
-  "     π     "
+  "  ▄█   █▄  "
 ] as const;
 
 export function welcomeLines(width: number, frame: number, fg: Paint, info: WelcomeInfo = {}): string[] {

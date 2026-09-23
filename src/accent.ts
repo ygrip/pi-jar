@@ -13,6 +13,15 @@ export const ACCENTS = {
 export type AccentName = keyof typeof ACCENTS;
 export const ACCENT_NAMES = Object.keys(ACCENTS) as AccentName[];
 
+/** A loaded extension is not proof that Pi also discovered its package themes. */
+export function loadedAccents(ctx: ExtensionContext): string[] {
+  if (!ctx.hasUI || ctx.mode !== "tui") return [];
+  try {
+    return ["default", ...ACCENT_NAMES].filter((name) =>
+      Boolean(ctx.ui.getTheme(name === "default" ? "pi-jar-dark" : `pi-jar-dark-${name}`)));
+  } catch { return []; }
+}
+
 /** Only switch among complete bundled themes; never mutate semantic status colors. */
 export function selectAccent(ctx: ExtensionContext, value: string): boolean {
   if (!ctx.hasUI || ctx.mode !== "tui") return false;

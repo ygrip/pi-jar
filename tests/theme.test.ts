@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { ACCENTS, ACCENT_NAMES, selectAccent } from "../src/accent.ts";
+import { ACCENTS, ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
+import piJar from "../extensions/index.ts";
 
 interface ThemeFile {
   name: string;
@@ -46,6 +47,7 @@ test("accent switch uses only complete installed themes and has a safe fallback"
     getTheme: (name: string) => name.endsWith("-amber") || name === "pi-jar-dark" ? { name } : undefined,
     setTheme: (name: string) => { active = name; return { success: true }; }
   } };
+  assert.deepEqual(loadedAccents(ctx as never), ["default", "amber"]);
   assert.equal(selectAccent(ctx as never, "amber"), true);
   assert.equal(active, "pi-jar-dark-amber");
   assert.equal(selectAccent(ctx as never, "pink"), false); // not installed
@@ -54,4 +56,34 @@ test("accent switch uses only complete installed themes and has a safe fallback"
   assert.equal(selectAccent(ctx as never, "default"), true);
   assert.equal(active, "pi-jar-dark");
   assert.equal(selectAccent({ ...ctx, mode: "rpc" } as never, "amber"), false);
+});
+
+test("accent command distinguishes unknown presets, missing theme registration, and a loaded preset", async () => {
+  let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  const notices: { text: string; level: string }[] = [];
+  let loaded = false;
+  let active = "dark";
+  piJar({ on() {}, registerCommand(name: string, value: { handler: typeof command }) {
+    if (name === "jar") command = value.handler;
+  } } as never);
+  const ctx = { hasUI: true, mode: "tui", ui: {
+    get theme() { return { name: active }; },
+    getTheme: (name: string) => loaded && name.startsWith("pi-jar-dark") ? { name } : undefined,
+    setTheme: (name: string) => { active = name; return { success: true }; },
+    notify: (text: string, level: string) => notices.push({ text, level }),
+    setWorkingIndicator() {}
+  } };
+  await command!("accent", ctx);
+  assert.match(notices.at(-1)!.text, /loaded accents: none/);
+  await command!("accent violet", ctx);
+  assert.match(notices.at(-1)!.text, /accent violet is not loaded.*pi install.*--theme/);
+  assert.equal(notices.at(-1)!.level, "warning");
+  await command!("accent invisible", ctx);
+  assert.match(notices.at(-1)!.text, /Unknown pi-jar accent/);
+  loaded = true;
+  await command!("accent violet", ctx);
+  assert.equal(active, "pi-jar-dark-violet");
+  assert.equal(notices.at(-1)!.text, "pi-jar accent: violet");
+  await command!("accent", ctx);
+  assert.match(notices.at(-1)!.text, /loaded accents: default, gray, pink, teal, azure, violet, amber/);
 });

@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { ACCENT_NAMES, selectAccent } from "../src/accent.ts";
+import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { promptText } from "../src/dialogs.ts";
 import { renderFooter } from "../src/footer.ts";
@@ -246,14 +246,21 @@ export default function piJar(pi: ExtensionAPI): void {
         return;
       }
       if (command === "accent") {
-        ctx.ui.notify(`Pi-jar accents: default, ${ACCENT_NAMES.join(", ")}. Current theme: ${ctx.ui.theme?.name ?? "unknown"}`, "info");
+        const loaded = loadedAccents(ctx);
+        ctx.ui.notify(loaded.length
+          ? `Pi-jar loaded accents: ${loaded.join(", ")}`
+          : "Pi-jar loaded accents: none. Install the package or launch with --theme <pi-jar>/themes", "info");
         return;
       }
       if (command.startsWith("accent ")) {
         const selected = command.slice(7).trim();
         const applied = selectAccent(ctx, selected);
         if (applied) applyWorking(ctx);
-        ctx.ui.notify(applied ? `pi-jar accent: ${selected}` : "Accent unavailable; use /jar accent to list installed presets", applied ? "info" : "warning");
+        const valid = selected === "default" || ACCENT_NAMES.some((name) => name === selected);
+        const failure = applied ? "" : !valid ? `Unknown pi-jar accent: ${selected || "(empty)"}; use /jar accent`
+          : !loadedAccents(ctx).includes(selected) ? `Pi-jar accent ${selected} is not loaded. Install with pi install git:github.com/ygrip/pi-jar and restart Pi, or launch with --theme <pi-jar>/themes`
+          : `Could not apply pi-jar accent: ${selected}`;
+        ctx.ui.notify(applied ? `pi-jar accent: ${selected}` : failure, applied ? "info" : "warning");
         return;
       }
       if (command === "composer on") {
