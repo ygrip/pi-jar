@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadFooterSettings } from "../src/footer-settings.ts";
 import piJar from "../extensions/index.ts";
 
 const theme = { fg: (_color: string, value: string) => value };
@@ -30,11 +34,13 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
         return () => { subscribed--; };
       }
     };
+    let sessionName = "Initial session";
     const ctx = {
       hasUI: true,
       mode: "tui",
       isIdle: () => true,
       model: { id: "model" },
+      sessionManager: { getSessionName: () => sessionName },
       getContextUsage: () => ({ percent: 50 }),
       ui: {
         setWorkingIndicator: (value: { frames: string[] }) => { indicator = value; },
@@ -51,7 +57,9 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
       registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) => { commands.set(name, command.handler); }
     } as unknown as Parameters<typeof piJar>[0]);
     events.get("session_start")?.({}, ctx);
-    footer?.render(80);
+    assert.match(footer?.render(80).join(" ") ?? "", /Initial session/);
+    sessionName = "Renamed session";
+    assert.match(footer?.render(80).join(" ") ?? "", /Renamed session/);
     assert.equal(intervals.size, 0);
     assert.equal(subscribed, 1);
     const command = commands.get("jar")!;
@@ -79,6 +87,56 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
   } finally {
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test("footer menu toggles and persists fields, refreshes the render, and exits on Done", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-jar-menu-"));
+  const prior = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    const events = new Map<string, Function>();
+    let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+    let footer: { render(width: number): string[] } | undefined;
+    let renders = 0;
+    const choices = ["[x] Working directory", "[ ] Working directory", "[x] Working directory", "[x] Session name", "Done"];
+    const ctx = {
+      hasUI: true, mode: "tui", cwd: "/a/project", isIdle: () => true,
+      model: { id: "model" }, sessionManager: { getSessionName: () => "Named session" },
+      getContextUsage: () => ({ percent: 20 }),
+      ui: {
+        setWorkingIndicator() {}, notify() {},
+        setFooter: (factory: Function) => { footer = factory({ requestRender() { renders++; } }, theme, {
+          getExtensionStatuses: () => new Map(), getGitBranch: () => null, onBranchChange: () => () => {}
+        }); },
+        select: async (_title: string, options: string[]) => {
+          assert.ok(options.includes("Done"));
+          return choices.shift();
+        }
+      }
+    };
+    piJar({
+      on: (name: string, handler: Function) => events.set(name, handler),
+      registerCommand: (_name: string, options: { handler: typeof command }) => { command = options.handler; }
+    } as never);
+    events.get("session_start")?.({}, ctx);
+    assert.match(footer?.render(80).join(" ") ?? "", /Named session/);
+    assert.match(footer?.render(80).join(" ") ?? "", /project/);
+    await command?.("footer", ctx);
+    assert.equal(loadFooterSettings(dir).cwd, false);
+    assert.equal(loadFooterSettings(dir).sessionName, false);
+    assert.doesNotMatch(footer?.render(80).join(" ") ?? "", /Named session|project/);
+    assert.ok(renders >= 4);
+    const beforeRename = renders;
+    events.get("session_info_changed")?.({}, ctx);
+    assert.equal(renders, beforeRename + 1);
+    await command?.("footer", { ...ctx, ui: { ...ctx.ui, select: async () => undefined } });
+    await command?.("footer", { ...ctx, mode: "rpc", ui: { notify() {}, select: () => { throw Error("not TUI"); } } });
+    events.get("session_shutdown")?.({}, ctx);
+  } finally {
+    if (prior === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prior;
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

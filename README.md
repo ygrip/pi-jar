@@ -11,7 +11,7 @@ pi-jar is not just a color theme. It is a Pi package that combines:
 - a Setara teal × Punakawan navy dark theme with six optional Punakawan-inspired accent presets;
 - observed Pi working states with steady, theme-colored wording and animated icons (static when motion is off);
 - publisher-driven teammate names and labels (including Gareng, Petruk or Bagong if a publisher uses them);
-- a responsive, softly rounded footer for model, context percentage, session cost, optional 5-hour/weekly quota, branch, and extension statuses;
+- a responsive, softly rounded footer for model, session name, CWD, context percentage, session cost, optional 5-hour/weekly quota, branch, and extension statuses; all fields can be toggled in `/jar footer`;
 - a welcome that remains until the first interactive prompt, then dissolves away (or hides immediately with motion off), with rising smoke, animated fire, a gap and a large static pixel `π`;
 - a first-party session-scoped to-do list and themed pi-jar question dialogs, separate from Team Mode;
 - a rounded composer with a steady focus accent that uses Pi's editor keybindings, plus a truthful fallback when external integration state is unavailable.
@@ -60,7 +60,7 @@ The extension is loaded by the package automatically. Use:
  EXP ◈ analyze  ·  BLD ◐ implement  ·  REV ◇ waiting
 ```
 
-The footer adapts to terminal width, prioritizing an active/failed role and context on narrow screens. Session cost uses Pi-reported assistant costs on the current session branch (it may be zero for subscription usage). With no published role signals, no role is invented. Other extensions' published status texts remain visible when space allows.
+The footer adapts to terminal width, truncates long names and paths, and prioritizes an active/failed role and context on narrow screens. `/jar footer` opens a visibility menu for all footer fields; choices are saved across sessions in `~/.pi/agent/pi-jar-footer.json` (or Pi's configured agent directory). Session cost uses Pi-reported assistant costs on the current session branch (it may be zero for subscription usage). With no published role signals, no role is invented. Other extensions' published status texts remain visible when space allows.
 
 ## Design direction
 

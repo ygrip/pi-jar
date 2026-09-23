@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
 import { execFileSync } from "node:child_process";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -6,6 +6,7 @@ import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { promptText } from "../src/dialogs.ts";
 import { renderFooter } from "../src/footer.ts";
+import { FOOTER_FIELDS, loadFooterSettings, saveFooterSettings } from "../src/footer-settings.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { ACTIVE_STATES, collectStatuses, type JarRole } from "../src/status.ts";
@@ -30,6 +31,7 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeTui: { requestRender(): void } | undefined;
   let todos: TodoStore | undefined;
   const composer = new ComposerStyle();
+  let footerSettings = loadFooterSettings(getAgentDir());
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
 
@@ -166,7 +168,7 @@ export default function piJar(pi: ExtensionAPI): void {
               const nearest = demo ? undefined : roles.reduce<number | undefined>((min, role) =>
                 role.expiresAt != null ? Math.min(min ?? Infinity, role.expiresAt) : min, undefined);
               if (nearest != null) expiryTimer = setTimeout(() => tui.requestRender(), Math.max(1, nearest - now));
-              const active = animations && roles.some((role) => ACTIVE_STATES.has(role.state));
+              const active = animations && footerSettings.roles && roles.some((role) => ACTIVE_STATES.has(role.state));
               if (active && !timer) timer = setInterval(() => { frame += 1; tui.requestRender(); }, 240);
               else if (!active && timer) { clearInterval(timer); timer = undefined; }
               const usage = ctx.getContextUsage();
@@ -174,7 +176,8 @@ export default function piJar(pi: ExtensionAPI): void {
                 ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
               const quota = quotaCache?.get(ctx.model?.provider, statuses, now);
               return renderFooter({
-                model: ctx.model?.id ?? "no-model", branch: footerData.getGitBranch(),
+                model: ctx.model?.id ?? "no-model", sessionName: ctx.sessionManager?.getSessionName?.(),
+                cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
                 context, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
@@ -245,6 +248,7 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
   pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
   pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
+  pi.on("session_info_changed", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_shutdown", (_event, ctx) => {
     stopWelcome(ctx);
     composer.disable(ctx);
@@ -268,6 +272,34 @@ export default function piJar(pi: ExtensionAPI): void {
       }
       if (command === "tasks" || command.startsWith("tasks ")) {
         if (todos) await manageTasks(args.trim().slice(5).trim(), ctx, todos, () => updateTaskWidget(ctx));
+        return;
+      }
+      if (command === "footer") {
+        if (!ctx.hasUI || ctx.mode !== "tui") {
+          ctx.ui.notify("Footer settings require the interactive TUI", "warning");
+          return;
+        }
+        footerSettings = loadFooterSettings(getAgentDir());
+        footerTui?.requestRender();
+        const labels: Record<(typeof FOOTER_FIELDS)[number], string> = {
+          model: "Model", sessionName: "Session name", cwd: "Working directory", context: "Context",
+          cost: "Session cost", quota: "Quota", roles: "Roles", extras: "Extension statuses", branch: "Git branch"
+        };
+        while (true) {
+          const options = FOOTER_FIELDS.map((field) => `${footerSettings[field] ? "[x]" : "[ ]"} ${labels[field]}`);
+          const selected = await ctx.ui.select("pi-jar · footer visibility", [...options, "Done"]);
+          const index = options.indexOf(selected ?? "");
+          if (index < 0) break;
+          const field = FOOTER_FIELDS[index]!;
+          const next = { ...footerSettings, [field]: !footerSettings[field] };
+          footerSettings = next;
+          footerTui?.requestRender();
+          try {
+            saveFooterSettings(getAgentDir(), next);
+          } catch {
+            ctx.ui.notify("Footer updated for this session, but could not save settings", "warning");
+          }
+        }
         return;
       }
       if (command === "accent") {
@@ -325,7 +357,7 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "quota on" && quotaCache) quotaCache.enabled = true;
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaCache.stop(); }
       else {
-        ctx.ui.notify("Usage: /jar [status|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        ctx.ui.notify("Usage: /jar [status|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
       }
       installUi(ctx);

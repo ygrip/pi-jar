@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderFooter, type FooterView } from "../src/footer.ts";
+import { DEFAULT_FOOTER_SETTINGS } from "../src/footer-settings.ts";
 import { roleFrame } from "../src/animations.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { collectStatuses } from "../src/status.ts";
@@ -25,6 +26,58 @@ test("footer fits 16, 40, 80 and 120 terminal cells with critical role visible",
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
     if (width >= 40) assert.ok(lines.join(" ").includes("GAR ×"));
   }
+});
+
+test("footer shows the session name, truncates it, and preserves narrow-screen priorities", () => {
+  const name = "A very long named session with many extra words that will not fit";
+  const named = { ...base, sessionName: name };
+  const wide = renderFooter(named, 120, plain);
+  assert.ok(wide[1]?.includes(name));
+  const medium = renderFooter(named, 80, plain);
+  assert.match(medium[1] ?? "", /A very long named session.*…/);
+  assert.match(medium[1] ?? "", /ctx 58%/);
+  const urgent = { ...named, roles: [{ id: "gareng", label: "GAR", name: "Gareng", state: "failed" as const }] };
+  const compact = renderFooter(urgent, 40, plain);
+  assert.match(compact[1] ?? "", /GAR ×/);
+  assert.match(compact[1] ?? "", /ctx 58%/);
+  assert.ok(compact.every((line) => visibleWidth(line) <= 40));
+  const sanitized = renderFooter({ ...base, sessionName: "Work\n\x1b[31mred\x1b[0m" }, 80, plain);
+  assert.match(sanitized[1] ?? "", /Work red/);
+  assert.ok(!sanitized.join("").includes("\x1b[31m"));
+});
+
+test("footer visibility toggles suppress fields and long CJK names and paths fit", () => {
+  const view: FooterView = {
+    ...base, sessionName: "日本語の長いセッション名を表示する", cwd: "/some/very/long/working/directory/with/a/project",
+    cost: "$1", quota: { fiveHour: { used: 50 } } as FooterView["quota"],
+    extras: ["advisor: busy"], roles: [{ id: "role", label: "ROL", name: "Role", state: "working" }]
+  };
+  for (const width of [16, 40, 80, 120]) {
+    const lines = renderFooter(view, width, plain);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    if (width >= 32) assert.ok(lines.every((line) => visibleWidth(line) === width));
+  }
+  assert.match(renderFooter(view, 80, plain)[1] ?? "", /日本/);
+  assert.match(renderFooter(view, 80, plain)[1] ?? "", /…[^ ]*project/);
+  const hidden = renderFooter({ ...view, settings: {
+    ...DEFAULT_FOOTER_SETTINGS, model: false, sessionName: false, cwd: false, context: false,
+    cost: false, quota: false, roles: false, extras: false, branch: false
+  } }, 120, plain);
+  assert.deepEqual(hidden, []);
+  const contextOnly = renderFooter({ ...view, settings: {
+    ...DEFAULT_FOOTER_SETTINGS, model: false, sessionName: false, cwd: false,
+    cost: false, quota: false, roles: false, extras: false, branch: false
+  } }, 120, plain).join(" ");
+  assert.match(contextOnly, /ctx 58%/);
+  assert.doesNotMatch(contextOnly, /claude-sonnet|日本|project|\$1|ROL|advisor|git/);
+  const narrow = renderFooter({ ...view, settings: { ...DEFAULT_FOOTER_SETTINGS, roles: false, extras: false } }, 24, plain).join(" ");
+  assert.match(narrow, /ctx 58%/);
+  assert.doesNotMatch(narrow, /ROL/);
+  const branchOnly = renderFooter({ ...view, settings: {
+    ...DEFAULT_FOOTER_SETTINGS, model: false, sessionName: false, cwd: false, context: false,
+    cost: false, quota: false, roles: false, extras: false
+  } }, 80, plain).join(" ");
+  assert.match(branchOnly, /git feature\/testing/);
 });
 
 test("status contract rejects stale, malformed and unsafe input without inventing live roles", () => {
