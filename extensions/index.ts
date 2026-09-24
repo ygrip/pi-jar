@@ -375,7 +375,7 @@ export default function piJar(pi: ExtensionAPI): void {
     demo = false;
   });
 
-  pi.registerShortcut(Key.ctrlAlt("s"), {
+  pi.registerShortcut?.(Key.ctrlAlt("s"), {
     description: "Open pi-jar settings",
     handler: async (ctx) => {
       if (!ctx.hasUI || ctx.mode !== "tui") return;
