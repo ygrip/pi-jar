@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { cleanText } from "./status.ts";
 
 export interface WelcomeInfo {
@@ -19,20 +19,37 @@ export interface WelcomeInfo {
 type WelcomeColor = "accent" | "warning" | "error" | "muted" | "dim";
 type Paint = (color: WelcomeColor, text: string) => string;
 
+// Every row keeps its cell footprint; only adjacent shades and flame tips move.
 const SMOKE = [
-  ["       ·       ", "     ·  ·      "],
-  ["    ·          ", "       ·       "],
-  ["          ·    ", "    ·          "],
-  ["     ·         ", "         ·     "]
+  ["           ·         ", "        ·            "],
+  ["          ·          ", "        ·            "],
+  ["         ·           ", "         ·           "],
+  ["        ·            ", "         ·           "],
+  ["       ·             ", "          ·          "],
+  ["      ·              ", "          ·          "],
+  ["     ·               ", "           ·         "],
+  ["    ·                ", "           ·         "]
 ] as const;
 const FLAMES = [
-  ["       ░       ", "      ▒█▒      ", "     ▒███▒     ", "    ░█████░    "],
-  ["      ░        ", "     ▒█▒       ", "      ███▒     ", "    ░█████░    "],
-  ["        ░      ", "       █▒      ", "     ▒███▒     ", "    ░█████░    "],
-  ["       ░       ", "      █▒       ", "     ▒███▒     ", "    ░█████░    "]
+  ["        ░   ░        ", "        ▒█▒  ░       ", "       ░█████▒       ", "       ▒█████▒       ", "      ░███████░      "],
+  ["        ░  ░         ", "        ▒█▒ ░▒       ", "       ░█████▒       ", "       ▒█████▒       ", "      ░███████░      "],
+  ["       ░   ░         ", "       ░██▒ ▒▒       ", "       ░█████▒       ", "       ░██████▒      ", "      ░███████░      "],
+  ["       ░    ░        ", "       ░██▒  ▒       ", "       ▒█████▒       ", "       ▒██████░      ", "      ░███████░      "],
+  ["        ░   ░        ", "        ▒█▒ ░▒       ", "       ▒█████▒       ", "       ▒█████▒       ", "      ░███████░      "],
+  ["        ░  ░         ", "        ▒█▒  ░       ", "       ░█████▒       ", "       ▒█████░       ", "      ░███████░      "],
+  ["         ░ ░         ", "         ██▒ ░       ", "        ▒████▒       ", "       ░█████▒       ", "      ░███████░      "],
+  ["         ░  ░        ", "         ▒█▒ ░       ", "        ░████▒       ", "       ▒█████▒       ", "      ░███████░      "]
 ] as const;
-const PI_LARGE = ["   ▄▄▄▄▄▄▄▄▄   ", "  ▀██▀▀▀▀██▀   ", "    ██   ██    ", "    ██   ██    ", "   ▄██   ██▄   "] as const;
-const PI_COMPACT = ["  ▄▄▄▄▄▄▄  ", "  ███████  ", "   █   █   ", "  ▄█   █▄  "] as const;
+const PI_LARGE = [
+  "     ▄▄▄▄▄▄▄▄▄▄▄     ",
+  "    ▄███████████▄    ",
+  "      ██     ██      ",
+  "      ██     ██      ",
+  "     ▄██▄   ▄██▄     "
+] as const;
+const PI_COMPACT = ["  ▄▄▄▄▄▄▄  ", " ▄███████▄ ", "   █   █   ", "  ▄█   █▄  "] as const;
+const ART_WIDTH = 24;
+const spaceArt = (line: string) => " " + line + " ".repeat(Math.max(0, ART_WIDTH - visibleWidth(line) - 1));
 
 function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
   const w = Math.max(8, width);
@@ -79,9 +96,20 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
     cell(git),
     cell(fg("dim", [info.model, info.context, info.cost].filter(Boolean).map((v) => cleanText(v!, 28)).join("  ·  "))),
     divider,
-    cell(fg("dim", narrow ? "/jar hub  ·  /jar welcome" : "open /jar hub  ·  replay /jar welcome")),
+    cell(fg("accent", "[ Settings ↗ ]") + fg("dim", narrow ? "  /jar hub" : "  ·  /jar hub  ·  /jar welcome")),
     fg("dim", "╰" + "─".repeat(w - 2) + "╯")
   ];
+}
+
+export function welcomeSettingsHit(lines: readonly string[], x: number, y: number): boolean {
+  const line = lines[y];
+  if (!line) return false;
+  const text = stripTerminalSequences(line);
+  const label = text.includes("[ Settings ↗ ]") ? "[ Settings ↗ ]" : "/jar settings";
+  const offset = text.indexOf(label);
+  if (offset < 0) return false;
+  const start = visibleWidth(text.slice(0, offset));
+  return x >= start && x < start + visibleWidth(label);
 }
 
 export function welcomeLines(width: number, frame: number, fg: Paint, info: WelcomeInfo = {}): string[] {
@@ -89,21 +117,22 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
   const fit = (line: string) => truncateToWidth(line, width);
   const step = ((frame % FLAMES.length) + FLAMES.length) % FLAMES.length;
   const smoke = SMOKE[step] ?? SMOKE[0];
-  const fire = (FLAMES[step] ?? FLAMES[0]).map((line, index) => fg(index < 2 ? "warning" : "error", line));
+  const fire = (FLAMES[step] ?? FLAMES[0]).map((line, index) => fg(index < 3 ? "warning" : "error", line));
   if (width < 32) return [
-    fit(fg("dim", smoke[1])), ...fire.slice(2).map(fit), "",
+    fit(fg("dim", smoke[1])), ...fire.slice(3).map(fit), "",
     ...PI_COMPACT.map((line) => fit(fg("accent", line))),
-    fit(fg("accent", "pi-jar · role-assistant")), fit(fg("dim", "/jar hub"))
+    fit(fg("accent", "pi-jar · role-assistant")), fit(fg("accent", "/jar settings"))
   ];
   const wide = width >= 72;
   const art = wide ? [
-    ...smoke.map((line) => fg("dim", line)), ...fire, "",
-    ...PI_LARGE.map((line) => fg("accent", line))
+    ...smoke.map((line) => fg("dim", spaceArt(line))),
+    ...(FLAMES[step] ?? FLAMES[0]).map((line, index) => fg(index < 3 ? "warning" : "error", spaceArt(line))), "",
+    ...PI_LARGE.map((line) => fg("accent", spaceArt(line)))
   ] : [fg("dim", smoke[1]), ...fire.slice(1), "", ...PI_COMPACT.map((line) => fg("accent", line))];
-  const details = card(wide ? width - 18 : width, fg, info);
+  const details = card(wide ? width - ART_WIDTH - 2 : width, fg, info);
   if (!wide) return [...art.map(fit), ...details.map(fit)];
   return Array.from({ length: Math.max(art.length, details.length) }, (_, index) => {
     const left = art[index] ?? "";
-    return fit(left + " ".repeat(Math.max(0, 16 - visibleWidth(left))) + "  " + (details[index] ?? ""));
+    return fit(left + " ".repeat(Math.max(0, ART_WIDTH - visibleWidth(left))) + "  " + (details[index] ?? ""));
   });
 }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { after } from "node:test";
 import { ACCENTS, ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import piJar from "../extensions/index.ts";
 
@@ -12,6 +14,14 @@ interface ThemeFile {
 }
 const readTheme = (name: string): ThemeFile => JSON.parse(readFileSync(new URL(`../themes/${name}.json`, import.meta.url), "utf8")) as ThemeFile;
 const base = readTheme("pi-jar-dark");
+const initialAgentDir = process.env.PI_CODING_AGENT_DIR;
+const testAgentDir = mkdtempSync(join(tmpdir(), "pi-jar-theme-"));
+process.env.PI_CODING_AGENT_DIR = testAgentDir;
+after(() => {
+  if (initialAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = initialAgentDir;
+  rmSync(testAgentDir, { recursive: true, force: true });
+});
 const toRgb = (hex: string) => [1, 3, 5].map((n) => parseInt(hex.slice(n, n + 2), 16) / 255);
 const luminance = (hex: string) => toRgb(hex).map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index]!, 0);
 const contrast = (a: string, b: string) => {

@@ -61,12 +61,12 @@ test("footer visibility toggles suppress fields and long CJK names and paths fit
   assert.match(renderFooter(view, 80, plain)[1] ?? "", /…[^ ]*project/);
   const hidden = renderFooter({ ...view, settings: {
     ...DEFAULT_FOOTER_SETTINGS, model: false, sessionName: false, cwd: false, context: false,
-    cost: false, quota: false, roles: false, extras: false, branch: false
+    cost: false, quota: false, roles: false, extras: false, branch: false, effort: false
   } }, 120, plain);
   assert.deepEqual(hidden, []);
   const contextOnly = renderFooter({ ...view, settings: {
     ...DEFAULT_FOOTER_SETTINGS, model: false, sessionName: false, cwd: false,
-    cost: false, quota: false, roles: false, extras: false, branch: false
+    cost: false, quota: false, roles: false, extras: false, branch: false, effort: false
   } }, 120, plain).join(" ");
   assert.match(contextOnly, /ctx 58%/);
   assert.doesNotMatch(contextOnly, /claude-sonnet|日本|project|\$1|ROL|advisor|git/);
@@ -75,9 +75,30 @@ test("footer visibility toggles suppress fields and long CJK names and paths fit
   assert.doesNotMatch(narrow, /ROL/);
   const branchOnly = renderFooter({ ...view, settings: {
     ...DEFAULT_FOOTER_SETTINGS, model: false, sessionName: false, cwd: false, context: false,
-    cost: false, quota: false, roles: false, extras: false
+    cost: false, quota: false, roles: false, extras: false, effort: false
   } }, 80, plain).join(" ");
   assert.match(branchOnly, /git feature\/testing/);
+});
+
+test("footer omits empty jar branding and colorizes every live effort", () => {
+  const palette: Record<string, string> = {
+    off: "thinkingOff", minimal: "thinkingMinimal", low: "thinkingLow", medium: "thinkingMedium",
+    high: "thinkingHigh", xhigh: "thinkingXhigh", max: "thinkingMax"
+  };
+  for (const [level, color] of Object.entries(palette)) {
+    const used: string[] = [];
+    const styled = renderFooter({ ...base, effort: level as FooterView["effort"] }, 80, {
+      fg: (key, text) => { if (text === `effort ${level}`) used.push(key); return text; }
+    }).join(" ");
+    assert.deepEqual(used, [color]);
+    assert.match(styled, new RegExp(`effort ${level}`));
+    assert.doesNotMatch(styled, /\bjar claude-sonnet/);
+  }
+  const narrow = renderFooter({ ...base, effort: "max", roles: [
+    { id: "x", name: "X", label: "ERR", state: "failed" }
+  ] }, 40, plain).join(" ");
+  assert.match(narrow, /ERR ×/);
+  assert.match(narrow, /ctx 58%/);
 });
 
 test("status contract rejects stale, malformed and unsafe input without inventing live roles", () => {

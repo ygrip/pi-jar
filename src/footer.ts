@@ -7,10 +7,12 @@ import type { RoleStatus } from "./roles.ts";
 import { ACTIVE_STATES, cleanText, type JarStatus } from "./status.ts";
 import type { Quota } from "./quota.ts";
 
-export type Color = "accent" | "warning" | "success" | "error" | "dim" | "muted";
+export type Color = "accent" | "warning" | "success" | "error" | "dim" | "muted"
+  | "thinkingOff" | "thinkingMinimal" | "thinkingLow" | "thinkingMedium" | "thinkingHigh" | "thinkingXhigh" | "thinkingMax";
 export interface FooterTheme { fg(color: Color, text: string): string }
 export interface FooterView extends JarStatus {
   model: string;
+  effort?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   sessionName?: string;
   cwd?: string;
   settings?: FooterSettings;
@@ -52,16 +54,21 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   const quota = view.quota;
   const windows = [quota?.fiveHour && `5h ${Math.round(quota.fiveHour.used)}%`, quota?.week && `week ${Math.round(quota.week.used)}%`].filter((value): value is string => !!value);
   const cost = view.cost ? cleanText(view.cost, 20) : undefined;
-  const prefix = theme.fg("accent", "jar") + theme.fg("dim", view.demo ? " DEMO" : "");
+  const prefix = view.demo ? theme.fg("warning", "DEMO") : "";
+  const effortColors = {
+    off: "thinkingOff", minimal: "thinkingMinimal", low: "thinkingLow", medium: "thinkingMedium",
+    high: "thinkingHigh", xhigh: "thinkingXhigh", max: "thinkingMax"
+  } as const;
+  const effort = show.effort && view.effort ? theme.fg(effortColors[view.effort], `effort ${view.effort}`) : "";
   const firstRole = primary ? `${primary.label} ${roleFrame(primary.state, view.frame, view.animations)}` : undefined;
   const attention = firstRole ?? (show.extras ? view.extras[0] : undefined);
   // At narrow widths reserve the right-hand slot for critical/active status, then context.
-  const left = prefix + (show.model ? ` ${theme.fg("muted", model)}` : "");
+  const left = [prefix, show.model ? theme.fg("muted", model) : "", effort].filter(Boolean).join(" ");
   // Fixed priority: context at every width if enabled; cost and quota only when there is space.
   const metrics = [...(show.context ? [context] : []), ...(show.cost && contentWidth >= 52 && cost ? [cost] : []), ...(show.quota && contentWidth >= 90 ? windows : [])];
   let right = theme.fg("dim", metrics.join("  ·  "));
   if (contentWidth < 52 && attention && contentWidth >= 26) {
-    const room = Math.max(0, contentWidth - visibleWidth(prefix) - 2 - visibleWidth(right) - 2);
+    const room = Math.max(0, contentWidth - Math.min(visibleWidth(left), 12) - visibleWidth(right) - 4);
     right = theme.fg(primary?.state === "failed" ? "error" : "warning", truncateToWidth(attention, Math.min(room, 14))) + " " + right;
   }
   const availableLeft = Math.max(0, contentWidth - visibleWidth(right) - 1);

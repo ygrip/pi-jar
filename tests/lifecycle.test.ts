@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadFooterSettings } from "../src/footer-settings.ts";
+import { loadVisualSettings } from "../src/settings.ts";
 import piJar from "../extensions/index.ts";
 
 const theme = { fg: (_color: string, value: string) => value };
+const initialAgentDir = process.env.PI_CODING_AGENT_DIR;
+const testAgentDir = mkdtempSync(join(tmpdir(), "pi-jar-lifecycle-"));
+process.env.PI_CODING_AGENT_DIR = testAgentDir;
+after(() => {
+  if (initialAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = initialAgentDir;
+  rmSync(testAgentDir, { recursive: true, force: true });
+});
 
 test("idle has no timer; demo motion stops on toggle, reset and session shutdown", async () => {
   const originalSetInterval = globalThis.setInterval;
@@ -35,6 +43,8 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
       }
     };
     let sessionName = "Initial session";
+    let effort: "medium" | "high" = "medium";
+    let renders = 0;
     const ctx = {
       hasUI: true,
       mode: "tui",
@@ -46,7 +56,7 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
         setWorkingIndicator: (value: { frames: string[] }) => { indicator = value; },
         setFooter: (factory: ((tui: unknown, theme: unknown, data: unknown) => typeof footer) | undefined) => {
           footer?.dispose();
-          footer = factory?.({ requestRender() {} }, theme, data);
+          footer = factory?.({ requestRender() { renders++; } }, theme, data);
           defaultFooter = factory === undefined;
         },
         notify() {}
@@ -54,10 +64,16 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
     };
     piJar({
       on: (name: string, handler: Function) => { events.set(name, handler); },
-      registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) => { commands.set(name, command.handler); }
+      registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) => { commands.set(name, command.handler); },
+      getThinkingLevel: () => effort
     } as unknown as Parameters<typeof piJar>[0]);
     events.get("session_start")?.({}, ctx);
     assert.match(footer?.render(80).join(" ") ?? "", /Initial session/);
+    effort = "high";
+    const beforeEffort = renders;
+    events.get("thinking_level_select")?.({ level: "high", previousLevel: "medium" }, ctx);
+    assert.equal(renders, beforeEffort + 1);
+    assert.match(footer?.render(80).join(" ") ?? "", /effort high/);
     sessionName = "Renamed session";
     assert.match(footer?.render(80).join(" ") ?? "", /Renamed session/);
     assert.equal(intervals.size, 0);
@@ -123,8 +139,8 @@ test("footer menu toggles and persists fields, refreshes the render, and exits o
     assert.match(footer?.render(80).join(" ") ?? "", /Named session/);
     assert.match(footer?.render(80).join(" ") ?? "", /project/);
     await command?.("footer", ctx);
-    assert.equal(loadFooterSettings(dir).cwd, false);
-    assert.equal(loadFooterSettings(dir).sessionName, false);
+    assert.equal(loadVisualSettings(dir).footer.cwd, false);
+    assert.equal(loadVisualSettings(dir).footer.sessionName, false);
     assert.doesNotMatch(footer?.render(80).join(" ") ?? "", /Named session|project/);
     assert.ok(renders >= 4);
     const beforeRename = renders;

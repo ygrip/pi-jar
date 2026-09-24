@@ -11,10 +11,12 @@ pi-jar is not just a color theme. It is a Pi package that combines:
 - a Setara teal × Punakawan navy dark theme with six optional Punakawan-inspired accent presets;
 - observed Pi working states with steady, theme-colored wording and animated icons (static when motion is off);
 - publisher-driven teammate names and labels (including Gareng, Petruk or Bagong if a publisher uses them);
-- a responsive, softly rounded footer for model, session name, CWD, context percentage, session cost, optional 5-hour/weekly quota, branch, and extension statuses; all fields can be toggled in `/jar footer`;
-- a welcome that remains until the first interactive prompt, then dissolves away (or hides immediately with motion off), with rising smoke, animated fire, a gap and a large static pixel `π`;
+- a responsive, softly rounded footer for model, colorized live thinking effort, session name, CWD, context percentage, session cost, optional quota, branch and extension statuses; configure fields through `/jar settings` or `/jar footer`;
+- a welcome that remains until the first interactive prompt, then dissolves away (or hides immediately with motion off), with subtly animated shaded fire, rising smoke, a gap, a wider pixel `π` and a fullscreen-clickable Settings action;
 - a first-party session-scoped to-do list and themed pi-jar question dialogs, separate from Team Mode;
-- a rounded composer with a steady focus accent that uses Pi's editor keybindings, plus a truthful fallback when external integration state is unavailable.
+- a rounded composer with a steady focus accent that uses Pi's editor keybindings, plus a truthful fallback when external integration state is unavailable;
+- a centralized visual settings pane with keyboard controls in regular mode and clickable controls in fullscreen mode;
+- a separate read-only `/jar history` conversation timeline for the active session branch.
 
 The design rule is simple: **role visibility first, useful telemetry second, decoration last.**
 
@@ -38,6 +40,9 @@ The extension is loaded by the package automatically. Use:
 
 ```text
 /jar
+/jar settings
+/jar status
+/jar history
 /jar hub
 /jar tasks
 /jar tasks add Ship the UI
@@ -51,16 +56,20 @@ The extension is loaded by the package automatically. Use:
 /jar reset
 ```
 
+`/jar` and `/jar settings` open visual preferences in interactive mode; `/jar status` prints the status summary. Click `[ Settings ↗ ]` on the welcome when using Pi fullscreen (`pi --tui-mode fullscreen` or `pit --tui-mode fullscreen`); regular mode leaves clicks to terminal selection/scrollback, so use commands instead. In the pane, Tab switches Appearance/Footer, arrows move, Enter/Space or click changes a value, and Esc closes. Visual preferences (accent, motion, composer, UI and footer fields) are saved in `~/.pi/agent/pi-jar-settings.json` (or Pi's configured agent directory). Existing `pi-jar-footer.json` choices are imported when the new file is absent; that legacy file remains unchanged afterward. Later edits by a downgraded version will not sync back. Quota requests remain off by default and session-only.
+
+`/jar history` opens a **separate** read-only conversation timeline; Pi's native transcript is not restyled or changed. It snapshots the active branch on open (reopen after branching or new replies), pages through 80 visible entries at a time (`p` older, `o` newer), and shows user/assistant turns, tool calls/results, compactions and branch summaries; hidden custom entries, reasoning text and image payloads stay hidden. Arrows/j/k and PgUp/PgDn navigate; `e`/Enter expands details, `d`/`u` scroll details, `[`/`]` step through contiguous output segments of at most 2 KiB/30 lines, `/` searches up to the first 1024 characters of each entry **on the current page**, `n`/`N` advances through matches, Esc closes. Fullscreen supports click/wheel; regular mode is keyboard-only. The view sanitizes terminal control sequences but still shows ordinary session text, which may contain sensitive material; it never writes or logs that content.
+
 `/jar accent` lists the presets **Pi has loaded**; `/jar accent <gray|pink|teal|azure|violet|amber|default>` switches only loaded bundled color themes and keeps success/warning/error meanings intact. In a source checkout, `npm run themes:build` regenerates the accent themes from the base JSON and the dark Punakawan presets. `/jar tasks` is pi-jar's **own** to-do list, persisted in Pi session entries; it does not display or synchronize Team Mode's `/tasks`. In the task view: `a` add, Space/Enter check, `e` edit, `d` delete with confirmation, `f` filter, Esc close. Headless commands include `/jar tasks list|add TITLE|done ID|open ID|edit ID TITLE|delete ID`. `/jar hub` still opens installed `/tasks` or `/subagents-fleet` managers, which retain their own state and controls. `/jar ask QUESTION` opens a pi-jar-owned answer dialog and inserts the answer into the editor without submitting it. Pi Jar enables a rounded composer with a steady focus accent at session start using Pi's `CustomEditor` (native application keybindings); `/jar composer off` restores the previous editor. `/jar composer on` re-enables it. `/jar quota on` allows **session-local, read-only** quota requests for the active Codex/Anthropic OAuth provider, only when no valid public quota status is published. Requests use Pi's resolved OAuth credentials, a 5-second timeout and a 5-minute cache; unsupported/unavailable quotas are hidden. `/jar quota off` clears the cache and stops requests. Provider quota endpoints are not stable public APIs. Live role IDs, names, labels, tasks and states come from published `pi-jar.role.<id>` statuses—not from a fixed list or Team Mode internals. Without a publisher no live role appears. `/jar demo` previews **generic sample roles** and is explicitly labeled `DEMO`; it does not report live agent activity. `/jar animations off` disables role, working-indicator and welcome motion. `/jar welcome` replays the nonblocking smoke, flame and large-π welcome and session overview until the next interactive prompt; `/jar ui off` restores Pi's built-in footer (`/jar ui on` re-enables pi-jar). The native tool views remain untouched; composer styling is enabled by default and restores the prior editor on disable.
 
 ## Current preview
 
 ```text
- jar DEMO  claude-sonnet                          ctx 58%
+ DEMO  claude-sonnet effort high                 ctx 58%
  EXP ◈ analyze  ·  BLD ◐ implement  ·  REV ◇ waiting
 ```
 
-The footer adapts to terminal width, truncates long names and paths, and prioritizes an active/failed role and context on narrow screens. `/jar footer` opens a visibility menu for all footer fields; choices are saved across sessions in `~/.pi/agent/pi-jar-footer.json` (or Pi's configured agent directory). Session cost uses Pi-reported assistant costs on the current session branch (it may be zero for subscription usage). With no published role signals, no role is invented. Other extensions' published status texts remain visible when space allows.
+The footer adapts to terminal width, truncates long names and paths, and prioritizes an active/failed role and context on narrow screens. The old `jar` prefix was branding, not a mode, so it is removed; `DEMO` still marks synthetic roles. Live model effort (`off` through `max`) uses the theme's distinct thinking colors. `/jar footer` remains a compatibility menu; its choices now save in `pi-jar-settings.json`. Session cost uses Pi-reported assistant costs on the current session branch (it may be zero for subscription usage). With no published role signals, no role is invented. Other extensions' published status texts remain visible when space allows.
 
 ## Design direction
 

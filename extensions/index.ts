@@ -1,12 +1,17 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
-import { execFileSync } from "node:child_process";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { ComposerStyle } from "../src/composer.ts";
+import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
 import { promptText } from "../src/dialogs.ts";
 import { renderFooter } from "../src/footer.ts";
-import { FOOTER_FIELDS, loadFooterSettings, saveFooterSettings } from "../src/footer-settings.ts";
+import { openJarHistory } from "../src/history-ui.ts";
+import { FOOTER_FIELDS } from "../src/footer-settings.ts";
+import { defaultVisualSettings, loadVisualSettings, migrateLegacySettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
+import { openJarSettings } from "../src/settings-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { ACTIVE_STATES, collectStatuses, type JarRole } from "../src/status.ts";
@@ -14,13 +19,14 @@ import { manageTasks } from "../src/tasks-ui.ts";
 import { TASK_ENTRY, TodoStore } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
-import { welcomeLines } from "../src/welcome.ts";
+import { welcomeLines, welcomeSettingsHit } from "../src/welcome.ts";
 
 const WELCOME_KEY = "pi-jar.welcome";
 export default function piJar(pi: ExtensionAPI): void {
   let demo = false;
-  let animations = true;
-  let enabled = true;
+  let visualSettings = defaultVisualSettings();
+  let animations = visualSettings.animations;
+  let enabled = visualSettings.ui;
   let disposeFooter: (() => void) | undefined;
   let footerTui: { requestRender(): void } | undefined;
   let quotaCache: QuotaCache | undefined;
@@ -29,11 +35,15 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeFrame = 0;
   let welcomeDismiss = 0;
   let welcomeTui: { requestRender(): void } | undefined;
+  let welcomeGit: AbortController | undefined;
+  let welcomeBranch = (): string | null => null;
   let todos: TodoStore | undefined;
   const composer = new ComposerStyle();
-  let footerSettings = loadFooterSettings(getAgentDir());
+  let footerSettings = visualSettings.footer;
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
+  let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
+  let settingsOpen = false;
 
   const updateTaskWidget = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui") return;
@@ -62,6 +72,8 @@ export default function piJar(pi: ExtensionAPI): void {
   };
 
   const stopWelcome = (ctx?: ExtensionContext) => {
+    welcomeGit?.abort();
+    welcomeGit = undefined;
     if (welcomeInterval) clearInterval(welcomeInterval);
     welcomeInterval = undefined;
     welcomeTui = undefined;
@@ -82,13 +94,8 @@ export default function piJar(pi: ExtensionAPI): void {
       const managers: ("tasks" | "subagents")[] = [];
       if (commands.some((item) => item.name === "tasks")) managers.push("tasks");
       if (commands.some((item) => item.name === "subagents-fleet")) managers.push("subagents");
-      // Git metadata is sampled once per welcome; never spawn processes in render().
-      let branch: string | undefined;
-      let dirty = false;
-      try {
-        branch = execFileSync("git", ["branch", "--show-current"], { cwd: ctx.cwd, timeout: 800, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
-        dirty = !!execFileSync("git", ["status", "--porcelain"], { cwd: ctx.cwd, timeout: 800, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-      } catch { /* Non-git projects do not show a branch. */ }
+      // Footer metadata is cached. The optional dirty check is async and never blocks first paint.
+      const branch = welcomeBranch() || undefined;
       const info = {
         model: ctx.model?.id,
         project: ctx.cwd ? basename(ctx.cwd) : undefined,
@@ -97,11 +104,30 @@ export default function piJar(pi: ExtensionAPI): void {
         managers,
         quotaEnabled: quotaCache?.enabled ?? false,
         tasks: todos?.all().filter((item) => !item.done).length,
-        branch, dirty
+        branch, dirty: false
       };
+      const git = new AbortController();
+      welcomeGit = git;
+      const sample = (args: string[], received: (output: string) => void) => {
+        execFile("git", args, { cwd: ctx.cwd, timeout: 800, encoding: "utf8", signal: git.signal }, (error, stdout) => {
+          if (error || git.signal.aborted || welcomeGit !== git || welcomeDismiss) return;
+          received(stdout);
+          welcomeTui?.requestRender();
+        });
+      };
+      if (ctx.cwd && existsSync(ctx.cwd)) {
+        if (!branch) sample(["branch", "--show-current"], (output) => { info.branch = output.trim() || undefined; });
+        sample(["status", "--porcelain"], (output) => { info.dirty = !!output.trim(); });
+      }
       ctx.ui.setWidget(WELCOME_KEY, (tui, theme) => {
         welcomeTui = tui;
-        return { invalidate() {}, render(width: number) {
+        let visibleLines: string[] = [];
+        return { invalidate() {}, handleMouse(event: TuiMouseEvent) {
+          if (event.type !== "click" || event.button !== "left" || welcomeDismiss
+            || !welcomeSettingsHit(visibleLines, event.x, event.y)) return;
+          queueMicrotask(() => { stopWelcome(ctx); void openSettings(ctx); });
+          return { handled: true };
+        }, render(width: number) {
           const statuses = welcomeStatuses();
           const live = collectStatuses(statuses, Date.now());
           const quota = quotaCache?.get(ctx.model?.provider, statuses, Date.now());
@@ -109,13 +135,14 @@ export default function piJar(pi: ExtensionAPI): void {
             ...info, roles: live.roles, advisor: statuses.get("advisor") ?? statuses.get("pi-jar.advisor"),
             quota: quota?.week?.used ?? quota?.fiveHour?.used
           });
-          if (!welcomeDismiss) return lines;
+          if (!welcomeDismiss) { visibleLines = lines; return lines; }
           // A short upward dissolve: dim the remaining art as rows disappear.
           const remaining = Math.max(0, Math.ceil(lines.length * (1 - welcomeDismiss / 5)));
-          return lines.slice(0, remaining).map((line) => (ctx.ui.theme ?? theme).fg("dim", line));
+          visibleLines = lines.slice(0, remaining).map((line) => (ctx.ui.theme ?? theme).fg("dim", line));
+          return visibleLines;
         } };
       });
-      if (animations) welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, 280);
+      if (animations) welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS);
     } catch { stopWelcome(ctx); }
   };
 
@@ -134,10 +161,13 @@ export default function piJar(pi: ExtensionAPI): void {
     }
     applyWorking(ctx);
     updateTaskWidget(ctx);
+    disposeFooter?.();
+    disposeFooter = undefined;
     try {
       ctx.ui.setFooter((tui, theme, footerData) => {
         footerTui = tui;
         welcomeStatuses = () => footerData.getExtensionStatuses();
+        welcomeBranch = () => footerData.getGitBranch();
         let frame = 0;
         let timer: ReturnType<typeof setInterval> | undefined;
         let expiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -150,7 +180,7 @@ export default function piJar(pi: ExtensionAPI): void {
           if (expiryTimer) clearTimeout(expiryTimer);
           timer = undefined;
           expiryTimer = undefined;
-          if (footerTui === tui) { footerTui = undefined; welcomeStatuses = () => new Map<string, string>(); }
+          if (footerTui === tui) { footerTui = undefined; welcomeStatuses = () => new Map<string, string>(); welcomeBranch = () => null; }
           unsubscribe();
         };
         disposeFooter = dispose;
@@ -176,7 +206,8 @@ export default function piJar(pi: ExtensionAPI): void {
                 ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
               const quota = quotaCache?.get(ctx.model?.provider, statuses, now);
               return renderFooter({
-                model: ctx.model?.id ?? "no-model", sessionName: ctx.sessionManager?.getSessionName?.(),
+                model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
+                sessionName: ctx.sessionManager?.getSessionName?.(),
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
                 context, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
@@ -192,11 +223,47 @@ export default function piJar(pi: ExtensionAPI): void {
         };
       });
     } catch {
-      disposeFooter?.();
       disposeFooter = undefined;
       ctx.ui.setFooter(undefined);
       ctx.ui.notify("pi-jar: custom footer unavailable; using Pi footer", "warning");
     }
+  };
+
+  const applyVisualSettings = (next: JarVisualSettings, ctx: ExtensionContext) => {
+    const wasEnabled = enabled;
+    const hadMotion = animations;
+    if (next.accent !== visualSettings.accent && next.accent !== "follow" && !selectAccent(ctx, next.accent)) {
+      ctx.ui.notify(`Accent ${next.accent} is not loaded`, "warning");
+      return;
+    }
+    visualSettings = next;
+    enabled = next.ui;
+    animations = next.animations;
+    footerSettings = next.footer;
+    if (!animations && welcomeInterval) {
+      clearInterval(welcomeInterval);
+      welcomeInterval = undefined;
+      welcomeFrame = 0;
+    }
+    installUi(ctx);
+    if (enabled && next.composer) composer.enable(ctx);
+    else composer.disable(ctx);
+    if (!wasEnabled && enabled) showWelcome(ctx);
+    else if (!hadMotion && animations && welcomeTui && !welcomeInterval) {
+      welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS);
+    }
+    footerTui?.requestRender();
+    welcomeTui?.requestRender();
+    try { saveVisualSettings(getAgentDir(), next); }
+    catch { ctx.ui.notify("Visual preferences changed for this session but could not be saved", "warning"); }
+  };
+
+  openSettings = async (ctx) => {
+    if (settingsOpen) return;
+    settingsOpen = true;
+    try { await openJarSettings(ctx, () => visualSettings,
+      (next) => applyVisualSettings(next, ctx), loadedAccents(ctx)); }
+    finally { settingsOpen = false; }
   };
 
   const updateCost = (ctx: ExtensionContext) => {
@@ -208,6 +275,11 @@ export default function piJar(pi: ExtensionAPI): void {
     updateTaskWidget(ctx);
   };
   pi.on("session_start", (_event, ctx) => {
+    migrateLegacySettings(getAgentDir());
+    visualSettings = loadVisualSettings(getAgentDir());
+    animations = visualSettings.animations;
+    enabled = visualSettings.ui;
+    footerSettings = visualSettings.footer;
     demo = false;
     composer.disable(ctx);
     working.end();
@@ -221,7 +293,8 @@ export default function piJar(pi: ExtensionAPI): void {
     );
     updateCost(ctx);
     installUi(ctx);
-    composer.enable(ctx);
+    if (visualSettings.composer && enabled) composer.enable(ctx);
+    if (visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
     showWelcome(ctx);
   });
   pi.on("input", (event, ctx) => {
@@ -248,6 +321,7 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
   pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
   pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
+  pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_info_changed", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_shutdown", (_event, ctx) => {
     stopWelcome(ctx);
@@ -263,11 +337,21 @@ export default function piJar(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("jar", {
-    description: "Pi-jar hub, to-dos, prompts, quota and animation controls",
+    description: "Pi-jar settings, read-only history, to-dos, prompts, quota and animations",
     handler: async (args, ctx) => {
       const command = args.trim().toLowerCase();
+      if (!command && ctx.hasUI && ctx.mode === "tui" || command === "settings") {
+        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify("Settings require the interactive TUI", "warning"); return; }
+        await openSettings(ctx);
+        return;
+      }
       if (!command || command === "status") {
         ctx.ui.notify(`pi-jar: UI ${enabled ? "on" : "off"}; animations ${animations ? "on" : "off"}; quota ${quotaCache?.enabled ? "on" : "off"} (session-only); composer ${composer.enabled ? "on" : "off"}; ${todos?.all().length ?? 0} to-dos; demo ${demo ? "on" : "off"}`, "info");
+        return;
+      }
+      if (command === "history") {
+        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify("History requires the interactive TUI", "warning"); return; }
+        await openJarHistory(ctx);
         return;
       }
       if (command === "tasks" || command.startsWith("tasks ")) {
@@ -279,10 +363,10 @@ export default function piJar(pi: ExtensionAPI): void {
           ctx.ui.notify("Footer settings require the interactive TUI", "warning");
           return;
         }
-        footerSettings = loadFooterSettings(getAgentDir());
+        footerSettings = visualSettings.footer;
         footerTui?.requestRender();
         const labels: Record<(typeof FOOTER_FIELDS)[number], string> = {
-          model: "Model", sessionName: "Session name", cwd: "Working directory", context: "Context",
+          model: "Model", effort: "Model effort", sessionName: "Session name", cwd: "Working directory", context: "Context",
           cost: "Session cost", quota: "Quota", roles: "Roles", extras: "Extension statuses", branch: "Git branch"
         };
         while (true) {
@@ -292,13 +376,7 @@ export default function piJar(pi: ExtensionAPI): void {
           if (index < 0) break;
           const field = FOOTER_FIELDS[index]!;
           const next = { ...footerSettings, [field]: !footerSettings[field] };
-          footerSettings = next;
-          footerTui?.requestRender();
-          try {
-            saveFooterSettings(getAgentDir(), next);
-          } catch {
-            ctx.ui.notify("Footer updated for this session, but could not save settings", "warning");
-          }
+          applyVisualSettings({ ...visualSettings, footer: next }, ctx);
         }
         return;
       }
@@ -312,7 +390,12 @@ export default function piJar(pi: ExtensionAPI): void {
       if (command.startsWith("accent ")) {
         const selected = command.slice(7).trim();
         const applied = selectAccent(ctx, selected);
-        if (applied) applyWorking(ctx);
+        if (applied) {
+          visualSettings = { ...visualSettings, accent: selected as JarVisualSettings["accent"] };
+          try { saveVisualSettings(getAgentDir(), visualSettings); }
+          catch { ctx.ui.notify("Accent changed for this session but could not be saved", "warning"); }
+          applyWorking(ctx);
+        }
         const valid = selected === "default" || ACCENT_NAMES.some((name) => name === selected);
         const failure = applied ? "" : !valid ? `Unknown pi-jar accent: ${selected || "(empty)"}; use /jar accent`
           : !loadedAccents(ctx).includes(selected) ? `Pi-jar accent ${selected} is not loaded. Install with pi install git:github.com/ygrip/pi-jar and restart Pi, or launch with --theme <pi-jar>/themes`
@@ -321,10 +404,12 @@ export default function piJar(pi: ExtensionAPI): void {
         return;
       }
       if (command === "composer on") {
-        ctx.ui.notify(composer.enable(ctx) ? "pi-jar composer on; /jar composer off restores Pi's editor" : "Composer unavailable in this UI", composer.enabled ? "info" : "warning");
+        const ready = composer.enable(ctx);
+        if (ready) applyVisualSettings({ ...visualSettings, composer: true }, ctx);
+        ctx.ui.notify(ready ? "pi-jar composer on; /jar composer off restores Pi's editor" : "Composer unavailable in this UI", ready ? "info" : "warning");
         return;
       }
-      if (command === "composer off") { composer.disable(ctx); ctx.ui.notify("pi-jar composer off", "info"); return; }
+      if (command === "composer off") { applyVisualSettings({ ...visualSettings, composer: false }, ctx); ctx.ui.notify("pi-jar composer off", "info"); return; }
       if (command === "ask" || command.startsWith("ask ")) {
         if (!ctx.hasUI || ctx.mode !== "tui") return;
         const question = args.trim().slice(3).trim() || await promptText(ctx, "Ask with pi-jar", "What would you like to ask?");
@@ -350,17 +435,17 @@ export default function piJar(pi: ExtensionAPI): void {
       if (command === "welcome") { showWelcome(ctx); return; }
       if (command === "demo") demo = true;
       else if (command === "reset" || command === "demo off") demo = false;
-      else if (command === "animations on") { animations = true; }
-      else if (command === "animations off") { animations = false; if (welcomeInterval) { clearInterval(welcomeInterval); welcomeInterval = undefined; } welcomeFrame = 0; welcomeTui?.requestRender(); }
-      else if (command === "ui on") { enabled = true; composer.enable(ctx); }
-      else if (command === "ui off") enabled = false;
+      else if (command === "animations on") applyVisualSettings({ ...visualSettings, animations: true }, ctx);
+      else if (command === "animations off") applyVisualSettings({ ...visualSettings, animations: false }, ctx);
+      else if (command === "ui on") applyVisualSettings({ ...visualSettings, ui: true }, ctx);
+      else if (command === "ui off") applyVisualSettings({ ...visualSettings, ui: false }, ctx);
       else if (command === "quota on" && quotaCache) quotaCache.enabled = true;
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaCache.stop(); }
       else {
-        ctx.ui.notify("Usage: /jar [status|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        ctx.ui.notify("Usage: /jar [status|settings|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
       }
-      installUi(ctx);
+      if (!["animations on", "animations off", "ui on", "ui off"].includes(command)) installUi(ctx);
       ctx.ui.notify(`pi-jar: ${command}`, "info");
     }
   });

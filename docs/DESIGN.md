@@ -66,24 +66,28 @@ Rules:
 ### Wide: 100+ columns
 
 ```text
-jar claude-sonnet                                       ctx 58%
+claude-sonnet effort high                               ctx 58%
 EXP ◈ analyze  ·  BLD ◐ implement  ·  REV ◇  ·  git feature/auth
 ```
 
 ### Medium: 52–99 columns
 
 ```text
-jar claude-sonnet                    ctx 58%
+claude-sonnet effort medium          ctx 58%
 EXP ◈  ·  BLD ◐  ·  REV ◇
 ```
 
 ### Narrow: below 52 columns
 
 ```text
-jar model              EXP ◈ ctx 58%
+model effort low       EXP ◈ ctx 58%
 ```
 
-Roles only appear when explicitly published or in the labeled demo. Optional detail is trimmed at the right; glyphs and text remain meaningful without color. The footer keeps context visible at every width, adds Pi-reported session cost when space allows, and shows 5-hour/weekly usage only when a valid public quota or opt-in read-only OAuth fallback resolves it. At medium widths, quota may occupy a third line. The transient welcome shows animated warm fire with muted rising fumes above a **large, multi-row mathematical π**, with an empty row between fire and symbol. A smaller multi-row π remains on narrow terminals; motion-off freezes smoke and fire without hiding the symbol. It briefly lists available project/model/context/cost details, quota opt-in state and installed manager links; at narrow widths it condenses without replacing Pi's editor or header. Working messages use Pi's observed generation/tool events: themed words and icons can animate only while active; motion-off is static and idle has no repaint timer. `/jar hub` navigates to existing Team Mode and subagent managers; `/jar tasks` is a visibly separate pi-jar-owned to-do list. Pi-jar's question cards are custom only for its own prompts, while the rounded composer uses Pi's `CustomEditor` to preserve application keybindings and restores the prior editor via `/jar composer off`.
+Roles only appear when explicitly published or in the labeled demo. Optional detail is trimmed at the right; glyphs and text remain meaningful without color. The footer omits the decorative `jar` prefix; `DEMO` remains explicit when sample roles are enabled. Live model effort comes from Pi's thinking level, repaints when it changes and uses the semantic `thinkingOff`…`thinkingMax` colors. The footer keeps context visible at every width, adds Pi-reported session cost when space allows, and shows 5-hour/weekly usage only when a valid public quota or opt-in read-only OAuth fallback resolves it. At medium widths, quota may occupy a third line. The transient welcome shows eight restrained fixed-width frames of shaded amber/terracotta fire and muted rising fumes above a **wider, balanced, static multi-row mathematical π**, with an empty row between fire and symbol. Its Settings action responds to mouse clicks in opt-in fullscreen mode; `/jar settings` is the regular-mode keyboard path. A responsive overlay groups persisted pi-jar visual choices while keeping quota consent session-only. A smaller multi-row π remains on narrow terminals; motion-off freezes smoke and fire without hiding the symbol. It briefly lists available project/model/context/cost details, quota opt-in state and installed manager links; at narrow widths it condenses without replacing Pi's editor or header. Working messages use Pi's observed generation/tool events: themed words and icons can animate only while active; motion-off is static and idle has no repaint timer. `/jar hub` navigates to existing Team Mode and subagent managers; `/jar tasks` is a visibly separate pi-jar-owned to-do list. Pi-jar's question cards are custom only for its own prompts, while the rounded composer uses Pi's `CustomEditor` to preserve application keybindings and restores the prior editor via `/jar composer off`.
+
+## Separate conversation timeline
+
+`/jar history` is an overlay, not an altered native transcript. Pi's public `sessionManager.getBranch()` provides a snapshot of the active branch when opened; only visible message, compaction and branch-summary entries get timeline rows. The marker, turn number, author, optional timestamp, compact sanitized excerpt and selected-entry details follow a chronological card/gutter pattern. Reasoning blocks, hidden custom messages and image bytes are excluded; tool arguments expose only a short command/path hint. The UI indexes visible entries without copying tool output, pages 80 rows, lazily extracts 2 KiB / 30-line contiguous chunks, and bounds render height and width. Search is deliberately page-local and limited to the first 1024 characters per entry. It cannot and does not change Pi's stored session, native message styling or scrollback; fullscreen mouse routing is optional.
 
 ## Presets
 
