@@ -5,7 +5,7 @@ import type { Todo } from "./tasks.ts";
 import { TodoStore } from "./tasks.ts";
 
 const ACTIONS = ["list", "add", "done", "open", "edit", "delete"] as const;
-const Action = Type.Unsafe<(typeof ACTIONS)[number]>({ type: "string", enum: ACTIONS });
+const Action = Type.Unsafe<(typeof ACTIONS)[number]>({ type: "string", enum: ACTIONS as any });
 
 const Parameters = Type.Object({
   action: Action,
