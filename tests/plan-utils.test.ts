@@ -8,7 +8,6 @@ test("plan shell allowlist permits read-only inspection and pipelines", () => {
     "git diff --stat",
     "rg TODO src | head -20",
     "find src -type f",
-    "sed -n 1,80p README.md",
     "npm view typescript version"
   ]) assert.equal(isSafePlanCommand(command), true, command);
 });
@@ -22,6 +21,11 @@ test("plan shell allowlist blocks mutation and ambiguous shell syntax", () => {
     "find . -type f -fprint /tmp/files",
     "sort -o /tmp/out input.txt",
     "git log --output=/tmp/log",
+    "git diff --ext-diff",
+    "rg --pre 'touch /tmp/pwned' TODO .",
+    "sort --compress-program=touch README.md",
+    "date --set 2030-01-01",
+    "diff --output=/tmp/diff a b",
     "echo hello > file.txt",
     "cat package.json && npm install",
     "npm install lodash",
