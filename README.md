@@ -12,9 +12,9 @@ pi-jar is not just a color theme. It is a Pi package that combines:
 - observed Pi working states with steady, theme-colored wording and animated icons (static when motion is off);
 - publisher-driven teammate names and labels (including Gareng, Petruk or Bagong if a publisher uses them);
 - a responsive, softly rounded footer for model, colorized live thinking effort, session name, CWD, context percentage, session cost, optional quota, branch and extension statuses; configure fields through `/jar settings` or `/jar footer`;
-- a welcome that remains until the first interactive prompt, then dissolves away (or hides immediately with motion off), with layered flame silhouettes that bend and breathe instead of blinking, a wider pixel `π`, and a clickable Settings action that opens the full-screen settings view;
+- a welcome that remains until the first interactive prompt, then dissolves away (or hides immediately with motion off), with a centered tapered flame, a wider pixel `π`, a calmer landing-card hierarchy, and a Settings action that opens the full-screen settings view in mouse-capable fullscreen terminals;
 - a first-party, branch-aware native task tool that the agent is instructed to maintain automatically for multi-step work, plus a human-friendly `/jar tasks` view;
-- a rounded composer with a tiny animated terminal pet, the short Pi session/thread id beside it, native editor keybindings, and a truthful fallback when external integration state is unavailable;
+- a rounded composer with a tiny animated terminal pet and a human session title beside it; when Pi has no title, pi-jar derives a stable readable alias instead of exposing the raw thread id;
 - a centralized full-screen visual settings view with keyboard controls and clickable controls when Pi receives mouse events;
 - compact-by-default rendering for Pi's default read/shell/edit/write tools, with the real output or diff still available through click/Ctrl+E expansion;
 - a separate read-only `/jar history` conversation timeline for the active session branch.
@@ -58,6 +58,8 @@ The extension is loaded by the package automatically. Use:
 ```
 
 `/jar` and `/jar settings` open visual preferences in interactive mode; `/jar status` prints the status summary. Click `[ Settings ↗ ]` on the welcome when using Pi fullscreen (`pi --tui-mode fullscreen` or `pit --tui-mode fullscreen`); regular mode leaves clicks to terminal selection/scrollback, so use commands instead. In the pane, Tab switches Appearance/Footer, arrows move, Enter/Space or click changes a value, and Esc closes. Visual preferences (accent, motion, composer, UI and footer fields) are saved in `~/.pi/agent/pi-jar-settings.json` (or Pi's configured agent directory). Existing `pi-jar-footer.json` choices are imported when the new file is absent; that legacy file remains unchanged afterward. Later edits by a downgraded version will not sync back. Quota requests remain off by default and session-only.
+
+`Ctrl+Alt+S` opens pi-jar settings directly in interactive TUI mode.
 
 `/jar history` opens a **separate** read-only conversation timeline; Pi's native transcript is not restyled or changed. It snapshots the active branch on open (reopen after branching or new replies), pages through 80 visible entries at a time (`p` older, `o` newer), and shows user/assistant turns, tool calls/results, compactions and branch summaries; hidden custom entries, reasoning text and image payloads stay hidden. Arrows/j/k and PgUp/PgDn navigate; `e`/Enter expands details, `d`/`u` scroll details, `[`/`]` step through contiguous output segments of at most 2 KiB/30 lines, `/` searches up to the first 1024 characters of each entry **on the current page**, `n`/`N` advances through matches, Esc closes. Fullscreen supports click/wheel; regular mode is keyboard-only. The view sanitizes terminal control sequences but still shows ordinary session text, which may contain sensitive material; it never writes or logs that content.
 
