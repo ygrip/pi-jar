@@ -82,7 +82,7 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
         options.forEach((option, at) => {
           const active = selected === at;
           const marker = multi ? (checked.has(at) ? "☑" : "☐") : (active ? "●" : "○");
-          const number = at < 9 ? String(at + 1) + "." : "  ";
+          const number = String(at + 1).padStart(2, " ") + ".";
           lines.push(fit(theme.fg(active ? "accent" : "muted", "│ " + (active ? "❯ " : "  ") + marker + " " + number + " " + option.label), width));
           if (option.description) lines.push(fit(theme.fg("dim", "│      " + option.description), width));
         });
