@@ -2,7 +2,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { basename } from "node:path";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Key, truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
@@ -147,17 +147,18 @@ export default function piJar(pi: ExtensionAPI): void {
         return { invalidate() {}, handleMouse(event: TuiMouseEvent) {
           if (event.button !== "left" || welcomeDismiss
             || !welcomeSettingsHit(visibleLines, event.x, event.y)) return;
-          // Fullscreen dispatch synthesizes click only when press was handled first.
-          if (event.type === "press") return { handled: true };
-          if (event.type !== "click") return;
+          // Act on press instead of waiting for a synthesized click. This is more
+          // reliable across fullscreen terminals and multiplexers while keeping
+          // the target scoped to the rendered Settings control.
+          if (event.type !== "press") return { handled: true };
           queueMicrotask(() => { stopWelcome(ctx); void openSettings(ctx); });
-          return { handled: true };
+          return { handled: true, capture: true };
         }, render(width: number) {
           const statuses = welcomeStatuses();
           const live = collectStatuses(statuses, Date.now());
           const quota = quotaCache?.get(ctx.model?.provider, statuses, Date.now());
           const lines = welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), {
-            ...info, roles: live.roles, advisor: statuses.get("advisor") ?? statuses.get("pi-jar.advisor"),
+            ...info, roles: live.roles,
             quota: quota?.week?.used ?? quota?.fiveHour?.used
           });
           if (!welcomeDismiss) { visibleLines = lines; return lines; }
@@ -354,11 +355,11 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); updateCost(ctx); });
   pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
-  pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
+  pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); composer.refreshSession(ctx); });
   pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
   pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
-  pi.on("session_info_changed", (_event, _ctx) => footerTui?.requestRender());
+  pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); footerTui?.requestRender(); });
   pi.on("session_shutdown", (_event, ctx) => {
     stopWelcome(ctx);
     composer.disable(ctx);
@@ -372,6 +373,14 @@ export default function piJar(pi: ExtensionAPI): void {
     disposeFooter?.();
     disposeFooter = undefined;
     demo = false;
+  });
+
+  pi.registerShortcut(Key.ctrlAlt("s"), {
+    description: "Open pi-jar settings",
+    handler: async (ctx) => {
+      if (!ctx.hasUI || ctx.mode !== "tui") return;
+      await openSettings(ctx);
+    }
   });
 
   pi.registerCommand("jar", {
