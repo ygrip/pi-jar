@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { ComposerStyle, composerIcon, roundedInput } from "../src/composer.ts";
+import { ComposerStyle, composerIcon, roundedInput, shortSessionId } from "../src/composer.ts";
 import piJar from "../extensions/index.ts";
 import { promptChoice, promptText, todoView } from "../src/dialogs.ts";
 import { TASK_ENTRY, TodoStore, type TodoEvent } from "../src/tasks.ts";
+import { registerTaskTool } from "../src/task-tool.ts";
 import { WorkingState } from "../src/working.ts";
 
 const theme = { fg: (_color: string, text: string) => text, borderColor: (text: string) => text };
@@ -94,6 +95,21 @@ test("extension reconstructs pi-jar tasks on session branch navigation without t
   events.get("session_shutdown")?.({}, ctx);
 });
 
+test("native jar_todo tool tells the agent to track multi-step work and updates branch-aware state", async () => {
+  let tool: any;
+  let changes = 0;
+  const store = new TodoStore(() => {});
+  registerTaskTool({ registerTool(definition: unknown) { tool = definition; } } as never, () => store, () => { changes++; });
+  assert.ok(tool);
+  assert.match(tool.promptGuidelines.join(" "), /without waiting for the user/);
+  const added = await tool.execute("one", { action: "add", title: "Inspect repo" }, undefined, undefined, {} as never);
+  assert.match(added.content[0].text, /Inspect repo/);
+  const id = store.all()[0]!.id;
+  await tool.execute("two", { action: "done", id }, undefined, undefined, {} as never);
+  assert.equal(store.get(id)?.done, true);
+  assert.equal(changes, 2);
+});
+
 test("task dialog is keyboard-accessible, width bounded and filters without deleting another manager's state", async () => {
   let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
   const ctx = {
@@ -121,22 +137,26 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
   assert.equal(await answer, "yes");
 });
 
-test("rounded input fits and uses a steady accent while focused", () => {
+test("rounded input fits, shows the pet sprite and exposes the short session id", () => {
   const paint = (text: string) => `\x1b[36m${text}\x1b[0m`;
   const lines = ["top", "draft", "bottom"];
-  const idle = roundedInput(lines, 28, false, theme as never, paint);
-  const focused = roundedInput(lines, 28, true, theme as never, paint);
-  assert.match(focused[0] ?? "", /╭─ ◇ /);
+  const idle = roundedInput(lines, 40, false, theme as never, paint);
+  const focused = roundedInput(lines, 40, true, theme as never, paint, composerIcon("idle"), "abcdef12");
+  assert.ok(focused[0]?.includes("▟•ᴗ•▙"));
+  assert.ok(focused[0]?.includes("session abcdef12"));
+  const widths = new Set<number>();
   for (const phase of ["idle", "generating", "tool", "waiting"] as const) {
-    assert.equal(visibleWidth(composerIcon(phase, 2)), 1);
-    assert.ok(roundedInput(lines, 28, true, theme as never, paint, composerIcon(phase, 2))[0]?.includes(composerIcon(phase, 2)));
+    widths.add(visibleWidth(composerIcon(phase, 2)));
+    assert.ok(roundedInput(lines, 40, true, theme as never, paint, composerIcon(phase, 2))[0]?.includes(composerIcon(phase, 2)));
   }
+  assert.equal(widths.size, 1);
+  assert.ok([...widths][0]! > 1);
+  assert.equal(shortSessionId("019a0a2b-f81d-7350-8188-abcdef123456"), "abcdef12");
   assert.match(focused[1] ?? "", /│.*draft.*│/);
   assert.match(focused[0] ?? "", /\x1b\[36m/);
-  assert.deepEqual(focused, roundedInput(lines, 28, true, theme as never, paint));
   assert.notDeepEqual(idle, focused);
-  for (const width of [4, 8, 16, 28]) {
-    assert.ok(roundedInput(lines, width, true, theme as never, paint).every((line) => visibleWidth(line) <= width));
+  for (const width of [4, 8, 16, 28, 40]) {
+    assert.ok(roundedInput(lines, width, true, theme as never, paint, composerIcon("idle"), "abcdef12").every((line) => visibleWidth(line) <= width));
   }
 });
 
@@ -144,7 +164,7 @@ test("composer enable failure restores a previously installed editor", () => {
   const original = () => ({ render: () => ["editor"], getText: () => "draft", setText() {}, invalidate() {}, handleInput() {} });
   let current: Function | undefined = original;
   const style = new ComposerStyle();
-  const ctx = { hasUI: true, mode: "tui", ui: {
+  const ctx = { hasUI: true, mode: "tui", sessionManager: { getSessionId: () => "019a0a2b-f81d-7350-8188-abcdef123456" }, ui: {
     getEditorComponent: () => current,
     setEditorComponent: (factory: Function | undefined) => { current = factory; },
     getEditorText: () => "draft",
@@ -179,7 +199,8 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.notEqual(current, original);
   assert.equal(draft, "keep this draft");
   const decorated = current?.({}, theme, {}) as { render(width: number): string[]; setText(text: string): void };
-  assert.match(decorated.render(80)[0] ?? "", /╭─ ◇ /);
+  assert.ok(decorated.render(80)[0]?.includes("▟•ᴗ•▙"));
+  assert.ok(decorated.render(80)[0]?.includes("session abcdef12"));
   decorated.setText("editing");
   style.disable(ctx as never);
   assert.equal(current, original);
@@ -205,7 +226,7 @@ test("composer icon tracks observed phases, honors motion-off and stops after in
   });
   let redraws = 0;
   const tui = { requestRender() { redraws++; } };
-  const ctx = { hasUI: true, mode: "tui", ui: {
+  const ctx = { hasUI: true, mode: "tui", sessionManager: { getSessionId: () => "thread-12345678" }, ui: {
     getEditorComponent: () => current,
     setEditorComponent: (factory: Function | undefined) => { current = factory; },
     getEditorText: () => "existing draft", setEditorText() {}
@@ -214,19 +235,20 @@ test("composer icon tracks observed phases, honors motion-off and stops after in
   assert.equal(style.enable(ctx as never), true);
   const editor = current?.(tui, theme, {}) as { render(width: number): string[] };
   const icon = () => editor.render(40)[0] ?? "";
-  assert.match(icon(), /◇/);
+  assert.ok(icon().includes("▟•ᴗ•▙"));
+  assert.ok(icon().includes("session 12345678"));
   style.setActivity("generating", true);
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.ok(redraws > 0);
-  assert.match(icon(), /◈/);
+  assert.ok(icon().includes("▟•o•▙"));
   style.setActivity("tool", false);
-  assert.match(icon(), /◐/);
+  assert.ok(icon().includes("▟>ᴗ<▙"));
   const stopped = redraws;
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.equal(redraws, stopped);
   style.setActivity("generating", true);
   style.setActivity("idle", true); // interrupted
-  assert.match(icon(), /◇/);
+  assert.ok(icon().includes("▟•ᴗ•▙"));
   const stoppedAfterInterrupt = redraws;
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.equal(redraws, stoppedAfterInterrupt);
