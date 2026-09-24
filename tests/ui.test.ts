@@ -36,7 +36,7 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
     if (width >= 80) {
       const before = welcomeLines(width, 0, plain.fg, info);
       const after = welcomeLines(width, 1, plain.fg, info);
-      const left = (lines: string[]) => lines.map((line) => stripTerminalSequences(line).slice(0, 24).trimEnd());
+      const left = (lines: string[]) => lines.map((line) => stripTerminalSequences(line).slice(0, 26).trimEnd());
       assert.notDeepEqual(left(before).slice(0, 11), left(after).slice(0, 11)); // flame and embers breathe
       assert.deepEqual(left(before).slice(11), left(after).slice(11)); // π and spacing stay grounded
       assert.ok(left(before).slice(0, 11).some((line) => line.includes("████")));
