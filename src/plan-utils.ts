@@ -15,6 +15,7 @@ function safeGit(tokens: string[]): boolean {
   if (!["status", "log", "diff", "show", "branch", "remote", "grep", "ls-files", "rev-parse", "describe"].includes(sub)) return false;
   if (sub === "branch" && GIT_MUTATION.test(tokens.slice(2).join(" "))) return false;
   if (sub === "remote" && tokens.length > 2 && !["-v", "show", "get-url"].includes(tokens[2] ?? "")) return false;
+  if (tokens.some((token) => token === "--output" || token.startsWith("--output="))) return false;
   return true;
 }
 
