@@ -1,17 +1,10 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { StringEnum, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { Todo } from "./tasks.ts";
 import { TodoStore } from "./tasks.ts";
 
-const Action = Type.Union([
-  Type.Literal("list"),
-  Type.Literal("add"),
-  Type.Literal("done"),
-  Type.Literal("open"),
-  Type.Literal("edit"),
-  Type.Literal("delete")
-]);
+const Action = StringEnum(["list", "add", "done", "open", "edit", "delete"] as const);
 
 const Parameters = Type.Object({
   action: Action,
@@ -50,7 +43,7 @@ export function registerTaskTool(
     promptSnippet: "Track multi-step work with jar_todo; keep the checklist synchronized as you work.",
     promptGuidelines: [
       "For any request requiring two or more substantive actions, use jar_todo proactively without waiting for the user: list current tasks, add any missing actionable steps, and mark each step done as it completes.",
-      "Keep task titles concise and outcome-oriented. Reuse matching open tasks instead of creating duplicates, and do not create tasks for trivial single-step questions."
+      "When using jar_todo, keep titles concise and outcome-oriented, reuse matching open tasks instead of creating duplicates, and do not create tasks for trivial single-step questions."
     ],
     parameters: Parameters,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
