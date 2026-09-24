@@ -19,7 +19,7 @@ after(() => {
   rmSync(testAgentDir, { recursive: true, force: true });
 });
 
-test("layered standalone flame animates above π; welcome and footer fit terminal widths", () => {
+test("layered flame silhouettes animate above π; welcome and footer fit terminal widths", () => {
   const info = { project: "pi-jar", model: "test-model", context: "ctx 82%", cost: "cost $1.23", managers: ["tasks"] as const, quotaEnabled: false };
   for (const width of [12, 16, 24, 40, 64, 80, 120]) {
     for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) assert.ok(welcomeLines(width, frame, plain.fg, info).every((line) => visibleWidth(line) <= width));
@@ -36,9 +36,9 @@ test("layered standalone flame animates above π; welcome and footer fit termina
     if (width >= 80) {
       const before = welcomeLines(width, 0, plain.fg, info);
       const after = welcomeLines(width, 1, plain.fg, info);
-      assert.notDeepEqual(before.slice(0, 3), after.slice(0, 3)); // flickering tongues
-      assert.deepEqual(before.slice(3), after.slice(3)); // flame body, π and details stay put
-      assert.ok(before.slice(0, 9).some((line) => line.includes("░▓██████████▓░")));
+      assert.notDeepEqual(before.slice(0, 9), after.slice(0, 9)); // the whole flame breathes instead of blinking tips
+      assert.deepEqual(before.slice(9), after.slice(9)); // π and details stay grounded
+      assert.ok(before.slice(0, 9).some((line) => line.includes("██████")));
       assert.ok(before.slice(9, 14).some((line) => line.includes("██")));
       assert.doesNotMatch(before.join(" "), /\\_+|\|\||\.\-\\/); // no grail
       assert.match(text, /PROJECT.*pi-jar/);
@@ -167,7 +167,8 @@ test("welcome Settings action opens the pointer-accessible pane without submitti
         if (factory) widgets.set(key, factory({ requestRender() {} }, plain));
         else widgets.delete(key);
       },
-      async custom(factory: Function) {
+      async custom(factory: Function, options?: unknown) {
+        assert.equal(options, undefined, "settings uses Pi's full custom screen, not an overlay");
         opened++;
         const pane = factory({ requestRender() {} }, plain, {}, () => {});
         assert.ok(pane.render(64).join(" ").includes("settings"));
