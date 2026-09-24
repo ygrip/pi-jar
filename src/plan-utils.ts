@@ -1,21 +1,23 @@
 import { cleanText } from "./status.ts";
 
 const SIMPLE_READ_COMMANDS = new Set([
-  "cat", "head", "tail", "grep", "rg", "ls", "pwd", "wc", "sort", "uniq", "diff",
-  "file", "stat", "du", "df", "tree", "which", "whereis", "printenv", "uname", "date",
-  "ps", "fd", "bat", "eza", "realpath", "basename", "dirname"
+  "cat", "head", "tail", "grep", "rg", "ls", "pwd", "wc", "sort", "diff",
+  "file", "stat", "du", "df", "tree", "which", "whereis", "uname", "date",
+  "ps", "fd", "eza", "realpath", "basename", "dirname"
 ]);
 
 const SHELL_MUTATION = /(?:[;&]|\|\||&&|`|\$\(|\$\{|>|<|\n|\r)/;
-const FIND_MUTATION = /(?:^|\s)-(?:delete|exec|execdir|ok|okdir)\b/;
+const FIND_MUTATION = /(?:^|\s)-(?:delete|exec|execdir|ok|okdir|fprint|fprintf|fls)\b/;
 const GIT_MUTATION = /(?:^|\s)(?:-d|-D|-m|-M|--delete|--move|--set-upstream-to|--unset-upstream)\b/;
+const OUTPUT_FLAG = /(?:^|\s)(?:--output(?:=|\s)|-o(?:\s|$))/;
 
 function safeGit(tokens: string[]): boolean {
   const sub = tokens[1] ?? "";
-  if (!["status", "log", "diff", "show", "branch", "remote", "grep", "ls-files", "rev-parse", "describe"].includes(sub)) return false;
-  if (sub === "branch" && GIT_MUTATION.test(tokens.slice(2).join(" "))) return false;
+  if (!["status", "log", "diff", "show", "remote", "grep", "ls-files", "rev-parse", "describe"].includes(sub)) return false;
+  const rest = tokens.slice(2).join(" ");
+  if (GIT_MUTATION.test(rest) || OUTPUT_FLAG.test(rest)) return false;
+  if (tokens.some((token) => ["--ext-diff", "--textconv"].includes(token))) return false;
   if (sub === "remote" && tokens.length > 2 && !["-v", "show", "get-url"].includes(tokens[2] ?? "")) return false;
-  if (tokens.some((token) => token === "--output" || token.startsWith("--output="))) return false;
   return true;
 }
 
@@ -28,12 +30,17 @@ function safeSegment(segment: string): boolean {
   const tokens = segment.trim().split(/\s+/).filter(Boolean);
   const command = tokens[0] ?? "";
   if (!command) return false;
-  if (command === "sort" && tokens.some((token, index) => index > 0 && (token === "-o" || token.startsWith("--output")))) return false;
-  if (SIMPLE_READ_COMMANDS.has(command)) return true;
+
+  if (SIMPLE_READ_COMMANDS.has(command)) {
+    if (OUTPUT_FLAG.test(segment)) return false;
+    if (command === "sort" && tokens.some((token) => token.startsWith("--compress-program"))) return false;
+    if (command === "date" && tokens.some((token) => token === "-s" || token.startsWith("--set"))) return false;
+    if (command === "rg" && tokens.some((token) => token === "--pre" || token.startsWith("--pre="))) return false;
+    return true;
+  }
   if (command === "find") return !FIND_MUTATION.test(segment);
   if (command === "git") return safeGit(tokens);
   if (["npm", "pnpm", "yarn", "bun"].includes(command)) return safePackageQuery(tokens);
-  if (command === "sed") return tokens.includes("-n") && !tokens.some((token) => /^-i/.test(token));
   return false;
 }
 
