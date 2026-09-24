@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Container, stripTerminalSequences, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import piJar from "../extensions/index.ts";
 import { renderFooter, type FooterView } from "../src/footer.ts";
-import { welcomeLines } from "../src/welcome.ts";
+import { HOPEFUL_WELCOME_MESSAGES, hopefulWelcomeMessage, welcomeLines } from "../src/welcome.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 
 const plain = { fg: (_color: string, value: string) => value };
@@ -32,29 +32,31 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
       if (width >= 72) assert.match(text, /\/tasks/);
       assert.doesNotMatch(text, /\/subagents-fleet/);
     }
-    if (width === 40) assert.ok(welcomeLines(width, 0, plain.fg, info).length <= 28);
+    if (width === 40) assert.ok(welcomeLines(width, 0, plain.fg, info).length <= 32);
     if (width >= 80) {
       const before = welcomeLines(width, 0, plain.fg, info);
       const after = welcomeLines(width, 1, plain.fg, info);
-      const left = (lines: string[]) => lines.map((line) => stripTerminalSequences(line).slice(0, 24).trimEnd());
-      assert.notDeepEqual(left(before).slice(0, 10), left(after).slice(0, 10)); // the flame breathes
-      assert.deepEqual(left(before).slice(10), left(after).slice(10)); // π and left-column spacing stay grounded
-      assert.ok(left(before).slice(0, 10).some((line) => line.includes("████")));
-      assert.ok(left(before).slice(10, 15).some((line) => line.includes("██")));
+      const left = (lines: string[]) => lines.map((line) => stripTerminalSequences(line).slice(0, 26).trimEnd());
+      assert.notDeepEqual(left(before).slice(0, 11), left(after).slice(0, 11)); // flame and embers breathe
+      assert.deepEqual(left(before).slice(11), left(after).slice(11)); // π and spacing stay grounded
+      assert.ok(left(before).slice(0, 11).some((line) => line.includes("████")));
+      assert.ok(left(before).slice(11, 18).some((line) => line.includes("██")));
       const centerOf = (line: string) => {
         const start = line.search(/\S/);
         const end = line.length - 1 - [...line].reverse().join("").search(/\S/);
         return (start + end) / 2;
       };
-      assert.ok(Math.abs(centerOf(left(before)[9]!) - centerOf(left(before)[10]!)) <= 1, "flame and π share the same visual center");
+      assert.ok(Math.abs(centerOf(left(before)[10]!) - centerOf(left(before)[11]!)) <= 1, "flame and π share the same visual center");
+      assert.equal(stripTerminalSequences(before.at(-1) ?? ""), "");
+      assert.equal(stripTerminalSequences(before.at(-2) ?? ""), "");
       assert.doesNotMatch(before.join(" "), /\\_+|\|\||\.\-\\/); // no grail
       assert.match(text, /PROJECT.*pi-jar/);
       assert.match(text, /role-assistant/);
     }
     if (width === 24) {
       for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) {
-        const flame = welcomeLines(width, frame, plain.fg, info).slice(0, 7);
-        assert.ok(flame.every((row) => visibleWidth(row) === 19), "fixed flame cell footprint");
+        const flame = welcomeLines(width, frame, plain.fg, info).slice(0, 8);
+        assert.ok(flame.every((row) => visibleWidth(row) === 21), "fixed flame cell footprint");
       }
     }
     const view: FooterView = {
@@ -68,6 +70,17 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
     if (width >= 52) assert.match(lines.join(" "), /5h 14%.*week 50%/);
     if (width >= 52) assert.match(lines.join(" "), /cost \$1\.23/);
     if (width < 52) assert.doesNotMatch(lines.join(" "), /5h 14%/);
+  }
+});
+
+test("hopeful welcome copy is varied, bounded and injectable per render", () => {
+  assert.equal(hopefulWelcomeMessage(() => 0), HOPEFUL_WELCOME_MESSAGES[0]);
+  assert.equal(hopefulWelcomeMessage(() => 0.999999), HOPEFUL_WELCOME_MESSAGES.at(-1));
+  assert.ok(new Set(HOPEFUL_WELCOME_MESSAGES).size >= 6);
+  for (const message of HOPEFUL_WELCOME_MESSAGES) {
+    assert.match(message, /light|spark|step|path|work|begin|night/i);
+    const text = welcomeLines(100, 0, plain.fg, { project: "pi-jar", message }).join(" ");
+    assert.ok(text.includes(message));
   }
 });
 
@@ -194,10 +207,10 @@ test("welcome Settings action opens the pointer-accessible pane without submitti
   for (const width of [24, 40, 80]) {
     const widget = widgets.get("pi-jar.welcome")!;
     const lines = widget.render(width);
-    const y = lines.findIndex((line) => stripTerminalSequences(line).includes(width < 32 ? "/jar settings" : "[ Settings ↗ ]"));
+    const y = lines.findIndex((line) => stripTerminalSequences(line).includes(width < 32 ? "/jar settings" : "[ ⚙ Settings ↗ ]"));
     assert.ok(y >= 0);
     const text = stripTerminalSequences(lines[y]!);
-    const label = width < 32 ? "/jar settings" : "[ Settings ↗ ]";
+    const label = width < 32 ? "/jar settings" : "[ ⚙ Settings ↗ ]";
     const x = visibleWidth(text.slice(0, text.indexOf(label))) + 3;
     const root = new Container();
     root.addChild({ render: () => ["above"], invalidate() {} });
@@ -218,3 +231,57 @@ test("welcome Settings action opens the pointer-accessible pane without submitti
   assert.equal(widgets.has("pi-jar.welcome"), false);
   events.get("session_shutdown")?.({}, ctx);
 });
+
+test("welcome Settings is clickable in regular mode and restores terminal mouse reporting", async () => {
+  const events = new Map<string, Function>();
+  let widget: Component | undefined;
+  let listener: ((data: string) => { consume?: boolean } | undefined) | undefined;
+  let previousLines: string[] = [];
+  const writes: string[] = [];
+  let opened = 0;
+  const tui = {
+    mode: "regular",
+    requestRender() {},
+    terminal: { write(data: string) { writes.push(data); } },
+    addInputListener(fn: typeof listener) {
+      listener = fn;
+      return () => { listener = undefined; };
+    },
+    captureRenderState() { return { previousLines, previousViewportTop: 0 }; }
+  };
+  const ctx = {
+    hasUI: true, mode: "tui", cwd: "/not-a-real-pi-jar-project", isIdle: () => true,
+    model: { id: "test" }, sessionManager: { getBranch: () => [] },
+    getContextUsage: () => ({ percent: 0 }),
+    ui: {
+      setWorkingIndicator() {}, setFooter() {}, notify() {},
+      setWidget(_key: string, factory?: Function) {
+        widget = factory ? factory(tui, plain) : undefined;
+      },
+      async custom(factory: Function) {
+        opened++;
+        const pane = factory({ requestRender() {} }, plain, {}, () => {});
+        pane.handleInput("\x1b");
+      }
+    }
+  };
+  piJar({
+    on: (name: string, handler: Function) => events.set(name, handler),
+    getCommands: () => [], registerCommand() {}
+  } as never);
+  events.get("session_start")?.({}, ctx);
+  assert.ok(widget);
+  previousLines = widget!.render(120);
+  const y = previousLines.findIndex((line) => stripTerminalSequences(line).includes("[ ⚙ Settings ↗ ]"));
+  assert.ok(y >= 0);
+  const row = stripTerminalSequences(previousLines[y]!);
+  const x = visibleWidth(row.slice(0, row.indexOf("[ ⚙ Settings ↗ ]"))) + 3;
+  assert.ok(listener);
+  listener!(`\x1b[<0;${x + 1};${y + 1}M`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(opened, 1);
+  assert.ok(writes.some((value) => value.includes("\x1b[?1000h")));
+  assert.ok(writes.some((value) => value.includes("\x1b[?1000l")));
+  assert.equal(listener, undefined);
+});
+
