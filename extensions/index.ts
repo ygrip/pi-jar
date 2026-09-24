@@ -458,7 +458,7 @@ export default function piJar(pi: ExtensionAPI): void {
     const goal = goals?.current();
     let keptGoal = false;
     const messages = [...event.messages].reverse().filter((raw) => {
-      const message = raw as Record<string, unknown>;
+      const message = raw as { customType?: string };
       if (message.customType !== "pi-jar.goal-context") return true;
       if (!goal || keptGoal) return false;
       keptGoal = true;
