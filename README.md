@@ -104,8 +104,8 @@ Run `/goal` to edit/view it interactively, or `/goal clear` to remove it.
 Roles: `default`, `smol`, `slow`, `plan`, `commit`, `task`, and `advisor`. Use `/roles ROLE` to activate one immediately. Headless configuration is also available:
 
 ```text
-/roles set plan anthropic/claude-sonnet-5 high
-/roles set smol openai-codex/gpt-5.6-codex-mini low
+/roles set plan PROVIDER/MODEL high
+/roles set smol PROVIDER/MODEL low
 /roles clear advisor
 ```
 
