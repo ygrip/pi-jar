@@ -246,11 +246,11 @@ function addEmbers(lines: readonly string[], frame: number): string[] {
 
 function paintFlame(line: string): string {
   return line
-    .replace(/@+/g, (part) => rgb(FIRE_RGB.inner, "█".repeat(part.length)))
     .replace(/█+/g, (part) => rgb(FIRE_RGB.core, part))
     .replace(/▓+/g, (part) => rgb(FIRE_RGB.hot, part))
     .replace(/▒+/g, (part) => rgb(FIRE_RGB.orange, part))
     .replace(/░+/g, (part) => rgb(FIRE_RGB.edge, part))
+    .replace(/@+/g, (part) => rgb(FIRE_RGB.inner, "█".repeat(part.length)))
     .replace(/S+/g, (part) => rgb(FIRE_RGB.spark, "■".repeat(part.length)))
     .replace(/s+/g, (part) => rgb(FIRE_RGB.ember, "▪".repeat(part.length)))
     .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, "·".repeat(part.length)));
