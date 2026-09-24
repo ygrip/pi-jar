@@ -44,14 +44,14 @@ function roleColor(role: RoleStatus): Color {
 export function renderFooter(view: FooterView, width: number, theme: FooterTheme): string[] {
   if (width <= 0) return [];
   const show = view.settings ?? DEFAULT_FOOTER_SETTINGS;
-  if (!Object.entries(show).some(([field, enabled]) => enabled && (field !== "memory" || !!view.memory))) return [];
+  if (!view.goal && !Object.entries(show).some(([field, enabled]) => enabled && (field !== "memory" || !!view.memory))) return [];
   // Keep tiny terminals unframed so context and urgent role status stay readable.
   const framed = width >= 32;
   const contentWidth = framed ? width - 4 : width;
   const roles = show.roles ? [...view.roles].sort((a, b) => Number(b.state === "failed") - Number(a.state === "failed")) : [];
   const primary = roles.find((role) => role.state === "failed") ?? roles.find((role) => ACTIVE_STATES.has(role.state));
   const model = cleanText(view.model, 24) || "no-model";
-  const context = cleanText(view.context, 12) || "ctx ?";
+  const context = cleanText(view.context, 12) || "ctx ?";\n  const goal = view.goal ? cleanText(view.goal, 240) : "";
   const quota = view.quota;
   const windows = [quota?.fiveHour && `5h ${Math.round(quota.fiveHour.used)}%`, quota?.week && `week ${Math.round(quota.week.used)}%`].filter((value): value is string => !!value);
   const cost = view.cost ? cleanText(view.cost, 20) : undefined;
