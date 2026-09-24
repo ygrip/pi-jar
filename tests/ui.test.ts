@@ -36,17 +36,20 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
     if (width >= 80) {
       const before = welcomeLines(width, 0, plain.fg, info);
       const after = welcomeLines(width, 1, plain.fg, info);
-      const left = (lines: string[]) => lines.map((line) => stripTerminalSequences(line).slice(0, 26).trimEnd());
-      assert.notDeepEqual(left(before).slice(0, 11), left(after).slice(0, 11)); // flame and embers breathe
-      assert.deepEqual(left(before).slice(11), left(after).slice(11)); // π and spacing stay grounded
-      assert.ok(left(before).slice(0, 11).some((line) => line.includes("████")));
-      assert.ok(left(before).slice(11, 18).some((line) => line.includes("██")));
+      const left = (lines: string[]) => lines.map((line) => stripTerminalSequences(line).slice(0, 28).trimEnd());
+      assert.notDeepEqual(left(before).slice(0, 13), left(after).slice(0, 13)); // flame and embers breathe
+      assert.deepEqual(left(before).slice(13), left(after).slice(13)); // π and spacing stay grounded
+      assert.ok(left(before).slice(0, 13).some((line) => line.includes("████")));
+      assert.ok(left(before).slice(13, 20).some((line) => line.includes("██")));
+      assert.ok(Array.from({ length: 8 }, (_, frame) => welcomeLines(width, frame, plain.fg, info).join(""))
+        .some((rendered) => stripTerminalSequences(rendered).includes("■")), "at least one large ember spark is visible");
+      assert.ok(before.join("").includes("\x1b[38;2;255;106;0m"), "inner flame uses a distinct orange pocket");
       const centerOf = (line: string) => {
         const start = line.search(/\S/);
         const end = line.length - 1 - [...line].reverse().join("").search(/\S/);
         return (start + end) / 2;
       };
-      assert.ok(Math.abs(centerOf(left(before)[10]!) - centerOf(left(before)[11]!)) <= 1, "flame and π share the same visual center");
+      assert.ok(Math.abs(centerOf(left(before)[12]!) - centerOf(left(before)[13]!)) <= 1, "flame and π share the same visual center");
       assert.equal(stripTerminalSequences(before.at(-1) ?? ""), "");
       assert.equal(stripTerminalSequences(before.at(-2) ?? ""), "");
       assert.doesNotMatch(before.join(" "), /\\_+|\|\||\.\-\\/); // no grail
@@ -56,7 +59,7 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
     if (width === 24) {
       for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) {
         const flame = welcomeLines(width, frame, plain.fg, info).slice(0, 8);
-        assert.ok(flame.every((row) => visibleWidth(row) === 21), "fixed flame cell footprint");
+        assert.ok(flame.every((row) => visibleWidth(row) === 23), "fixed flame cell footprint");
       }
     }
     const view: FooterView = {
