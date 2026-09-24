@@ -1,10 +1,11 @@
-import { StringEnum, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { Todo } from "./tasks.ts";
 import { TodoStore } from "./tasks.ts";
 
-const Action = StringEnum(["list", "add", "done", "open", "edit", "delete"] as const);
+const ACTIONS = ["list", "add", "done", "open", "edit", "delete"] as const;
+const Action = Type.Unsafe<(typeof ACTIONS)[number]>({ type: "string", enum: ACTIONS });
 
 const Parameters = Type.Object({
   action: Action,
