@@ -22,7 +22,7 @@ function compactText(text: string, max = 72): string {
   return clean.length <= max ? clean : clean.slice(0, Math.max(0, max - 1)) + "…";
 }
 
-function fullText(text: string, theme: { fg(color: string, text: string): string }): Text {
+function fullText(text: string, theme: any): Text {
   if (!text) return new Text(theme.fg("dim", "(no output)"), 0, 0);
   return new Text(text.split("\n").map((line) => theme.fg("toolOutput", line)).join("\n"), 0, 0);
 }
@@ -61,7 +61,7 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
       if (isPartial) return new Text(theme.fg("warning", "reading…"), 0, 0);
       const text = outputText(result);
       if (expanded) return fullText(text, theme);
-      const count = text.split("\n").length;
+      const count = text ? text.split("\n").length : 0;
       return new Text(theme.fg("muted", `${count} line${count === 1 ? "" : "s"}${expandHint}`), 0, 0);
     }
   });
@@ -110,9 +110,11 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "write", label: "write", description: seed.write.description, parameters: seed.write.parameters,
     async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).write.execute(id, params, signal, onUpdate); },
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const count = args.content.split("\n").length;
-      return new Text(theme.fg("toolTitle", theme.bold("write ")) + theme.fg("accent", args.path) + theme.fg("dim", ` · ${count} lines`), 0, 0);
+      let text = theme.fg("toolTitle", theme.bold("write ")) + theme.fg("accent", args.path) + theme.fg("dim", ` · ${count} lines`);
+      if (context.expanded) text += "\n" + args.content.split("\n").map((line) => theme.fg("toolOutput", line)).join("\n");
+      return new Text(text, 0, 0);
     },
     renderResult(result, { expanded, isPartial }, theme) {
       if (isPartial) return new Text(theme.fg("warning", "writing…"), 0, 0);
