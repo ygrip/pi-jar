@@ -152,6 +152,37 @@ test("hub dispatches only installed native managers and never invents unavailabl
   assert.equal(welcome(), undefined);
 });
 
+test("task list leaves a blank row before the composer", async () => {
+  const events = new Map<string, Function>();
+  const widgets = new Map<string, Component>();
+  let tool: any;
+  const ctx = {
+    hasUI: true, mode: "tui", cwd: "/not-a-real-pi-jar-project", isIdle: () => true,
+    model: { id: "test" }, sessionManager: { getBranch: () => [] },
+    getContextUsage: () => ({ percent: 0 }),
+    ui: {
+      setWorkingIndicator() {}, setFooter() {}, notify() {},
+      setWidget(key: string, factory?: Function) {
+        if (factory) widgets.set(key, factory({ requestRender() {} }, plain));
+        else widgets.delete(key);
+      }
+    }
+  };
+  piJar({
+    on: (name: string, handler: Function) => events.set(name, handler),
+    registerTool: (definition: unknown) => { if ((definition as { name?: string }).name === "jar_todo") tool = definition; },
+    appendEntry() {}, getCommands: () => [], registerCommand() {}
+  } as never);
+  events.get("session_start")?.({}, ctx);
+  assert.equal(widgets.has("pi-jar.todos"), false, "empty list adds no spacer");
+  await tool.execute("task", { action: "add", title: "Make room" }, undefined, undefined, ctx);
+  const rows = widgets.get("pi-jar.todos")?.render(40);
+  assert.ok(rows?.some((row) => stripTerminalSequences(row).includes("Make room")));
+  assert.equal(rows?.at(-1), " ");
+  assert.equal(widgets.get("pi-jar.todos")?.render(0).at(-1), "");
+  events.get("session_shutdown")?.({}, ctx);
+});
+
 test("late asynchronous Git samples do not repaint a dismissed welcome", async () => {
   const events = new Map<string, Function>();
   let renders = 0;

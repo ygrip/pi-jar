@@ -66,7 +66,8 @@ export default function piJar(pi: ExtensionAPI): void {
             ...shown.map((item) => colors.fg("muted", `  ○ ${item.title}`))
           ];
           if (open.length > shown.length) rows.push(colors.fg("dim", `  … +${open.length - shown.length} more`));
-          return rows.map((line) => truncateToWidth(line, Math.max(0, width)));
+          // Pi inserts a spacer before widgets, but not between widgets and the composer.
+          return [...rows.map((line) => truncateToWidth(line, Math.max(0, width))), truncateToWidth(" ", Math.max(0, width))];
         }
       }));
     } catch { /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
