@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { ComposerStyle } from "../src/composer.ts";
+import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
 import { promptText } from "../src/dialogs.ts";
 import { renderFooter } from "../src/footer.ts";
@@ -16,6 +17,7 @@ import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { ACTIVE_STATES, collectStatuses, type JarRole } from "../src/status.ts";
 import { manageTasks } from "../src/tasks-ui.ts";
+import { registerTaskTool } from "../src/task-tool.ts";
 import { TASK_ENTRY, TodoStore } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
@@ -23,6 +25,7 @@ import { welcomeLines, welcomeSettingsHit } from "../src/welcome.ts";
 
 const WELCOME_KEY = "pi-jar.welcome";
 export default function piJar(pi: ExtensionAPI): void {
+  installCompactBuiltinTools(pi);
   let demo = false;
   let visualSettings = defaultVisualSettings();
   let animations = visualSettings.animations;
@@ -50,17 +53,24 @@ export default function piJar(pi: ExtensionAPI): void {
 
   const updateTaskWidget = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui") return;
-    const count = todos?.all().filter((item) => !item.done).length ?? 0;
+    const open = todos?.all().filter((item) => !item.done) ?? [];
     try {
-      ctx.ui.setWidget("pi-jar.todos", !enabled || !count ? undefined : (_tui, theme) => ({
+      ctx.ui.setWidget("pi-jar.todos", !enabled || !open.length ? undefined : (_tui, theme) => ({
         invalidate() {},
         render(width: number) {
           const colors = ctx.ui.theme ?? theme;
-          return [truncateToWidth(colors.fg("accent", `☐ ${count} pi-jar to-do${count === 1 ? "" : "s"}`) + colors.fg("dim", " · /jar tasks"), Math.max(0, width))];
+          const shown = open.slice(0, 3);
+          const rows = [
+            colors.fg("accent", `Tasks · ${open.length} open`) + colors.fg("dim", " · tracked automatically · /jar tasks"),
+            ...shown.map((item) => colors.fg("muted", `  ○ ${item.title}`))
+          ];
+          if (open.length > shown.length) rows.push(colors.fg("dim", `  … +${open.length - shown.length} more`));
+          return rows.map((line) => truncateToWidth(line, Math.max(0, width)));
         }
       }));
-    } catch { /* Optional widget; task data remains available via /jar tasks. */ }
+    } catch { /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
   };
+  registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
   const applyWorking = (ctx: ExtensionContext) => {
     const active = enabled && working.phase !== "idle";
     if (!active || !ctx.hasUI || ctx.mode !== "tui") stopWorkingClock();
