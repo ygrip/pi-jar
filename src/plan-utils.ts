@@ -6,7 +6,9 @@ const SIMPLE_READ_COMMANDS = new Set([
   "ps", "fd", "eza", "realpath", "basename", "dirname"
 ]);
 
-const SHELL_MUTATION = /(?:[;&]|\|\||&&|`|\$\(|\$\{|>|<|\n|\r)/;
+// Avoid shell expansions and quoting that could change the options seen by the
+// allowlist after validation (for example: git grep '--op=command').
+const SHELL_MUTATION = /(?:[;&]|\|\||[`$\\'"*?\[\]{}]|>|<|\n|\r)/;
 const FIND_MUTATION = /(?:^|\s)-(?:delete|exec|execdir|ok|okdir|fprint|fprintf|fls)\b/;
 const GIT_MUTATION = /(?:^|\s)(?:-d|-D|-m|-M|--delete|--move|--set-upstream-to|--unset-upstream)\b/;
 const OUTPUT_FLAG = /(?:^|\s)(?:--output(?:=|\s)|-o(?:\s|$))/;
@@ -16,11 +18,17 @@ function safeGit(tokens: string[]): boolean {
   if (!["status", "log", "diff", "show", "remote", "grep", "ls-files", "rev-parse", "describe"].includes(sub)) return false;
   const rest = tokens.slice(2).join(" ");
   if (GIT_MUTATION.test(rest) || OUTPUT_FLAG.test(rest)) return false;
-  if (tokens.some((token) => ["--ext-diff", "--textconv"].includes(token))) return false;
-  // git grep -O launches an arbitrary pager. Git also accepts abbreviated long
-  // options; reject every spelling/prefix rather than just the full flag.
-  if (sub === "grep" && tokens.slice(2).some((token) =>
-    token.startsWith("--open") || (/^-[A-Za-z]*O/.test(token)))) return false;
+  // Git accepts unique long-option prefixes; do not only reject the full
+  // spelling of flags that write files or run external programs.
+  const dangerous = sub === "grep"
+    ? ["output", "ext-diff", "textconv", "open-files-in-pager"]
+    : ["output", "ext-diff", "textconv"];
+  if (tokens.slice(2).some((token) => {
+    if (sub === "grep" && /^-[^-]*O/.test(token)) return true;
+    if (!token.startsWith("--")) return false;
+    const flag = token.slice(2).split("=", 1)[0] ?? "";
+    return flag.length >= 2 && dangerous.some((option) => option.startsWith(flag));
+  })) return false;
   if (sub === "remote" && tokens.length > 2 && !["-v", "show", "get-url"].includes(tokens[2] ?? "")) return false;
   return true;
 }
