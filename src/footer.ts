@@ -59,11 +59,12 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
     off: "thinkingOff", minimal: "thinkingMinimal", low: "thinkingLow", medium: "thinkingMedium",
     high: "thinkingHigh", xhigh: "thinkingXhigh", max: "thinkingMax"
   } as const;
-  const effort = show.effort && view.effort ? theme.fg(effortColors[view.effort], `effort ${view.effort}`) : "";
+  const effort = show.effort && view.effort ? theme.fg(effortColors[view.effort], view.effort) : "";
   const firstRole = primary ? `${primary.label} ${roleFrame(primary.state, view.frame, view.animations)}` : undefined;
   const attention = firstRole ?? (show.extras ? view.extras[0] : undefined);
   // At narrow widths reserve the right-hand slot for critical/active status, then context.
-  const left = [prefix, show.model ? theme.fg("muted", model) : "", effort].filter(Boolean).join(" ");
+  const modelLabel = show.model ? theme.fg("muted", model) : "";
+  const left = [prefix, modelLabel, effort].filter(Boolean).join(theme.fg("dim", " · "));
   // Fixed priority: context at every width if enabled; cost and quota only when there is space.
   const metrics = [...(show.context ? [context] : []), ...(show.cost && contentWidth >= 52 && cost ? [cost] : []), ...(show.quota && contentWidth >= 90 ? windows : [])];
   let right = theme.fg("dim", metrics.join("  ·  "));
@@ -72,7 +73,15 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
     right = theme.fg(primary?.state === "failed" ? "error" : "warning", truncateToWidth(attention, Math.min(room, 14))) + " " + right;
   }
   const availableLeft = Math.max(0, contentWidth - visibleWidth(right) - 1);
-  const fittedLeft = truncateToWidth(left, availableLeft);
+  // Never leave a dangling separator when the effort level gets squeezed out.
+  const fittedLeft = (() => {
+    if (visibleWidth(left) <= availableLeft) return left;
+    if (!effort) return truncateToWidth(left, availableLeft);
+    const beforeEffort = [prefix, modelLabel].filter(Boolean).join(theme.fg("dim", " · "));
+    const room = availableLeft - visibleWidth(effort) - 3;
+    if (room >= 3 && beforeEffort) return truncateToWidth(beforeEffort, room) + theme.fg("dim", " · ") + effort;
+    return truncateToWidth(beforeEffort || effort, availableLeft);
+  })();
   const name = show.sessionName && view.sessionName ? cleanText(view.sessionName, 128) : "";
   const rawCwd = show.cwd && view.cwd ? cleanText(view.cwd, 256) : "";
   const home = homedir();

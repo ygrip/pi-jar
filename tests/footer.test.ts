@@ -88,10 +88,11 @@ test("footer omits empty jar branding and colorizes every live effort", () => {
   for (const [level, color] of Object.entries(palette)) {
     const used: string[] = [];
     const styled = renderFooter({ ...base, effort: level as FooterView["effort"] }, 80, {
-      fg: (key, text) => { if (text === `effort ${level}`) used.push(key); return text; }
+      fg: (key, text) => { if (text === level) used.push(key); return text; }
     }).join(" ");
     assert.deepEqual(used, [color]);
-    assert.match(styled, new RegExp(`effort ${level}`));
+    assert.match(styled, new RegExp(`claude-sonnet · ${level}`));
+    assert.doesNotMatch(styled, /\beffort\b/);
     assert.doesNotMatch(styled, /\bjar claude-sonnet/);
   }
   const narrow = renderFooter({ ...base, effort: "max", roles: [
@@ -99,6 +100,20 @@ test("footer omits empty jar branding and colorizes every live effort", () => {
   ] }, 40, plain).join(" ");
   assert.match(narrow, /ERR ×/);
   assert.match(narrow, /ctx 58%/);
+  for (const width of [16, 24, 32, 40, 80]) {
+    const line = renderFooter({ ...base, effort: "high" }, width, plain).join(" ");
+    assert.doesNotMatch(line, /·\s+(?:│|ctx|$)/, `${width}: no orphaned separator`);
+    assert.ok(renderFooter({ ...base, effort: "high" }, width, plain).every((row) => visibleWidth(row) <= width));
+  }
+  const effortOnly = renderFooter({ ...base, effort: "high", settings: {
+    ...DEFAULT_FOOTER_SETTINGS, model: false
+  } }, 80, plain).join(" ");
+  assert.match(effortOnly, /high/);
+  assert.doesNotMatch(effortOnly, /· high/);
+  const modelOnly = renderFooter({ ...base, effort: "high", settings: {
+    ...DEFAULT_FOOTER_SETTINGS, effort: false
+  } }, 80, plain).join(" ");
+  assert.doesNotMatch(modelOnly, /· high|\beffort\b/);
 });
 
 test("status contract rejects stale, malformed and unsafe input without inventing live roles", () => {

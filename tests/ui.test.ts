@@ -3,7 +3,7 @@ import test, { after } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, stripTerminalSequences, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import piJar from "../extensions/index.ts";
 import { renderFooter, type FooterView } from "../src/footer.ts";
 import { welcomeLines } from "../src/welcome.ts";
@@ -19,7 +19,7 @@ after(() => {
   rmSync(testAgentDir, { recursive: true, force: true });
 });
 
-test("rising fumes and fire animate over a large static π; welcome and footer fit terminal widths", () => {
+test("layered standalone flame animates above π; welcome and footer fit terminal widths", () => {
   const info = { project: "pi-jar", model: "test-model", context: "ctx 82%", cost: "cost $1.23", managers: ["tasks"] as const, quotaEnabled: false };
   for (const width of [12, 16, 24, 40, 64, 80, 120]) {
     for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) assert.ok(welcomeLines(width, frame, plain.fg, info).every((line) => visibleWidth(line) <= width));
@@ -36,13 +36,19 @@ test("rising fumes and fire animate over a large static π; welcome and footer f
     if (width >= 80) {
       const before = welcomeLines(width, 0, plain.fg, info);
       const after = welcomeLines(width, 1, plain.fg, info);
-      assert.notDeepEqual(before.slice(0, 2), after.slice(0, 2)); // smoke floats
-      assert.notDeepEqual(before.slice(2, 7), after.slice(2, 7)); // flame tips shade smoothly
-      assert.deepEqual(before.slice(7), after.slice(7)); // gap, π and details never move
-      assert.equal(before[7]?.slice(0, 24).trim(), "");
-      assert.ok(before.slice(8, 13).some((line) => line.includes("██")));
+      assert.notDeepEqual(before.slice(0, 3), after.slice(0, 3)); // flickering tongues
+      assert.deepEqual(before.slice(3), after.slice(3)); // flame body, π and details stay put
+      assert.ok(before.slice(0, 9).some((line) => line.includes("░▓██████████▓░")));
+      assert.ok(before.slice(9, 14).some((line) => line.includes("██")));
+      assert.doesNotMatch(before.join(" "), /\\_+|\|\||\.\-\\/); // no grail
       assert.match(text, /PROJECT.*pi-jar/);
       assert.match(text, /role-assistant/);
+    }
+    if (width === 24) {
+      for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) {
+        const flame = welcomeLines(width, frame, plain.fg, info).slice(0, 7);
+        assert.ok(flame.every((row) => visibleWidth(row) === 21), "fixed flame cell footprint");
+      }
     }
     const view: FooterView = {
       model: "provider-model", context: "ctx 82%", cost: formatCost(1.23),
@@ -149,7 +155,7 @@ test("late asynchronous Git samples do not repaint a dismissed welcome", async (
 
 test("welcome Settings action opens the pointer-accessible pane without submitting a prompt", async () => {
   const events = new Map<string, Function>();
-  const widgets = new Map<string, { render(width: number): string[]; handleMouse(event: unknown): unknown }>();
+  const widgets = new Map<string, Component>();
   let opened = 0;
   const ctx = {
     hasUI: true, mode: "tui", cwd: "/not-a-real-pi-jar-project", isIdle: () => true,
@@ -174,16 +180,33 @@ test("welcome Settings action opens the pointer-accessible pane without submitti
     getCommands: () => [], registerCommand() {}
   } as never);
   events.get("session_start")?.({}, ctx);
-  const widget = widgets.get("pi-jar.welcome")!;
-  const lines = widget.render(80);
-  const y = lines.findIndex((line) => stripTerminalSequences(line).includes("[ Settings ↗ ]"));
-  assert.ok(y >= 0);
-  const text = stripTerminalSequences(lines[y]!);
-  const x = visibleWidth(text.slice(0, text.indexOf("[ Settings ↗ ]"))) + 3;
-  assert.equal(widget.handleMouse({ type: "click", button: "left", x: 0, y }), undefined);
-  assert.deepEqual(widget.handleMouse({ type: "click", button: "left", x, y }), { handled: true });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(opened, 1);
+  // Simulate fullscreen dispatch through a container at a nonzero screen origin.
+  // Pi only synthesizes click when the target handled press first.
+  for (const width of [24, 40, 80]) {
+    const widget = widgets.get("pi-jar.welcome")!;
+    const lines = widget.render(width);
+    const y = lines.findIndex((line) => stripTerminalSequences(line).includes(width < 32 ? "/jar settings" : "[ Settings ↗ ]"));
+    assert.ok(y >= 0);
+    const text = stripTerminalSequences(lines[y]!);
+    const label = width < 32 ? "/jar settings" : "[ Settings ↗ ]";
+    const x = visibleWidth(text.slice(0, text.indexOf(label))) + 3;
+    const root = new Container();
+    root.addChild({ render: () => ["above"], invalidate() {} });
+    root.addChild(widget);
+    root.render(width);
+    const pointer = (type: "press" | "click", localX: number) => root.handleMouse({
+      type, button: "left", x: localX, y: y + 1, screenX: localX + 5, screenY: y + 8,
+      width, height: lines.length + 1
+    } as never);
+    assert.equal(pointer("press", width - 1), undefined);
+    assert.ok(pointer("press", x)?.handled, `${width}: press captured`);
+    assert.equal(opened, width === 24 ? 0 : width === 40 ? 1 : 2, "press alone does not open settings");
+    assert.equal(widget.handleMouse?.({ type: "release", button: "left", x, y } as never), undefined);
+    assert.ok(pointer("click", x)?.handled, `${width}: click delivered`);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(opened, width === 24 ? 1 : width === 40 ? 2 : 3);
+    if (width !== 80) events.get("session_start")?.({}, ctx);
+  }
   assert.equal(widgets.has("pi-jar.welcome"), false);
   events.get("session_shutdown")?.({}, ctx);
 });

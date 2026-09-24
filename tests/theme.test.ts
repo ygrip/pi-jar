@@ -31,7 +31,7 @@ const contrast = (a: string, b: string) => {
 };
 
 test("Setara × Punakawan theme preserves semantic colors across all six dark accents", () => {
-  assert.equal(base.vars.accent, "#00C2B8"); // Setara dark teal
+  assert.equal(base.vars.accent, "#2DDED0"); // sharpened dark teal
   assert.equal(base.export.pageBg, "#0B1018"); // Punakawan dark canvas
   assert.equal(base.colors.accent, "accent");
   const semantic = ["success", "warning", "error", "toolSuccessBg", "toolErrorBg", "toolDiffAdded", "toolDiffRemoved"];
@@ -48,6 +48,8 @@ test("Setara × Punakawan theme preserves semantic colors across all six dark ac
     assert.equal(variant.vars.selected, values.selected);
     assert.ok(contrast(values.accent, base.export.pageBg) >= 4.5, `${name} accent must remain legible`);
     assert.ok(contrast(base.vars.text, base.vars.userBg) >= 7, "body text must remain legible");
+    assert.ok(contrast(variant.vars.muted, variant.vars.userBg) >= 4.5, "muted text must remain readable");
+    assert.ok(contrast(variant.vars.dim, variant.export.pageBg) >= 4.5, "dim text must remain readable");
   }
 });
 

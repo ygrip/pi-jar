@@ -42,6 +42,9 @@ export default function piJar(pi: ExtensionAPI): void {
   let footerSettings = visualSettings.footer;
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
+  let workingClock: ReturnType<typeof setInterval> | undefined;
+  let workingIndicatorKey = "";
+  const stopWorkingClock = () => { if (workingClock) clearInterval(workingClock); workingClock = undefined; };
   let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
   let settingsOpen = false;
 
@@ -59,16 +62,25 @@ export default function piJar(pi: ExtensionAPI): void {
     } catch { /* Optional widget; task data remains available via /jar tasks. */ }
   };
   const applyWorking = (ctx: ExtensionContext) => {
+    const active = enabled && working.phase !== "idle";
+    if (!active || !ctx.hasUI || ctx.mode !== "tui") stopWorkingClock();
     if (!ctx.hasUI || ctx.mode !== "tui") return;
+    composer.setActivity(enabled ? working.phase : "idle", animations);
     try {
-      if (!enabled) { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); return; }
-      const display = () => {
-        const view = working.view(animations, (color, text) => ctx.ui.theme?.fg(color, text) ?? text);
-        ctx.ui.setWorkingMessage?.(view.message);
+      if (!enabled) { workingIndicatorKey = ""; ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); return; }
+      const view = working.view(animations, (color, text) => ctx.ui.theme?.fg(color, text) ?? text,
+        Date.now(), ctx.thinkingLevel);
+      ctx.ui.setWorkingMessage?.(view.message);
+      const indicatorKey = `${working.phase}:${animations}`;
+      if (indicatorKey !== workingIndicatorKey) {
         ctx.ui.setWorkingIndicator({ frames: view.frames, intervalMs: 240 });
-      };
-      display();
-    } catch { /* Working decoration must never interrupt a Pi turn. */ }
+        workingIndicatorKey = indicatorKey;
+      }
+      if (active && !workingClock) {
+        workingClock = setInterval(() => applyWorking(ctx), 1000);
+        workingClock.unref?.();
+      }
+    } catch { stopWorkingClock(); /* Working decoration must never interrupt a Pi turn. */ }
   };
 
   const stopWelcome = (ctx?: ExtensionContext) => {
@@ -123,8 +135,11 @@ export default function piJar(pi: ExtensionAPI): void {
         welcomeTui = tui;
         let visibleLines: string[] = [];
         return { invalidate() {}, handleMouse(event: TuiMouseEvent) {
-          if (event.type !== "click" || event.button !== "left" || welcomeDismiss
+          if (event.button !== "left" || welcomeDismiss
             || !welcomeSettingsHit(visibleLines, event.x, event.y)) return;
+          // Fullscreen dispatch synthesizes click only when press was handled first.
+          if (event.type === "press") return { handled: true };
+          if (event.type !== "click") return;
           queueMicrotask(() => { stopWelcome(ctx); void openSettings(ctx); });
           return { handled: true };
         }, render(width: number) {
@@ -248,6 +263,8 @@ export default function piJar(pi: ExtensionAPI): void {
     installUi(ctx);
     if (enabled && next.composer) composer.enable(ctx);
     else composer.disable(ctx);
+    composer.setActivity(enabled ? working.phase : "idle", animations);
+    applyWorking(ctx);
     if (!wasEnabled && enabled) showWelcome(ctx);
     else if (!hadMotion && animations && welcomeTui && !welcomeInterval) {
       welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS);
@@ -282,6 +299,8 @@ export default function piJar(pi: ExtensionAPI): void {
     footerSettings = visualSettings.footer;
     demo = false;
     composer.disable(ctx);
+    stopWorkingClock();
+    workingIndicatorKey = "";
     working.end();
     quotaCache?.stop();
     todos = new TodoStore((entry) => pi.appendEntry(TASK_ENTRY, entry));
@@ -311,11 +330,18 @@ export default function piJar(pi: ExtensionAPI): void {
   });
   pi.on("agent_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
   pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
+  pi.on("message_end", (event, ctx) => {
+    if (event.message.role === "assistant") {
+      working.reportOutputTokens(event.message.usage?.output ?? 0);
+      applyWorking(ctx);
+    }
+  });
   pi.on("tool_execution_start", (event, ctx) => { working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx); });
   pi.on("tool_execution_end", (event, ctx) => { working.toolEnd(event.toolCallId); applyWorking(ctx); });
   pi.on("ui_prompt_start", (_event, ctx) => { working.prompt(true); applyWorking(ctx); });
   pi.on("ui_prompt_end", (_event, ctx) => { working.prompt(false); applyWorking(ctx); });
-  pi.on("turn_end", (_event, ctx) => { working.end(); applyWorking(ctx); updateCost(ctx); });
+  // A request may span several tool turns; keep its elapsed time and reported tokens until agent_end.
+  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); updateCost(ctx); });
   pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
@@ -326,6 +352,8 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("session_shutdown", (_event, ctx) => {
     stopWelcome(ctx);
     composer.disable(ctx);
+    stopWorkingClock();
+    workingIndicatorKey = "";
     working.end();
     try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
     quotaCache?.stop();

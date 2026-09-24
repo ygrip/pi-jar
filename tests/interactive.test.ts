@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { ComposerStyle, roundedInput } from "../src/composer.ts";
+import { ComposerStyle, composerIcon, roundedInput } from "../src/composer.ts";
 import piJar from "../extensions/index.ts";
 import { promptChoice, promptText, todoView } from "../src/dialogs.ts";
 import { TASK_ENTRY, TodoStore, type TodoEvent } from "../src/tasks.ts";
@@ -15,8 +15,8 @@ test("working wording follows observed events, sanitizes tool names and stops on
   assert.equal(state.view(true, paint).message, undefined);
   state.start();
   const generating = state.view(true, paint);
-  assert.equal(generating.message, "Working");
-  assert.equal(state.view(true, paint).message, "Working");
+  assert.match(generating.message ?? "", /^A spark remains… \(0s\)/);
+  assert.match(state.view(true, paint).message ?? "", /A spark remains…/);
   assert.ok(generating.frames.length > 1);
   state.toolStart("one", "\u001b[31mbash\u001b[0m");
   assert.match(state.view(true, paint).message ?? "", /bash/);
@@ -25,12 +25,20 @@ test("working wording follows observed events, sanitizes tool names and stops on
   assert.match(state.view(false, paint).message ?? "", /read/);
   assert.equal(state.view(false, paint).frames.length, 1);
   state.prompt(true);
-  assert.match(state.view(false, paint).message ?? "", /Waiting/);
+  assert.match(state.view(false, paint).message ?? "", /Holding the lantern/);
   state.prompt(false);
   state.toolEnd("two");
-  assert.equal(state.view(false, paint).message, "Working");
+  assert.match(state.view(false, paint).message ?? "", /A spark remains…/);
   state.end();
   assert.equal(state.view(false, paint).message, undefined);
+  state.start(1_000);
+  state.reportOutputTokens(1_700);
+  assert.match(state.view(false, paint, 89_000, "medium").message ?? "",
+    /There is a way through… \(1m 28s · ↓ 1\.7k tokens · medium effort\)/);
+  assert.match(state.view(false, paint, 126_000).message ?? "", /The horizon is clearer now…/);
+  state.end();
+  state.start(2_000);
+  assert.doesNotMatch(state.view(false, paint, 3_000).message ?? "", /tokens/);
 });
 
 test("pi-jar to-dos replay only valid active-branch entries and persist edits/toggles/deletions", () => {
@@ -118,7 +126,11 @@ test("rounded input fits and uses a steady accent while focused", () => {
   const lines = ["top", "draft", "bottom"];
   const idle = roundedInput(lines, 28, false, theme as never, paint);
   const focused = roundedInput(lines, 28, true, theme as never, paint);
-  assert.match(focused[0] ?? "", /╭─ pi-jar · compose/);
+  assert.match(focused[0] ?? "", /╭─ ◇ /);
+  for (const phase of ["idle", "generating", "tool", "waiting"] as const) {
+    assert.equal(visibleWidth(composerIcon(phase, 2)), 1);
+    assert.ok(roundedInput(lines, 28, true, theme as never, paint, composerIcon(phase, 2))[0]?.includes(composerIcon(phase, 2)));
+  }
   assert.match(focused[1] ?? "", /│.*draft.*│/);
   assert.match(focused[0] ?? "", /\x1b\[36m/);
   assert.deepEqual(focused, roundedInput(lines, 28, true, theme as never, paint));
@@ -167,7 +179,7 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.notEqual(current, original);
   assert.equal(draft, "keep this draft");
   const decorated = current?.({}, theme, {}) as { render(width: number): string[]; setText(text: string): void };
-  assert.ok(decorated.render(80).join(" ").includes("pi-jar"));
+  assert.match(decorated.render(80)[0] ?? "", /╭─ ◇ /);
   decorated.setText("editing");
   style.disable(ctx as never);
   assert.equal(current, original);
@@ -183,4 +195,41 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.equal(widgets.size, 0);
   style.disable(ctx as never);
   assert.equal(widgets.size, 0);
+});
+
+test("composer icon tracks observed phases, honors motion-off and stops after interruption", async () => {
+  let current: Function | undefined = () => ({
+    onSubmit: undefined, onChange: undefined, focused: true,
+    render: () => ["top", "existing draft", "bottom"],
+    getText: () => "existing draft", setText() {}, invalidate() {}, handleInput() {}
+  });
+  let redraws = 0;
+  const tui = { requestRender() { redraws++; } };
+  const ctx = { hasUI: true, mode: "tui", ui: {
+    getEditorComponent: () => current,
+    setEditorComponent: (factory: Function | undefined) => { current = factory; },
+    getEditorText: () => "existing draft", setEditorText() {}
+  } };
+  const style = new ComposerStyle();
+  assert.equal(style.enable(ctx as never), true);
+  const editor = current?.(tui, theme, {}) as { render(width: number): string[] };
+  const icon = () => editor.render(40)[0] ?? "";
+  assert.match(icon(), /◇/);
+  style.setActivity("generating", true);
+  await new Promise((resolve) => setTimeout(resolve, 270));
+  assert.ok(redraws > 0);
+  assert.match(icon(), /◈/);
+  style.setActivity("tool", false);
+  assert.match(icon(), /◐/);
+  const stopped = redraws;
+  await new Promise((resolve) => setTimeout(resolve, 270));
+  assert.equal(redraws, stopped);
+  style.setActivity("generating", true);
+  style.setActivity("idle", true); // interrupted
+  assert.match(icon(), /◇/);
+  const stoppedAfterInterrupt = redraws;
+  await new Promise((resolve) => setTimeout(resolve, 270));
+  assert.equal(redraws, stoppedAfterInterrupt);
+  style.disable(ctx as never);
+  assert.match(editor.render(40)[1] ?? "", /existing draft/);
 });

@@ -19,26 +19,24 @@ export interface WelcomeInfo {
 type WelcomeColor = "accent" | "warning" | "error" | "muted" | "dim";
 type Paint = (color: WelcomeColor, text: string) => string;
 
-// Every row keeps its cell footprint; only adjacent shades and flame tips move.
-const SMOKE = [
-  ["           ·         ", "        ·            "],
-  ["          ·          ", "        ·            "],
-  ["         ·           ", "         ·           "],
-  ["        ·            ", "         ·           "],
-  ["       ·             ", "          ·          "],
-  ["      ·              ", "          ·          "],
-  ["     ·               ", "           ·         "],
-  ["    ·                ", "           ·         "]
+// Each line occupies 21 cells. The asymmetric tips flicker while the tapered body stays put.
+const FLAME_TIPS = [
+  ["          ░          ", "         ▒▓░   ░     ", "       ░▓██▓▒ ░▒     "],
+  ["         ░           ", "        ▒▓▒    ░     ", "       ▒▓██▓░ ▒▒     "],
+  ["           ░         ", "         ▒▓▒  ░▒     ", "       ░▓██▓▒ ▒▓     "],
+  ["        ░    ░       ", "        ▒▓▒  ▒▒      ", "       ▒▓██▓▒░▓▒     "],
+  ["          ░          ", "         ▒▓▒   ░     ", "       ░▓██▓▒ ░▒     "],
+  ["         ░           ", "        ▒▓░   ░▒     ", "       ▒▓██▓▒ ▒▓     "],
+  ["           ░         ", "         ▒▓░  ░▒     ", "       ░▓██▓▒ ▒▒     "],
+  ["        ░   ░        ", "        ▒▓▒  ▒░      ", "       ▒▓██▓▒░▓▒     "]
 ] as const;
-const FLAMES = [
-  ["        ░   ░        ", "        ▒█▒  ░       ", "       ░█████▒       ", "       ▒█████▒       ", "      ░███████░      "],
-  ["        ░  ░         ", "        ▒█▒ ░▒       ", "       ░█████▒       ", "       ▒█████▒       ", "      ░███████░      "],
-  ["       ░   ░         ", "       ░██▒ ▒▒       ", "       ░█████▒       ", "       ░██████▒      ", "      ░███████░      "],
-  ["       ░    ░        ", "       ░██▒  ▒       ", "       ▒█████▒       ", "       ▒██████░      ", "      ░███████░      "],
-  ["        ░   ░        ", "        ▒█▒ ░▒       ", "       ▒█████▒       ", "       ▒█████▒       ", "      ░███████░      "],
-  ["        ░  ░         ", "        ▒█▒  ░       ", "       ░█████▒       ", "       ▒█████░       ", "      ░███████░      "],
-  ["         ░ ░         ", "         ██▒ ░       ", "        ▒████▒       ", "       ░█████▒       ", "      ░███████░      "],
-  ["         ░  ░        ", "         ▒█▒ ░       ", "        ░████▒       ", "       ▒█████▒       ", "      ░███████░      "]
+const FLAME_BODY = [
+  "      ░▓████▓▒▓▒     ",
+  "     ▒▓████████▓▒    ",
+  "    ░▓██████████▓░   ",
+  "     ▒▓████████▓▒    ",
+  "      ░▒▓████▓▒      ",
+  "         ▒██▒        "
 ] as const;
 const PI_LARGE = [
   "     ▄▄▄▄▄▄▄▄▄▄▄     ",
@@ -115,20 +113,21 @@ export function welcomeSettingsHit(lines: readonly string[], x: number, y: numbe
 export function welcomeLines(width: number, frame: number, fg: Paint, info: WelcomeInfo = {}): string[] {
   if (width <= 0) return [];
   const fit = (line: string) => truncateToWidth(line, width);
-  const step = ((frame % FLAMES.length) + FLAMES.length) % FLAMES.length;
-  const smoke = SMOKE[step] ?? SMOKE[0];
-  const fire = (FLAMES[step] ?? FLAMES[0]).map((line, index) => fg(index < 3 ? "warning" : "error", line));
+  const step = ((frame % FLAME_TIPS.length) + FLAME_TIPS.length) % FLAME_TIPS.length;
+  const flame = [...(FLAME_TIPS[step] ?? FLAME_TIPS[0]), ...FLAME_BODY];
+  // The hot core glows amber; the edges stay red. No container interrupts the silhouette.
+  const paintFlame = (line: string) => line.split(/(█+)/).map((part) => fg(part.includes("█") ? "warning" : "error", part)).join("");
+  const compactFlame = [...flame.slice(0, 5), ...flame.slice(7)].map(paintFlame);
   if (width < 32) return [
-    fit(fg("dim", smoke[1])), ...fire.slice(3).map(fit), "",
+    ...compactFlame.map(fit),
     ...PI_COMPACT.map((line) => fit(fg("accent", line))),
     fit(fg("accent", "pi-jar · role-assistant")), fit(fg("accent", "/jar settings"))
   ];
   const wide = width >= 72;
   const art = wide ? [
-    ...smoke.map((line) => fg("dim", spaceArt(line))),
-    ...(FLAMES[step] ?? FLAMES[0]).map((line, index) => fg(index < 3 ? "warning" : "error", spaceArt(line))), "",
+    ...flame.map((line) => paintFlame(spaceArt(line))),
     ...PI_LARGE.map((line) => fg("accent", spaceArt(line)))
-  ] : [fg("dim", smoke[1]), ...fire.slice(1), "", ...PI_COMPACT.map((line) => fg("accent", line))];
+  ] : [...compactFlame, ...PI_COMPACT.map((line) => fg("accent", line))];
   const details = card(wide ? width - ART_WIDTH - 2 : width, fg, info);
   if (!wide) return [...art.map(fit), ...details.map(fit)];
   return Array.from({ length: Math.max(art.length, details.length) }, (_, index) => {

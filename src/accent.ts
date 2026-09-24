@@ -1,13 +1,13 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** Dark preset values mirror ../GDN/punakawan/web/panel/src/lib/accent.ts. */
+/** Sharpened pi-jar dark preset values; keep these in sync with bundled theme vars. */
 export const ACCENTS = {
-  gray: { accent: "#B8C0CC", selected: "#252B35" },
-  pink: { accent: "#F472B6", selected: "#3B1D2D" },
-  teal: { accent: "#35C7C4", selected: "#123433" },
-  azure: { accent: "#65A9EF", selected: "#132A41" },
-  violet: { accent: "#A78BFA", selected: "#2C2350" },
-  amber: { accent: "#E5A940", selected: "#3A2B0F" }
+  gray: { accent: "#D0D9E5", selected: "#252B35" },
+  pink: { accent: "#FF88C6", selected: "#3B1D2D" },
+  teal: { accent: "#45DDD1", selected: "#123433" },
+  azure: { accent: "#75BCFF", selected: "#132A41" },
+  violet: { accent: "#BCA0FF", selected: "#2C2350" },
+  amber: { accent: "#F7B955", selected: "#3A2B0F" }
 } as const;
 
 export type AccentName = keyof typeof ACCENTS;

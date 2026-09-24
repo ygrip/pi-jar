@@ -73,7 +73,7 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
     const beforeEffort = renders;
     events.get("thinking_level_select")?.({ level: "high", previousLevel: "medium" }, ctx);
     assert.equal(renders, beforeEffort + 1);
-    assert.match(footer?.render(80).join(" ") ?? "", /effort high/);
+    assert.match(footer?.render(80).join(" ") ?? "", /model · high/);
     sessionName = "Renamed session";
     assert.match(footer?.render(80).join(" ") ?? "", /Renamed session/);
     assert.equal(intervals.size, 0);
@@ -84,7 +84,7 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
     assert.equal(intervals.size, 1);
     await command("animations off", ctx);
     assert.equal(intervals.size, 0);
-    assert.deepEqual(indicator?.frames, ["◇"]);
+    assert.deepEqual(indicator?.frames, ["✢"]);
     footer?.render(80);
     assert.equal(intervals.size, 0);
     await command("ui off", ctx);
@@ -156,7 +156,7 @@ test("footer menu toggles and persists fields, refreshes the render, and exits o
   }
 });
 
-test("welcome flame and smoke above large π freeze on motion-off and replay safely", async () => {
+test("standalone flame above large π freezes on motion-off and replays safely", async () => {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
   const intervals = new Set<{ callback: () => void }>();
@@ -240,6 +240,7 @@ test("Pi lifecycle keeps activity wording steady while icons animate without idl
     let command: Function | undefined;
     let message: string | undefined;
     let frames: string[] = [];
+    let frameResets = 0;
     const ctx = {
       hasUI: true, mode: "tui", isIdle: () => true,
       model: { provider: "test", id: "test" },
@@ -248,7 +249,7 @@ test("Pi lifecycle keeps activity wording steady while icons animate without idl
       ui: {
         theme: { fg: (_color: string, text: string) => text },
         setWorkingMessage(value?: string) { message = value; },
-        setWorkingIndicator(value?: { frames: string[] }) { frames = value?.frames ?? []; },
+        setWorkingIndicator(value?: { frames: string[] }) { frames = value?.frames ?? []; frameResets++; },
         setWidget() {}, setFooter() {}, notify() {}
       }
     };
@@ -262,15 +263,22 @@ test("Pi lifecycle keeps activity wording steady while icons animate without idl
     await command?.("animations on", ctx);
     assert.equal(intervals.size, 0);
     events.get("agent_start")?.({}, ctx);
-    assert.equal(message, "Working");
+    assert.match(message ?? "", /A spark remains… \(0s\)/);
     assert.ok(frames.length > 1);
-    assert.equal(intervals.size, 0);
+    assert.equal(intervals.size, 1); // one elapsed-time clock, no idle repaint
+    const resetsBeforeTick = frameResets;
+    intervals.values().next().value?.callback();
+    assert.equal(frameResets, resetsBeforeTick, "clock does not restart spinner frames");
+    events.get("message_end")?.({ message: { role: "assistant", usage: { output: 1700 } } }, ctx);
+    assert.match(message ?? "", /↓ 1\.7k tokens/);
     events.get("tool_execution_start")?.({ toolCallId: "a", toolName: "read" }, ctx);
     assert.match(message ?? "", /read/);
     await command?.("animations off", ctx);
     assert.equal(frames.length, 1);
-    assert.equal(intervals.size, 0);
+    assert.equal(intervals.size, 1); // duration updates even with animation disabled
     events.get("turn_end")?.({}, ctx);
+    assert.match(message ?? "", /↓ 1\.7k tokens/); // keep totals across tool turns
+    events.get("agent_end")?.({}, ctx);
     assert.equal(message, undefined);
     assert.equal(intervals.size, 0);
     events.get("session_shutdown")?.({}, ctx);
