@@ -147,7 +147,7 @@ export default function piJar(pi: ExtensionAPI): void {
   const showWelcome = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui" || !enabled) return;
     stopWelcome(ctx);
-    welcomeFrame = 0;
+    welcomeFrame = animations ? Math.floor(Math.random() * 64) : 0;
     welcomeDismiss = 0;
     try {
       const contextUsage = ctx.getContextUsage();
