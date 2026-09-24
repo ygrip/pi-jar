@@ -173,7 +173,7 @@ test("rounded input fits, shows the pet sprite and exposes a human session label
   const lines = ["top", "draft", "bottom"];
   const idle = roundedInput(lines, 40, false, theme as never, paint);
   const focused = roundedInput(lines, 40, true, theme as never, paint, composerIcon("idle"), "ember-trail");
-  assert.ok(focused[0]?.includes("▟•ᴗ•▙"));
+  assert.ok(focused[0]?.includes("╭•ᴗ•╮"));
   assert.ok(focused[0]?.includes("session ember-trail"));
   const widths = new Set<number>();
   for (const phase of ["idle", "generating", "tool", "waiting"] as const) {
@@ -182,6 +182,8 @@ test("rounded input fits, shows the pet sprite and exposes a human session label
   }
   assert.equal(widths.size, 1);
   assert.ok([...widths][0]! > 1);
+  assert.notEqual(composerIcon("generating", 0)[0], composerIcon("generating", 1)[0], "mascot silhouette moves, not only its mouth");
+  assert.notEqual(composerIcon("generating", 0)[1], composerIcon("generating", 1)[1], "mascot eyes change with expression");
   assert.equal(sessionDisplayName("Welcome polish", "019a0a2b-f81d-7350-8188-abcdef123456"), "Welcome polish");
   const fallback = sessionDisplayName(undefined, "019a0a2b-f81d-7350-8188-abcdef123456");
   assert.match(fallback, /^[a-z]+-[a-z]+$/);
@@ -240,7 +242,7 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.notEqual(current, original);
   assert.equal(draft, "keep this draft");
   const decorated = current?.({}, theme, {}) as { render(width: number): string[]; setText(text: string): void };
-  assert.ok(decorated.render(80)[0]?.includes("▟•ᴗ•▙"));
+  assert.ok(decorated.render(80)[0]?.includes("╭•ᴗ•╮"));
   assert.ok(decorated.render(80)[0]?.includes("session Welcome polish"));
   decorated.setText("editing");
   style.disable(ctx as never);
@@ -280,7 +282,7 @@ test("composer icon tracks observed phases, refreshes session title, honors moti
   assert.equal(style.enable(ctx as never), true);
   const editor = current?.(tui, theme, {}) as { render(width: number): string[] };
   const icon = () => editor.render(40)[0] ?? "";
-  assert.ok(icon().includes("▟•ᴗ•▙"));
+  assert.ok(icon().includes("╭•ᴗ•╮"));
   assert.ok(icon().includes("session Welcome polish"));
   sessionName = "Flame pass";
   style.refreshSession(ctx as never);
@@ -288,15 +290,15 @@ test("composer icon tracks observed phases, refreshes session title, honors moti
   style.setActivity("generating", true);
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.ok(redraws > 0);
-  assert.ok(icon().includes("▟•o•▙"));
+  assert.ok(icon().includes("╰◕ᴗ◕╯"));
   style.setActivity("tool", false);
-  assert.ok(icon().includes("▟>ᴗ<▙"));
+  assert.ok(icon().includes("╭>ᴗ<╮"));
   const stopped = redraws;
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.equal(redraws, stopped);
   style.setActivity("generating", true);
   style.setActivity("idle", true); // interrupted
-  assert.ok(icon().includes("▟•ᴗ•▙"));
+  assert.ok(icon().includes("╭•ᴗ•╮"));
   const stoppedAfterInterrupt = redraws;
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.equal(redraws, stoppedAfterInterrupt);
