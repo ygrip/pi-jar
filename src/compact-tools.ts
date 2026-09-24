@@ -18,7 +18,7 @@ const outputText = (result: ToolResult): string => result.content
   .join("\n");
 
 const nonEmptyLines = (text: string): string[] => text.split("\n").filter((line) => line.trim().length > 0);
-const expandHint = " · [ expand ] Ctrl+E";
+const expandHint = " · [ expand ] Ctrl+E / Ctrl+O";
 
 function compactText(text: string, max = 72): string {
   const clean = text.replace(/\s+/g, " ").trim();
@@ -74,7 +74,7 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
       return new Text(theme.fg("toolTitle", theme.bold("$ ")) + theme.fg("accent", compactText(args.command, 88)), 0, 0);
     },
     renderResult(result, options, theme, context) {
-      if (options.expanded && bash.renderResult) return bash.renderResult(result, options, theme, context);
+      if (options.expanded && bash.renderResult) return bash.renderResult(result as Parameters<NonNullable<typeof bash.renderResult>>[0], options, theme, context);
       const text = outputText(result);
       const lines = nonEmptyLines(text);
       const preview = lines[0] ? ` · ${compactText(lines[0], 56)}` : "";

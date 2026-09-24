@@ -69,7 +69,8 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
     if (width >= 52) assert.match(lines.join(" "), /5h 14%.*week 50%/);
     if (width >= 52) assert.match(lines.join(" "), /cost \$1\.23/);
-    if (width < 52) assert.doesNotMatch(lines.join(" "), /5h 14%/);
+    if (width >= 32) assert.match(lines.join(" "), /5h 14%/);
+    if (width < 32) assert.doesNotMatch(lines.join(" "), /5h 14%/);
   }
 });
 
@@ -278,7 +279,7 @@ test("welcome Settings is clickable in regular mode and restores terminal mouse 
       listener = fn;
       return () => { listener = undefined; };
     },
-    captureRenderState() { return { previousLines, previousViewportTop: 0 }; }
+    captureRenderState() { return { previousLines, previousViewportTop: 1 }; }
   };
   const ctx = {
     hasUI: true, mode: "tui", cwd: "/not-a-real-pi-jar-project", isIdle: () => true,
@@ -302,13 +303,14 @@ test("welcome Settings is clickable in regular mode and restores terminal mouse 
   } as never);
   events.get("session_start")?.({}, ctx);
   assert.ok(widget);
-  previousLines = widget!.render(120);
+  previousLines = ["old terminal row", ...widget!.render(120)];
+  assert.ok(writes.filter((value) => value.includes("\x1b[?1000h")).length >= 2, "mouse reporting is reasserted after welcome render");
   const y = previousLines.findIndex((line) => stripTerminalSequences(line).includes("[ ⚙ Settings ↗ ]"));
   assert.ok(y >= 0);
   const row = stripTerminalSequences(previousLines[y]!);
   const x = visibleWidth(row.slice(0, row.indexOf("[ ⚙ Settings ↗ ]"))) + 3;
   assert.ok(listener);
-  listener!(`\x1b[<0;${x + 1};${y + 1}M`);
+  listener!(`\x1b[<0;${x + 1};${y}M`);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(opened, 1);
   assert.ok(writes.some((value) => value.includes("\x1b[?1000h")));

@@ -188,6 +188,7 @@ export default function piJar(pi: ExtensionAPI): void {
         welcomeTui = tui;
         installRegularWelcomePointer(tui, ctx);
         let visibleLines: string[] = [];
+        let reportedAfterPaint = false;
         return { invalidate() {}, handleMouse(event: TuiMouseEvent) {
           if (event.button !== "left" || welcomeDismiss
             || !welcomeSettingsHit(visibleLines, event.x, event.y)) return;
@@ -195,9 +196,13 @@ export default function piJar(pi: ExtensionAPI): void {
           queueMicrotask(() => openWelcomeSettings(ctx));
           return { handled: true, capture: event.type === "press" };
         }, render(width: number) {
+          if (!reportedAfterPaint && tui.mode === "regular") {
+            reportedAfterPaint = true;
+            tui.terminal.write("\x1b[?1000h\x1b[?1006h");
+          }
           const statuses = welcomeStatuses();
           const live = collectStatuses(statuses, Date.now());
-          const quota = quotaCache?.get(ctx.model?.provider, statuses, Date.now());
+          const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, Date.now()) : undefined;
           const lines = welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), {
             ...info, roles: live.roles,
             quota: quota?.week?.used ?? quota?.fiveHour?.used
@@ -236,6 +241,19 @@ export default function piJar(pi: ExtensionAPI): void {
         welcomeStatuses = () => footerData.getExtensionStatuses();
         welcomeBranch = () => footerData.getGitBranch();
         let frame = 0;
+        let memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
+        let memoryTimer: ReturnType<typeof setTimeout> | undefined;
+        const sampleMemory = () => {
+          if (disposed) return;
+          memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
+          tui.requestRender();
+          memoryTimer = setTimeout(sampleMemory, 3000);
+          memoryTimer.unref?.();
+        };
+        if (footerSettings.memory) {
+          memoryTimer = setTimeout(sampleMemory, 3000);
+          memoryTimer.unref?.();
+        }
         let timer: ReturnType<typeof setInterval> | undefined;
         let expiryTimer: ReturnType<typeof setTimeout> | undefined;
         let disposed = false;
@@ -243,6 +261,7 @@ export default function piJar(pi: ExtensionAPI): void {
         const dispose = () => {
           if (disposed) return;
           disposed = true;
+          if (memoryTimer) clearTimeout(memoryTimer);
           if (timer) clearInterval(timer);
           if (expiryTimer) clearTimeout(expiryTimer);
           timer = undefined;
@@ -271,12 +290,12 @@ export default function piJar(pi: ExtensionAPI): void {
               const usage = ctx.getContextUsage();
               const context = usage?.percent == null || !Number.isFinite(usage.percent)
                 ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
-              const quota = quotaCache?.get(ctx.model?.provider, statuses, now);
+              const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, now) : undefined;
               return renderFooter({
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: ctx.sessionManager?.getSessionName?.(),
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
-                context, cost: formatCost(cost), quota, roles, extras: live.extras,
+                context, memory, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
             } catch {
@@ -306,6 +325,7 @@ export default function piJar(pi: ExtensionAPI): void {
     visualSettings = next;
     enabled = next.ui;
     animations = next.animations;
+    if (footerSettings.quota && !next.footer.quota) quotaCache?.stop();
     footerSettings = next.footer;
     if (!animations && welcomeInterval) {
       clearInterval(welcomeInterval);
@@ -357,11 +377,12 @@ export default function piJar(pi: ExtensionAPI): void {
     quotaCache?.stop();
     todos = new TodoStore((entry) => pi.appendEntry(TASK_ENTRY, entry));
     restoreTodos(ctx);
-    // Quota opt-in is deliberately session-local. No credentials or consent are persisted.
+    // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
       () => footerTui?.requestRender()
     );
+    quotaCache.enabled = true;
     updateCost(ctx);
     installUi(ctx);
     if (visualSettings.composer && enabled) composer.enable(ctx);
@@ -416,6 +437,11 @@ export default function piJar(pi: ExtensionAPI): void {
     demo = false;
   });
 
+  pi.registerShortcut?.(Key.ctrl("e"), {
+    description: "Toggle expanded tool output",
+    handler: (ctx) => ctx.ui.setToolsExpanded(!ctx.ui.getToolsExpanded())
+  });
+
   pi.registerShortcut?.(Key.ctrlAlt("s"), {
     description: "Open pi-jar settings",
     handler: async (ctx) => {
@@ -455,7 +481,7 @@ export default function piJar(pi: ExtensionAPI): void {
         footerTui?.requestRender();
         const labels: Record<(typeof FOOTER_FIELDS)[number], string> = {
           model: "Model", effort: "Model effort", sessionName: "Session name", cwd: "Working directory", context: "Context",
-          cost: "Session cost", quota: "Quota", roles: "Roles", extras: "Extension statuses", branch: "Git branch"
+          memory: "Process RAM (RSS)", cost: "Session cost", quota: "Quota", roles: "Roles", extras: "Extension statuses", branch: "Git branch"
         };
         while (true) {
           const options = FOOTER_FIELDS.map((field) => `${footerSettings[field] ? "[x]" : "[ ]"} ${labels[field]}`);

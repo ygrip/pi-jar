@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { ComposerStyle, composerIcon, roundedInput, sessionDisplayName } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import piJar from "../extensions/index.ts";
@@ -138,6 +139,21 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
   assert.equal(await answer, "yes");
 });
 
+test("Ctrl+E toggles Pi's native expanded tool state both ways", () => {
+  const shortcuts = new Map<string, { handler: (ctx: unknown) => void }>();
+  piJar({ on() {}, registerCommand() {}, registerShortcut(key: string, options: { handler: (ctx: unknown) => void }) {
+    shortcuts.set(key, options);
+  } } as never);
+  const toggle = shortcuts.get("ctrl+e")?.handler;
+  assert.ok(toggle);
+  let expanded = false;
+  const ctx = { ui: { getToolsExpanded: () => expanded, setToolsExpanded(value: boolean) { expanded = value; } } };
+  toggle(ctx);
+  assert.equal(expanded, true);
+  toggle(ctx);
+  assert.equal(expanded, false);
+});
+
 test("default Pi tools keep native metadata while collapsed cards stay brief", () => {
   const definitions: any[] = [];
   installCompactBuiltinTools({ registerTool(definition: unknown) { definitions.push(definition); } } as never);
@@ -155,6 +171,10 @@ test("default Pi tools keep native metadata while collapsed cards stay brief", (
   const bashCollapsed = bash.renderResult(bashResult, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n");
   assert.match(bashCollapsed, /\[ expand \].*Ctrl\+E/);
   assert.doesNotMatch(bashCollapsed, /second log line/);
+  initTheme("dark", false);
+  const bashExpanded = bash.renderResult(bashResult, { expanded: true, isPartial: false }, colors, { state: {}, invalidate() {}, showImages: false }).render(120).join("\n");
+  assert.match(bashExpanded, /second log line/);
+  assert.doesNotMatch(bashExpanded, /\[ expand \]/);
 
   const edit = definitions.find((tool) => tool.name === "edit")!;
   const editResult = { content: [{ type: "text", text: "Applied" }], details: { diff: "@@\n-old\n+new" } };

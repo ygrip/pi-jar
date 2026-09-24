@@ -28,6 +28,17 @@ test("footer fits 16, 40, 80 and 120 terminal cells with critical role visible",
   }
 });
 
+test("process RAM and quota display at usable widths and respect visibility", () => {
+  const view: FooterView = { ...base, memory: "ram 128 MiB", quota: { fiveHour: { used: 14 }, week: { used: 50 } } };
+  for (const width of [32, 40, 60, 80, 120]) {
+    const lines = renderFooter(view, width, plain);
+    assert.match(lines.join(" "), /ram 128 MiB/);
+    assert.match(lines.join(" "), /5h 14%/);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+  }
+  assert.doesNotMatch(renderFooter({ ...view, settings: { ...DEFAULT_FOOTER_SETTINGS, memory: false } }, 120, plain).join(" "), /ram 128 MiB/);
+});
+
 test("footer shows the session name, truncates it, and preserves narrow-screen priorities", () => {
   const name = "A very long named session with many extra words that will not fit";
   const named = { ...base, sessionName: name };

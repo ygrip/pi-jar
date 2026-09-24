@@ -29,6 +29,7 @@ test("visual preferences migrate legacy footer once, validate fields and preserv
     assert.equal(partial.animations, true);
     assert.equal(partial.footer.model, false);
     assert.equal(partial.footer.cwd, true); // missing new field uses defaults, never re-imports legacy
+    assert.equal(partial.footer.memory, true); // older saved preferences acquire the new RSS field
     writeFileSync(join(dir, SETTINGS_FILE), "malformed");
     assert.equal(loadVisualSettings(dir).footer.cwd, true);
     assert.throws(() => saveVisualSettings(dir, chosen), /malformed/);
@@ -56,7 +57,7 @@ test("settings pane supports fullscreen clicks, keyboard operation and narrow wi
   let renders = 0;
   const ctx = { hasUI: true, mode: "tui", ui: {
     custom: async (factory: Function, options: unknown) => {
-      assert.deepEqual(options, { overlay: true, overlayOptions: { anchor: "center", width: 64, maxHeight: "80%" } });
+      assert.equal(options, undefined);
       pane = factory({ requestRender() { renders++; } }, { fg: (_color: string, text: string) => text }, {}, () => { closed = true; });
       for (const width of [16, 40, 64]) assert.ok(pane!.render(width).every((line) => visibleWidth(line) <= width));
       pane!.render(64);

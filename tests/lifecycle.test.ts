@@ -16,6 +16,41 @@ after(() => {
   rmSync(testAgentDir, { recursive: true, force: true });
 });
 
+test("quota starts enabled without contacting unsupported providers and can be disabled", async () => {
+  const events = new Map<string, Function>();
+  let footer: { render(width: number): string[] } | undefined;
+  let authCalls = 0;
+  let command: Function | undefined;
+  const ctx = {
+    hasUI: true, mode: "tui", cwd: "/tmp/pi-jar", isIdle: () => true,
+    model: { provider: "openai-codex", id: "test-model" },
+    modelRegistry: { async getProviderAuth() { authCalls++; return undefined; } },
+    getContextUsage: () => ({ percent: 25 }),
+    sessionManager: { getBranch: () => [] },
+    ui: { setWorkingIndicator() {}, setWidget() {}, notify() {},
+      setFooter(factory?: Function) { footer = factory?.({ requestRender() {} }, theme, {
+        getExtensionStatuses: () => new Map(), getGitBranch: () => null, onBranchChange: () => () => {}
+      }); }
+    }
+  };
+  piJar({ on(name: string, fn: Function) { events.set(name, fn); }, getCommands: () => [],
+    registerCommand(_name: string, options: { handler: Function }) { command = options.handler; }
+  } as never);
+  events.get("session_start")?.({}, ctx);
+  footer?.render(80);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(authCalls, 1);
+  await command?.("quota off", ctx);
+  footer?.render(80);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(authCalls, 1);
+  ctx.model.provider = "unsupported";
+  await command?.("quota on", ctx);
+  footer?.render(80);
+  assert.equal(authCalls, 1);
+  events.get("session_shutdown")?.({}, ctx);
+});
+
 test("idle has no timer; demo motion stops on toggle, reset and session shutdown", async () => {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
@@ -198,10 +233,12 @@ test("standalone flame above large π freezes on motion-off and replays safely",
     assert.notDeepEqual(welcome()?.render(80)?.slice(0, 6), still?.slice(0, 6));
     await commands.get("jar")?.("animations off", ctx);
     assert.equal(intervals.size, 0);
-    assert.deepEqual(welcome()?.render(80), still);
+    const frozen = welcome()?.render(80);
+    assert.deepEqual(welcome()?.render(80), frozen);
     await commands.get("jar")?.("welcome", ctx);
     assert.equal(intervals.size, 0);
-    assert.deepEqual(welcome()?.render(80), still);
+    const replay = welcome()?.render(80);
+    assert.deepEqual(welcome()?.render(80), replay);
     events.get("input")?.({ source: "extension", text: "automated" }, ctx);
     assert.ok(welcome()); // Only a user's interactive prompt dismisses the welcome.
     events.get("input")?.({ source: "interactive", text: "hello" }, ctx);

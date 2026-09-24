@@ -5,7 +5,7 @@ import type { JarAccent, JarVisualSettings } from "./settings.ts";
 
 const LABELS: Record<FooterField, string> = {
   model: "Model", effort: "Model effort", sessionName: "Session name", cwd: "Working directory",
-  context: "Context usage", cost: "Session cost", quota: "Quota windows", roles: "Active roles",
+  context: "Context usage", memory: "Process RAM (RSS)", cost: "Session cost", quota: "Quota windows", roles: "Active roles",
   extras: "Extension statuses", branch: "Git branch"
 };
 

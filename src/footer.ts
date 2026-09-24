@@ -17,6 +17,7 @@ export interface FooterView extends JarStatus {
   cwd?: string;
   settings?: FooterSettings;
   context: string;
+  memory?: string;
   cost?: string;
   quota?: Quota;
   branch: string | null;
@@ -43,7 +44,7 @@ function roleColor(role: RoleStatus): Color {
 export function renderFooter(view: FooterView, width: number, theme: FooterTheme): string[] {
   if (width <= 0) return [];
   const show = view.settings ?? DEFAULT_FOOTER_SETTINGS;
-  if (!Object.values(show).some(Boolean)) return [];
+  if (!Object.entries(show).some(([field, enabled]) => enabled && (field !== "memory" || !!view.memory))) return [];
   // Keep tiny terminals unframed so context and urgent role status stay readable.
   const framed = width >= 32;
   const contentWidth = framed ? width - 4 : width;
@@ -65,8 +66,8 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   // At narrow widths reserve the right-hand slot for critical/active status, then context.
   const modelLabel = show.model ? theme.fg("muted", model) : "";
   const left = [prefix, modelLabel, effort].filter(Boolean).join(theme.fg("dim", " · "));
-  // Fixed priority: context at every width if enabled; cost and quota only when there is space.
-  const metrics = [...(show.context ? [context] : []), ...(show.cost && contentWidth >= 52 && cost ? [cost] : []), ...(show.quota && contentWidth >= 90 ? windows : [])];
+  // Context is never dropped; optional metrics move to a second line on medium widths.
+  const metrics = [...(show.context ? [context] : []), ...(show.memory && contentWidth >= 90 && view.memory ? [view.memory] : []), ...(show.cost && contentWidth >= 52 && cost ? [cost] : []), ...(show.quota && contentWidth >= 90 ? windows : [])];
   let right = theme.fg("dim", metrics.join("  ·  "));
   if (contentWidth < 52 && attention && contentWidth >= 26) {
     const room = Math.max(0, contentWidth - Math.min(visibleWidth(left), 12) - visibleWidth(right) - 4);
@@ -96,7 +97,11 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   if (name && space >= 7) namedLeft += theme.fg("dim", " · ") + theme.fg("muted", truncateToWidth(name, space - 3, "…"));
   const gap = " ".repeat(Math.max(1, contentWidth - visibleWidth(namedLeft) - visibleWidth(right)));
   const lines = [truncateToWidth(namedLeft + gap + right, contentWidth)];
-  if (contentWidth < 52) return framed ? frameFooter(lines, width, view, theme) : lines;
+  if (contentWidth < 52) {
+    const small = [...(show.memory && view.memory ? [view.memory] : []), ...(show.quota ? windows : [])];
+    if (small.length && contentWidth >= 26) lines.push(truncateToWidth(theme.fg("dim", small.join("  ·  ")), contentWidth));
+    return framed ? frameFooter(lines, width, view, theme) : lines;
+  }
 
   let moving = 0;
   const segments = roles.map((role) => {
@@ -112,8 +117,8 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   if (show.branch && contentWidth >= 52 && view.branch) extras.push(theme.fg("dim", `git ${cleanText(view.branch, 28)}`));
   const joined = [...segments, ...extras].join(theme.fg("dim", "  ·  "));
   if (joined) lines.push(truncateToWidth(joined, contentWidth));
-  if (show.quota && contentWidth >= 52 && contentWidth < 90 && windows.length) {
-    const summary = windows.join("  ·  ");
+  if (contentWidth < 90 && ((show.quota && windows.length) || (show.memory && view.memory))) {
+    const summary = [...(show.memory && view.memory ? [view.memory] : []), ...(show.quota ? windows : [])].join("  ·  ");
     if (summary) lines.push(truncateToWidth(theme.fg("dim", summary), contentWidth));
   }
   return framed ? frameFooter(lines, width, view, theme) : lines;
