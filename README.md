@@ -16,7 +16,7 @@ pi-jar is not just a color theme. It is a Pi package that combines:
 - a first-party, branch-aware native task tool that the agent is instructed to maintain automatically for multi-step work, plus a human-friendly `/jar tasks` view;
 - a rounded composer with a tiny animated terminal pet, the short Pi session/thread id beside it, native editor keybindings, and a truthful fallback when external integration state is unavailable;
 - a centralized full-screen visual settings view with keyboard controls and clickable controls when Pi receives mouse events;
-- compact-by-default rendering for Pi's built-in read/search/shell/edit/write tools, with the real output or diff still available through click/Ctrl+E expansion;
+- compact-by-default rendering for Pi's default read/shell/edit/write tools, with the real output or diff still available through click/Ctrl+E expansion;
 - a separate read-only `/jar history` conversation timeline for the active session branch.
 
 The design rule is simple: **role visibility first, useful telemetry second, decoration last.**
