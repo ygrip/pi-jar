@@ -17,6 +17,7 @@ export interface FooterView extends JarStatus {
   cwd?: string;
   settings?: FooterSettings;
   context: string;
+  goal?: string;
   memory?: string;
   cost?: string;
   quota?: Quota;
@@ -51,7 +52,8 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   const roles = show.roles ? [...view.roles].sort((a, b) => Number(b.state === "failed") - Number(a.state === "failed")) : [];
   const primary = roles.find((role) => role.state === "failed") ?? roles.find((role) => ACTIVE_STATES.has(role.state));
   const model = cleanText(view.model, 24) || "no-model";
-  const context = cleanText(view.context, 12) || "ctx ?";\n  const goal = view.goal ? cleanText(view.goal, 240) : "";
+  const context = cleanText(view.context, 12) || "ctx ?";
+  const goal = view.goal ? cleanText(view.goal, 240) : "";
   const quota = view.quota;
   const windows = [quota?.fiveHour && `5h ${Math.round(quota.fiveHour.used)}%`, quota?.week && `week ${Math.round(quota.week.used)}%`].filter((value): value is string => !!value);
   const cost = view.cost ? cleanText(view.cost, 20) : undefined;
@@ -97,6 +99,11 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   if (name && space >= 7) namedLeft += theme.fg("dim", " · ") + theme.fg("muted", truncateToWidth(name, space - 3, "…"));
   const gap = " ".repeat(Math.max(1, contentWidth - visibleWidth(namedLeft) - visibleWidth(right)));
   const lines = [truncateToWidth(namedLeft + gap + right, contentWidth)];
+  if (goal) {
+    const goalPrefix = theme.fg("accent", "◎ goal") + theme.fg("dim", " · ");
+    const room = Math.max(0, contentWidth - visibleWidth(goalPrefix));
+    lines.push(truncateToWidth(goalPrefix + theme.fg("muted", truncateToWidth(goal, room, "…")), contentWidth));
+  }
   if (contentWidth < 52) {
     const small = [...(show.memory && view.memory ? [view.memory] : []), ...(show.quota ? windows : [])];
     if (small.length && contentWidth >= 26) lines.push(truncateToWidth(theme.fg("dim", small.join("  ·  ")), contentWidth));
