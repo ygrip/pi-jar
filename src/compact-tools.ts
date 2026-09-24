@@ -3,7 +3,10 @@ import {
   createEditTool,
   createReadTool,
   createWriteTool,
-  type ExtensionAPI
+  getAgentDir,
+  SettingsManager,
+  type ExtensionAPI,
+  type ExtensionContext
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
@@ -31,7 +34,6 @@ const cache = new Map<string, ReturnType<typeof createTools>>();
 function createTools(cwd: string) {
   return {
     read: createReadTool(cwd),
-    bash: createBashTool(cwd),
     edit: createEditTool(cwd),
     write: createWriteTool(cwd)
   };
@@ -45,14 +47,23 @@ function toolsFor(cwd: string) {
   return tools;
 }
 
+function bashFor(ctx: ExtensionContext) {
+  const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
+  return createBashTool(ctx.cwd, {
+    shellPath: settings.getShellPath(),
+    commandPrefix: settings.getShellCommandPrefix()
+  });
+}
+
 export function installCompactBuiltinTools(pi: ExtensionAPI): void {
   if (typeof (pi as ExtensionAPI & { registerTool?: unknown }).registerTool !== "function") return;
 
   const seed = toolsFor(process.cwd());
+  const seedBash = createBashTool(process.cwd());
 
   pi.registerTool({
     name: "read", label: "read", description: seed.read.description, parameters: seed.read.parameters,
-    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).read.execute(id, params, signal, onUpdate); },
+    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).read.execute(id, params, signal, onUpdate, ctx); },
     renderCall(args, theme) {
       const range = args.offset || args.limit ? theme.fg("dim", ` · ${args.offset ?? 1}${args.limit ? `+${args.limit}` : ""}`) : "";
       return new Text(theme.fg("toolTitle", theme.bold("read ")) + theme.fg("accent", args.path) + range, 0, 0);
@@ -67,8 +78,8 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: "bash", label: "bash", description: seed.bash.description, parameters: seed.bash.parameters,
-    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).bash.execute(id, params, signal, onUpdate); },
+    name: "bash", label: "bash", description: seedBash.description, parameters: seedBash.parameters,
+    async execute(id, params, signal, onUpdate, ctx) { return bashFor(ctx).execute(id, params, signal, onUpdate, ctx); },
     renderCall(args, theme) {
       return new Text(theme.fg("toolTitle", theme.bold("$ ")) + theme.fg("accent", compactText(args.command, 88)), 0, 0);
     },
@@ -84,7 +95,7 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "edit", label: "edit", description: seed.edit.description, parameters: seed.edit.parameters,
-    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).edit.execute(id, params, signal, onUpdate); },
+    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).edit.execute(id, params, signal, onUpdate, ctx); },
     renderCall(args, theme) {
       return new Text(theme.fg("toolTitle", theme.bold("edit ")) + theme.fg("accent", args.path), 0, 0);
     },
@@ -109,7 +120,7 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "write", label: "write", description: seed.write.description, parameters: seed.write.parameters,
-    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).write.execute(id, params, signal, onUpdate); },
+    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).write.execute(id, params, signal, onUpdate, ctx); },
     renderCall(args, theme, context) {
       const count = args.content.split("\n").length;
       let text = theme.fg("toolTitle", theme.bold("write ")) + theme.fg("accent", args.path) + theme.fg("dim", ` · ${count} lines`);
