@@ -1,9 +1,6 @@
 import {
   createBashTool,
   createEditTool,
-  createFindTool,
-  createGrepTool,
-  createLsTool,
   createReadTool,
   createWriteTool,
   type ExtensionAPI
@@ -36,10 +33,7 @@ function createTools(cwd: string) {
     read: createReadTool(cwd),
     bash: createBashTool(cwd),
     edit: createEditTool(cwd),
-    write: createWriteTool(cwd),
-    grep: createGrepTool(cwd),
-    find: createFindTool(cwd),
-    ls: createLsTool(cwd)
+    write: createWriteTool(cwd)
   };
 }
 function toolsFor(cwd: string) {
@@ -128,45 +122,4 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     }
   });
 
-  pi.registerTool({
-    name: "grep", label: "grep", description: seed.grep.description, parameters: seed.grep.parameters,
-    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).grep.execute(id, params, signal, onUpdate); },
-    renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("grep ")) + theme.fg("accent", `/${args.pattern}/ in ${args.path ?? "."}`), 0, 0);
-    },
-    renderResult(result, { expanded, isPartial }, theme) {
-      const text = outputText(result);
-      if (expanded) return fullText(text, theme);
-      const count = nonEmptyLines(text).length;
-      return new Text(theme.fg(isPartial ? "warning" : "muted", `${isPartial ? "searching" : count + " match" + (count === 1 ? "" : "es")}${expandHint}`), 0, 0);
-    }
-  });
-
-  pi.registerTool({
-    name: "find", label: "find", description: seed.find.description, parameters: seed.find.parameters,
-    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).find.execute(id, params, signal, onUpdate); },
-    renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("find ")) + theme.fg("accent", `${args.pattern} in ${args.path ?? "."}`), 0, 0);
-    },
-    renderResult(result, { expanded, isPartial }, theme) {
-      const text = outputText(result);
-      if (expanded) return fullText(text, theme);
-      const count = nonEmptyLines(text).length;
-      return new Text(theme.fg(isPartial ? "warning" : "muted", `${isPartial ? "searching" : count + " file" + (count === 1 ? "" : "s")}${expandHint}`), 0, 0);
-    }
-  });
-
-  pi.registerTool({
-    name: "ls", label: "ls", description: seed.ls.description, parameters: seed.ls.parameters,
-    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).ls.execute(id, params, signal, onUpdate); },
-    renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("ls ")) + theme.fg("accent", args.path ?? "."), 0, 0);
-    },
-    renderResult(result, { expanded, isPartial }, theme) {
-      const text = outputText(result);
-      if (expanded) return fullText(text, theme);
-      const count = nonEmptyLines(text).length;
-      return new Text(theme.fg(isPartial ? "warning" : "muted", `${isPartial ? "listing" : count + " entr" + (count === 1 ? "y" : "ies")}${expandHint}`), 0, 0);
-    }
-  });
 }
