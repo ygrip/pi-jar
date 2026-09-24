@@ -27,7 +27,8 @@ function safeSegment(segment: string): boolean {
   const tokens = segment.trim().split(/\s+/).filter(Boolean);
   const command = tokens[0] ?? "";
   if (!command) return false;
-  if (command === "sort" && tokens.some((token, index) => index > 0 && (token === "-o" || token.startsWith("--output")))) return false;\n  if (SIMPLE_READ_COMMANDS.has(command)) return true;
+  if (command === "sort" && tokens.some((token, index) => index > 0 && (token === "-o" || token.startsWith("--output")))) return false;
+  if (SIMPLE_READ_COMMANDS.has(command)) return true;
   if (command === "find") return !FIND_MUTATION.test(segment);
   if (command === "git") return safeGit(tokens);
   if (["npm", "pnpm", "yarn", "bun"].includes(command)) return safePackageQuery(tokens);
