@@ -142,11 +142,10 @@ export class ModelRoleManager {
         const selected = await ctx.ui.select("Thinking effort for " + role, ["follow current", ...THINKING]);
         if (!selected) continue;
         if (!current) { ctx.ui.notify("Assign a model first", "warning"); continue; }
-        this.update(role, { ...current, ...(selected === "follow current" ? {} : { thinking: selected as ThinkingLevel }) });
-        if (selected === "follow current") {
-          const value = this.config.roles[role];
-          if (value) { delete value.thinking; saveConfig(this.config); }
-        }
+        const { thinking: _previousThinking, ...base } = current;
+        this.update(role, selected === "follow current"
+          ? base
+          : { ...base, thinking: selected as ThinkingLevel });
       } else if (choice === "Activate role now") {
         await this.activate(role, ctx);
       } else if (choice === "Clear assignment") {
@@ -157,6 +156,10 @@ export class ModelRoleManager {
   }
 
   register(): void {
+    this.pi.on("session_start", async (_event, ctx) => {
+      if (this.config.roles.default) await this.activate("default", ctx, true);
+    });
+
     this.pi.registerCommand("roles", {
       description: "Configure model assignments for default/smol/slow/plan/commit/task/advisor roles",
       handler: async (args, ctx) => {
