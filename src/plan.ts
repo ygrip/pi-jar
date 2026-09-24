@@ -217,12 +217,13 @@ export class PlanMode {
           ctx.ui.notify("Plan mode off", "info");
           return;
         }
+        const wasEnabled = this.enabled;
         if (!this.enabled) await this.enter(ctx);
         if (text) {
           this.pi.sendUserMessage(text);
           return;
         }
-        if (this.steps.length) await this.review(ctx);
+        if (wasEnabled && this.steps.length) await this.review(ctx);
       }
     });
 
@@ -261,7 +262,7 @@ export class PlanMode {
     this.pi.on("context", async (event) => {
       if (this.enabled) return;
       return { messages: event.messages.filter((raw) => {
-        const message = raw as Record<string, unknown>;
+        const message = raw as { customType?: string };
         return message.customType !== "pi-jar.plan-context";
       }) };
     });
