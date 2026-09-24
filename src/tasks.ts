@@ -55,15 +55,21 @@ export class TodoStore {
     try { this.append(event); return true; }
     catch { this.items = before; return false; }
   }
-  add(title: string): Todo | undefined {
+  add(title: string, details?: string): Todo | undefined {
     if (!validTitle(title)) return undefined;
     const id = randomUUID();
-    return this.commit({ v: 1, op: "add", id, title }) ? this.get(id) : undefined;
+    const cleanDetails = typeof details === "string" && details.trim() ? cleanText(details, 240) : undefined;
+    return this.commit({ v: 1, op: "add", id, title, ...(cleanDetails ? { details: cleanDetails } : {}) }) ? this.get(id) : undefined;
   }
   edit(id: string, title: string): boolean { return this.commit({ v: 1, op: "edit", id, title }); }
+  setDone(id: string, done: boolean): boolean {
+    const item = this.items.get(id);
+    if (!item) return false;
+    return item.done === done || this.commit({ v: 1, op: "toggle", id, done });
+  }
   toggle(id: string): boolean {
     const item = this.items.get(id);
-    return !!item && this.commit({ v: 1, op: "toggle", id, done: !item.done });
+    return !!item && this.setDone(id, !item.done);
   }
   delete(id: string): boolean { return this.commit({ v: 1, op: "delete", id }); }
 }
