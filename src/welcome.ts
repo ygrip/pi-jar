@@ -24,92 +24,100 @@ type Paint = (color: WelcomeColor, text: string) => string;
 // heat and lift rather than a blinking bitmap.
 const FLAME_FRAMES = [
   [
-    "        ░▒░        ",
-    "       ░▒▓▒░       ",
-    "      ░▒▓█▓▒░      ",
-    "    ░▒▓████▓▒░     ",
-    "     ▒▓█████▓▒     ",
-    "   ░▒▓███████▓▒░   ",
-    "    ▒▓███████▓▒    ",
-    "     ░▓█████▓░     ",
-    "       ▒███▒       "
+    "         ░         ",
+    "       ░▒▓░        ",
+    "      ▒▓█▓▒   ░    ",
+    "   ░  ▒████▓▒      ",
+    "     ▒██▓███▒      ",
+    "    ▒██▓██▓██▒     ",
+    "   ▒██████████▒    ",
+    "    ▒████████▒     ",
+    "     ▒██████▒      ",
+    "       ▒██▒        "
   ],
   [
-    "         ░▒░       ",
-    "        ▒▓▒░       ",
-    "      ░▒▓██▒░      ",
-    "     ▒▓████▓▒░     ",
-    "   ░▒▓██████▓▒     ",
-    "    ▒▓███████▓▒    ",
-    "   ░▒▓██████▓▒░    ",
-    "     ▒▓████▓▒      ",
-    "       ▒███▒       "
-  ],
-  [
-    "       ░▒░         ",
-    "      ░▒▓▒░        ",
-    "      ▒▓██▓▒░      ",
-    "    ░▒▓█████▓▒     ",
-    "     ▒▓██████▓▒    ",
-    "   ░▒▓███████▓▒░   ",
-    "    ▒▓██████▓▒     ",
-    "      ▓████▓▒      ",
-    "       ▒███▒       "
+    "      ░            ",
+    "       ▒░   ░      ",
+    "      ▒▓▒          ",
+    "     ▒▓██▒         ",
+    "   ░▒████▓▒        ",
+    "    ▒██▓███▒       ",
+    "   ▒██▓██▓██▒      ",
+    "  ▒██████████▒     ",
+    "    ▒███████▒      ",
+    "      ▒███▒        "
   ],
   [
     "          ░        ",
-    "        ░▒▓▒       ",
-    "       ▒▓██▓▒░     ",
-    "     ░▒▓████▓▒     ",
-    "    ▒▓███████▓▒    ",
-    "   ░▒▓████████▓▒   ",
-    "     ▒▓██████▓▒    ",
-    "      ░▓████▓░     ",
-    "       ▒███▒       "
+    "      ░  ▒▓░       ",
+    "        ▒██▒       ",
+    "      ▒▓███▒       ",
+    "     ▒██▓██▓▒  ░   ",
+    "    ▒██▓███▓██▒    ",
+    "   ▒██████████▒    ",
+    "    ▒████████▒     ",
+    "      ▒████▒       ",
+    "       ▒██▒        "
   ],
   [
-    "        ░▒░        ",
-    "       ▒▓▒░        ",
-    "     ░▒▓██▓▒░      ",
-    "    ▒▓██████▓▒     ",
-    "   ░▒▓███████▓▒    ",
-    "    ▒▓████████▓▒   ",
-    "   ░▒▓██████▓▒░    ",
-    "      ▒████▓▒      ",
-    "       ▒███▒       "
+    "       ░           ",
+    "        ▒░         ",
+    "       ▒▓▒   ░     ",
+    "      ▒██▓▒        ",
+    "     ▒██▓██▒       ",
+    "   ▒▓██▓██▓██▒     ",
+    "   ▒██████████▒    ",
+    "    ▒████████▒     ",
+    "     ▒█████▒       ",
+    "       ▒██▒        "
   ],
   [
     "         ░         ",
-    "       ░▒▓▒░       ",
-    "      ▒▓███▓▒      ",
-    "    ░▒▓█████▓▒     ",
-    "   ▒▓████████▓▒    ",
-    "    ▒▓███████▓▒    ",
-    "   ░▒▓██████▓▒░    ",
-    "      ▓████▓▒      ",
-    "       ▒███▒       "
+    "      ░ ▒▓░        ",
+    "       ▒██▒        ",
+    "    ░ ▒████▒       ",
+    "     ▒██▓██▓▒      ",
+    "    ▒██▓██▓██▒     ",
+    "   ▒██████████▒    ",
+    "     ▒███████▒     ",
+    "      ▒████▒       ",
+    "       ▒██▒        "
   ],
   [
-    "       ░▒░         ",
-    "       ▒▓▒░        ",
-    "      ▒▓██▓▒       ",
-    "   ░▒▓██████▓▒░    ",
-    "    ▒▓████████▓▒   ",
-    "   ░▒▓███████▓▒    ",
-    "    ▒▓██████▓▒     ",
-    "      ▒████▓░      ",
-    "       ▒███▒       "
+    "      ░            ",
+    "        ▒░         ",
+    "       ▒▓▒         ",
+    "      ▒██▓▒   ░    ",
+    "     ▒█████▒       ",
+    "    ▒██▓██▓██▒     ",
+    "   ▒██████████▒    ",
+    "    ▒████████▒     ",
+    "     ▒██████▒      ",
+    "       ▒██▒        "
   ],
   [
-    "          ░▒░      ",
-    "        ░▒▓▒       ",
-    "       ▒▓██▓▒      ",
-    "     ▒▓██████▓▒    ",
-    "   ░▒▓████████▓▒   ",
-    "    ▒▓███████▓▒    ",
-    "   ░▒▓██████▓▒░    ",
-    "      ▒████▓▒      ",
-    "       ▒███▒       "
+    "          ░        ",
+    "       ░ ▒▓░       ",
+    "        ▒██▒       ",
+    "      ▒████▒       ",
+    "   ░ ▒██▓██▓▒      ",
+    "    ▒██▓███▓██▒    ",
+    "   ▒██████████▒    ",
+    "    ▒████████▒     ",
+    "      ▒█████▒      ",
+    "       ▒██▒        "
+  ],
+  [
+    "       ░           ",
+    "       ▒░     ░    ",
+    "      ▒▓▒          ",
+    "     ▒██▓▒         ",
+    "    ▒█████▒        ",
+    "   ▒██▓██▓██▒      ",
+    "  ▒██████████▒     ",
+    "    ▒████████▒     ",
+    "     ▒█████▒       ",
+    "       ▒██▒        "
   ]
 ] as const;
 
@@ -122,15 +130,20 @@ const PI_LARGE = [
 ] as const;
 const PI_COMPACT = ["  ▄▄▄▄▄▄▄  ", " ▄███████▄ ", "   █   █   ", "  ▄█   █▄  "] as const;
 const ART_WIDTH = 24;
-const FLAME_WIDTH = 21;
+const FLAME_WIDTH = 19;
 
 const center = (line: string, width: number) => {
   const room = Math.max(0, width - visibleWidth(line));
   const left = Math.floor(room / 2);
   return " ".repeat(left) + line + " ".repeat(room - left);
 };
-const flameCell = (line: string) => center(line.trimEnd(), FLAME_WIDTH);
-const spaceArt = (line: string) => " " + line + " ".repeat(Math.max(0, ART_WIDTH - visibleWidth(line) - 1));
+const fixedCell = (line: string, width: number) => {
+  const value = truncateToWidth(line, width);
+  return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
+};
+const flameCell = (line: string) => fixedCell(line, FLAME_WIDTH);
+const flameArtCell = (line: string) => center(line, ART_WIDTH);
+const piArtCell = (line: string) => center(fixedCell(line, 21), ART_WIDTH);
 
 function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
   const w = Math.max(8, width);
@@ -143,18 +156,16 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
   const role = info.roles?.find((item) => ["working", "thinking", "reviewing", "failed"].includes(item.state)) ?? info.roles?.[0];
   const roleName = cleanText(role?.name ?? "assistant", w < 48 ? 12 : 25);
   const roleState = cleanText(role?.state ?? "ready", 12);
-  const advisor = cleanText(info.advisor ?? "unavailable", 20);
   const task = role?.task ?? (info.tasks ? `${info.tasks} open to-do${info.tasks === 1 ? "" : "s"}` : "no active task");
   const subagents = Math.max(0, (info.roles?.length ?? 0) - (info.roles?.some((r) => r.name === "assistant") ? 1 : 0));
   const roleChip = fg("accent", `[ role-${roleName} ]`);
   const activityChip = fg(role?.state === "failed" ? "error" : "warning", `[ ${roleState} ]`);
-  const advisorChip = fg(advisor === "unavailable" || advisor === "off" ? "dim" : "accent", `[ advisor ${advisor} ]`);
   const subagentChip = fg("accent", `[ subagents ${subagents} ]`);
   const quotaChip = info.quota != null
     ? fg("warning", `[ quota ${Math.round(info.quota)}% ]`)
     : fg("dim", `[ quota ${info.quotaEnabled ? "unavailable" : "off"} ]`);
   const narrow = w < 48;
-  const badges = [roleChip, activityChip, advisorChip, subagentChip, quotaChip];
+  const badges = [roleChip, activityChip, subagentChip, quotaChip];
   const badgeRows: string[] = [];
   for (const badge of badges) {
     const last = badgeRows.length - 1;
@@ -164,20 +175,26 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
   const branch = info.branch ? fg("muted", `[ git ${cleanText(info.branch, 24)} ]`) : fg("dim", "[ git unavailable ]");
   const git = branch + (info.dirty ? " " + fg("warning", "[ dirty ]") : "");
   const label = (name: string, value: string, color: WelcomeColor = "muted") => fg("dim", `${name.padEnd(10)} │ `) + fg(color, cleanText(value, 70));
+  const managers = info.managers?.length
+    ? (narrow ? info.managers.join(" + ") : info.managers.map((m) => m === "tasks" ? "/tasks" : "/subagents-fleet").join(" · "))
+    : "none detected";
+  const hero = narrow ? "A little light for the work ahead."
+    : "A little light for the work ahead. Roles, tasks, and subagents stay close.";
   return [
     fg("dim", "╭" + "─".repeat(w - 2) + "╮"),
     cell(fg("accent", "pi-jar") + fg("muted", "  ·  roles & orchestration")),
     divider,
     ...badgeRows.map(cell),
     divider,
+    cell(fg("muted", "Welcome to ") + fg("accent", "pi-jar")),
+    cell(fg("dim", hero)),
+    divider,
     cell(label("TASK", task, role?.state === "failed" ? "error" : "accent")),
     cell(label("PROJECT", info.project || "unavailable")),
-    cell(label("ADVISOR", advisor, advisor === "unavailable" ? "dim" : "accent")),
-    cell(label("MANAGERS", info.managers?.length ? narrow ? info.managers.join(" + ") : info.managers.map((m) => m === "tasks" ? "/tasks" : "/subagents-fleet").join(" · ") : "none detected")),
+    cell(label("MANAGERS", managers)),
     cell(git),
-    cell(fg("dim", [info.model, info.context, info.cost].filter(Boolean).map((v) => cleanText(v!, 28)).join("  ·  "))),
     divider,
-    cell(fg("accent", "[ Settings ↗ ]") + fg("dim", narrow ? "  /jar hub" : "  ·  /jar hub  ·  /jar welcome")),
+    cell(fg("accent", "[ Settings ↗ ]") + fg("dim", narrow ? "  /jar settings" : "  ·  /jar hub  ·  /jar welcome")),
     fg("dim", "╰" + "─".repeat(w - 2) + "╯")
   ];
 }
@@ -212,13 +229,15 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
   ];
   const wide = width >= 72;
   const art = wide ? [
-    ...flame.map((line) => paintFlame(spaceArt(line))),
-    ...PI_LARGE.map((line) => fg("accent", spaceArt(line)))
+    ...flame.map((line) => paintFlame(flameArtCell(line))),
+    ...PI_LARGE.map((line) => fg("accent", piArtCell(line)))
   ] : [...compactFlame, ...PI_COMPACT.map((line) => fg("accent", line))];
   const details = card(wide ? width - ART_WIDTH - 2 : width, fg, info);
   if (!wide) return [...art.map(fit), ...details.map(fit)];
-  return Array.from({ length: Math.max(art.length, details.length) }, (_, index) => {
-    const left = art[index] ?? "";
-    return fit(left + " ".repeat(Math.max(0, ART_WIDTH - visibleWidth(left))) + "  " + (details[index] ?? ""));
+  const topPad = Math.max(0, Math.floor((details.length - art.length) / 2));
+  const artRows = [...Array.from({ length: topPad }, () => " ".repeat(ART_WIDTH)), ...art];
+  return Array.from({ length: Math.max(artRows.length, details.length) }, (_, index) => {
+    const left = artRows[index] ?? " ".repeat(ART_WIDTH);
+    return fit(left + "  " + (details[index] ?? ""));
   });
 }

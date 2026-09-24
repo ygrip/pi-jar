@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { ComposerStyle, composerIcon, roundedInput, shortSessionId } from "../src/composer.ts";
+import { ComposerStyle, composerIcon, roundedInput, sessionDisplayName } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import piJar from "../extensions/index.ts";
 import { promptChoice, promptText, todoView } from "../src/dialogs.ts";
@@ -168,13 +168,13 @@ test("default Pi tools keep native metadata while collapsed cards stay brief", (
   assert.doesNotMatch(writeCollapsed, /two/);
 });
 
-test("rounded input fits, shows the pet sprite and exposes the short session id", () => {
+test("rounded input fits, shows the pet sprite and exposes a human session label", () => {
   const paint = (text: string) => `\x1b[36m${text}\x1b[0m`;
   const lines = ["top", "draft", "bottom"];
   const idle = roundedInput(lines, 40, false, theme as never, paint);
-  const focused = roundedInput(lines, 40, true, theme as never, paint, composerIcon("idle"), "abcdef12");
+  const focused = roundedInput(lines, 40, true, theme as never, paint, composerIcon("idle"), "ember-trail");
   assert.ok(focused[0]?.includes("▟•ᴗ•▙"));
-  assert.ok(focused[0]?.includes("session abcdef12"));
+  assert.ok(focused[0]?.includes("session ember-trail"));
   const widths = new Set<number>();
   for (const phase of ["idle", "generating", "tool", "waiting"] as const) {
     widths.add(visibleWidth(composerIcon(phase, 2)));
@@ -182,12 +182,16 @@ test("rounded input fits, shows the pet sprite and exposes the short session id"
   }
   assert.equal(widths.size, 1);
   assert.ok([...widths][0]! > 1);
-  assert.equal(shortSessionId("019a0a2b-f81d-7350-8188-abcdef123456"), "abcdef12");
+  assert.equal(sessionDisplayName("Welcome polish", "019a0a2b-f81d-7350-8188-abcdef123456"), "Welcome polish");
+  const fallback = sessionDisplayName(undefined, "019a0a2b-f81d-7350-8188-abcdef123456");
+  assert.match(fallback, /^[a-z]+-[a-z]+$/);
+  assert.equal(fallback, sessionDisplayName(undefined, "019a0a2b-f81d-7350-8188-abcdef123456"));
+  assert.doesNotMatch(fallback, /abcdef|123456/);
   assert.match(focused[1] ?? "", /│.*draft.*│/);
   assert.match(focused[0] ?? "", /\x1b\[36m/);
   assert.notDeepEqual(idle, focused);
   for (const width of [4, 8, 16, 28, 40]) {
-    assert.ok(roundedInput(lines, width, true, theme as never, paint, composerIcon("idle"), "abcdef12").every((line) => visibleWidth(line) <= width));
+    assert.ok(roundedInput(lines, width, true, theme as never, paint, composerIcon("idle"), "ember-trail").every((line) => visibleWidth(line) <= width));
   }
 });
 
@@ -195,7 +199,10 @@ test("composer enable failure restores a previously installed editor", () => {
   const original = () => ({ render: () => ["editor"], getText: () => "draft", setText() {}, invalidate() {}, handleInput() {} });
   let current: Function | undefined = original;
   const style = new ComposerStyle();
-  const ctx = { hasUI: true, mode: "tui", sessionManager: { getSessionId: () => "019a0a2b-f81d-7350-8188-abcdef123456" }, ui: {
+  const ctx = { hasUI: true, mode: "tui", sessionManager: {
+    getSessionId: () => "019a0a2b-f81d-7350-8188-abcdef123456",
+    getSessionName: () => "Welcome polish"
+  }, ui: {
     getEditorComponent: () => current,
     setEditorComponent: (factory: Function | undefined) => { current = factory; },
     getEditorText: () => "draft",
@@ -216,7 +223,10 @@ test("composer restores previous editor and draft, respects later editor owners,
   });
   current = original;
   const widgets = new Map<string, Function>();
-  const ctx = { hasUI: true, mode: "tui", sessionManager: { getSessionId: () => "019a0a2b-f81d-7350-8188-abcdef123456" }, ui: {
+  const ctx = { hasUI: true, mode: "tui", sessionManager: {
+    getSessionId: () => "019a0a2b-f81d-7350-8188-abcdef123456",
+    getSessionName: () => "Welcome polish"
+  }, ui: {
     getEditorComponent: () => current,
     setEditorComponent: (factory: typeof current) => { current = factory; },
     getEditorText: () => draft,
@@ -231,7 +241,7 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.equal(draft, "keep this draft");
   const decorated = current?.({}, theme, {}) as { render(width: number): string[]; setText(text: string): void };
   assert.ok(decorated.render(80)[0]?.includes("▟•ᴗ•▙"));
-  assert.ok(decorated.render(80)[0]?.includes("session abcdef12"));
+  assert.ok(decorated.render(80)[0]?.includes("session Welcome polish"));
   decorated.setText("editing");
   style.disable(ctx as never);
   assert.equal(current, original);
@@ -249,15 +259,19 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.equal(widgets.size, 0);
 });
 
-test("composer icon tracks observed phases, honors motion-off and stops after interruption", async () => {
+test("composer icon tracks observed phases, refreshes session title, honors motion-off and stops after interruption", async () => {
   let current: Function | undefined = () => ({
     onSubmit: undefined, onChange: undefined, focused: true,
     render: () => ["top", "existing draft", "bottom"],
     getText: () => "existing draft", setText() {}, invalidate() {}, handleInput() {}
   });
   let redraws = 0;
+  let sessionName = "Welcome polish";
   const tui = { requestRender() { redraws++; } };
-  const ctx = { hasUI: true, mode: "tui", sessionManager: { getSessionId: () => "thread-12345678" }, ui: {
+  const ctx = { hasUI: true, mode: "tui", sessionManager: {
+    getSessionId: () => "thread-12345678",
+    getSessionName: () => sessionName
+  }, ui: {
     getEditorComponent: () => current,
     setEditorComponent: (factory: Function | undefined) => { current = factory; },
     getEditorText: () => "existing draft", setEditorText() {}
@@ -267,7 +281,10 @@ test("composer icon tracks observed phases, honors motion-off and stops after in
   const editor = current?.(tui, theme, {}) as { render(width: number): string[] };
   const icon = () => editor.render(40)[0] ?? "";
   assert.ok(icon().includes("▟•ᴗ•▙"));
-  assert.ok(icon().includes("session 12345678"));
+  assert.ok(icon().includes("session Welcome polish"));
+  sessionName = "Flame pass";
+  style.refreshSession(ctx as never);
+  assert.ok(icon().includes("session Flame pass"));
   style.setActivity("generating", true);
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.ok(redraws > 0);
