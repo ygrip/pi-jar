@@ -128,28 +128,45 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     }
   });
 
-  const searchTools = [
-    ["grep", seed.grep, (args: { pattern?: string; path?: string }) => `/${args.pattern ?? ""}/ in ${args.path ?? "."}`],
-    ["find", seed.find, (args: { pattern?: string; path?: string }) => `${args.pattern ?? "*"} in ${args.path ?? "."}`],
-    ["ls", seed.ls, (args: { path?: string }) => args.path ?? "."]
-  ] as const;
+  pi.registerTool({
+    name: "grep", label: "grep", description: seed.grep.description, parameters: seed.grep.parameters,
+    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).grep.execute(id, params, signal, onUpdate); },
+    renderCall(args, theme) {
+      return new Text(theme.fg("toolTitle", theme.bold("grep ")) + theme.fg("accent", `/${args.pattern}/ in ${args.path ?? "."}`), 0, 0);
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      const text = outputText(result);
+      if (expanded) return fullText(text, theme);
+      const count = nonEmptyLines(text).length;
+      return new Text(theme.fg(isPartial ? "warning" : "muted", `${isPartial ? "searching" : count + " match" + (count === 1 ? "" : "es")}${expandHint}`), 0, 0);
+    }
+  });
 
-  for (const [name, original, title] of searchTools) {
-    pi.registerTool({
-      name, label: name, description: original.description, parameters: original.parameters,
-      async execute(id, params, signal, onUpdate, ctx) {
-        const tool = toolsFor(ctx.cwd)[name];
-        return tool.execute(id, params as never, signal, onUpdate);
-      },
-      renderCall(args, theme) {
-        return new Text(theme.fg("toolTitle", theme.bold(name + " ")) + theme.fg("accent", title(args as never)), 0, 0);
-      },
-      renderResult(result, { expanded, isPartial }, theme) {
-        const text = outputText(result);
-        if (expanded) return fullText(text, theme);
-        const count = nonEmptyLines(text).length;
-        return new Text(theme.fg(isPartial ? "warning" : "muted", `${isPartial ? "searching" : count + " result" + (count === 1 ? "" : "s")}${expandHint}`), 0, 0);
-      }
-    });
-  }
+  pi.registerTool({
+    name: "find", label: "find", description: seed.find.description, parameters: seed.find.parameters,
+    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).find.execute(id, params, signal, onUpdate); },
+    renderCall(args, theme) {
+      return new Text(theme.fg("toolTitle", theme.bold("find ")) + theme.fg("accent", `${args.pattern} in ${args.path ?? "."}`), 0, 0);
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      const text = outputText(result);
+      if (expanded) return fullText(text, theme);
+      const count = nonEmptyLines(text).length;
+      return new Text(theme.fg(isPartial ? "warning" : "muted", `${isPartial ? "searching" : count + " file" + (count === 1 ? "" : "s")}${expandHint}`), 0, 0);
+    }
+  });
+
+  pi.registerTool({
+    name: "ls", label: "ls", description: seed.ls.description, parameters: seed.ls.parameters,
+    async execute(id, params, signal, onUpdate, ctx) { return toolsFor(ctx.cwd).ls.execute(id, params, signal, onUpdate); },
+    renderCall(args, theme) {
+      return new Text(theme.fg("toolTitle", theme.bold("ls ")) + theme.fg("accent", args.path ?? "."), 0, 0);
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      const text = outputText(result);
+      if (expanded) return fullText(text, theme);
+      const count = nonEmptyLines(text).length;
+      return new Text(theme.fg(isPartial ? "warning" : "muted", `${isPartial ? "listing" : count + " entr" + (count === 1 ? "y" : "ies")}${expandHint}`), 0, 0);
+    }
+  });
 }
