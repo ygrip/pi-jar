@@ -114,5 +114,5 @@ export async function openJarSettings(
           fit(theme.fg("dim", "╰" + "─".repeat(Math.max(0, width - 2)) + "╯"))];
       }
     };
-  }, { overlay: true, overlayOptions: { anchor: "center", width: 64, maxHeight: "80%" } });
+  });
 }
