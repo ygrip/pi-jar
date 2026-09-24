@@ -2,7 +2,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { basename } from "node:path";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { Key, truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
@@ -21,7 +21,7 @@ import { registerTaskTool } from "../src/task-tool.ts";
 import { TASK_ENTRY, TodoStore } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
-import { welcomeLines, welcomeSettingsHit } from "../src/welcome.ts";
+import { hopefulWelcomeMessage, welcomeLines, welcomeSettingsHit } from "../src/welcome.ts";
 
 const WELCOME_KEY = "pi-jar.welcome";
 export default function piJar(pi: ExtensionAPI): void {
@@ -37,7 +37,8 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeInterval: ReturnType<typeof setInterval> | undefined;
   let welcomeFrame = 0;
   let welcomeDismiss = 0;
-  let welcomeTui: { requestRender(): void } | undefined;
+  let welcomeTui: TUI | undefined;
+  let welcomePointerCleanup: (() => void) | undefined;
   let welcomeGit: AbortController | undefined;
   let welcomeBranch = (): string | null => null;
   let todos: TodoStore | undefined;
@@ -98,10 +99,50 @@ export default function piJar(pi: ExtensionAPI): void {
     welcomeGit = undefined;
     if (welcomeInterval) clearInterval(welcomeInterval);
     welcomeInterval = undefined;
+    welcomePointerCleanup?.();
+    welcomePointerCleanup = undefined;
     welcomeTui = undefined;
     if (ctx?.hasUI && ctx.mode === "tui") {
       try { ctx.ui.setWidget(WELCOME_KEY, undefined); } catch { /* optional widget API */ }
     }
+  };
+
+  const openWelcomeSettings = (ctx: ExtensionContext) => {
+    if (settingsOpen) return;
+    stopWelcome(ctx);
+    void openSettings(ctx);
+  };
+
+  const installRegularWelcomePointer = (tui: TUI, ctx: ExtensionContext) => {
+    if (tui.mode !== "regular") return;
+    const main = tui as TUI & {
+      captureRenderState?: () => { previousLines: string[]; previousViewportTop: number };
+    };
+    if (!main.captureRenderState || !tui.terminal?.write || !tui.addInputListener) return;
+
+    // Pi intentionally leaves mouse reporting off on its regular screen. While
+    // the transient welcome is visible, opt into click-only SGR reporting so
+    // Settings behaves like the button it looks like, then restore the terminal
+    // immediately when the welcome closes.
+    tui.terminal.write("\x1b[?1000h\x1b[?1006h");
+    const remove = tui.addInputListener((data) => {
+      const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
+      if (!mouse) return;
+      const button = Number(mouse[1]);
+      const x = Number(mouse[2]) - 1;
+      const screenY = Number(mouse[3]) - 1;
+      const kind = mouse[4];
+      if (kind === "M" && (button & 3) === 0 && (button & 32) === 0 && (button & 64) === 0) {
+        const state = main.captureRenderState?.();
+        const line = state?.previousLines[state.previousViewportTop + screenY];
+        if (line && welcomeSettingsHit([line], x, 0)) queueMicrotask(() => openWelcomeSettings(ctx));
+      }
+      return { consume: true };
+    });
+    welcomePointerCleanup = () => {
+      remove();
+      try { tui.terminal.write("\x1b[?1000l\x1b[?1006l"); } catch { /* best effort terminal restore */ }
+    };
   };
   const showWelcome = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui" || !enabled) return;
@@ -126,7 +167,8 @@ export default function piJar(pi: ExtensionAPI): void {
         managers,
         quotaEnabled: quotaCache?.enabled ?? false,
         tasks: todos?.all().filter((item) => !item.done).length,
-        branch, dirty: false
+        branch, dirty: false,
+        message: hopefulWelcomeMessage()
       };
       const git = new AbortController();
       welcomeGit = git;
@@ -143,16 +185,14 @@ export default function piJar(pi: ExtensionAPI): void {
       }
       ctx.ui.setWidget(WELCOME_KEY, (tui, theme) => {
         welcomeTui = tui;
+        installRegularWelcomePointer(tui, ctx);
         let visibleLines: string[] = [];
         return { invalidate() {}, handleMouse(event: TuiMouseEvent) {
           if (event.button !== "left" || welcomeDismiss
             || !welcomeSettingsHit(visibleLines, event.x, event.y)) return;
-          // Act on press instead of waiting for a synthesized click. This is more
-          // reliable across fullscreen terminals and multiplexers while keeping
-          // the target scoped to the rendered Settings control.
-          if (event.type !== "press") return { handled: true };
-          queueMicrotask(() => { stopWelcome(ctx); void openSettings(ctx); });
-          return { handled: true, capture: true };
+          if (event.type !== "press" && event.type !== "click") return { handled: true };
+          queueMicrotask(() => openWelcomeSettings(ctx));
+          return { handled: true, capture: event.type === "press" };
         }, render(width: number) {
           const statuses = welcomeStatuses();
           const live = collectStatuses(statuses, Date.now());
