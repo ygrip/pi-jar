@@ -9,7 +9,7 @@ export const PLAN_ENTRY = "pi-jar.plan";
 type PlanAction = "implement" | "compact" | "stop";
 type PlanState = { v: 1; enabled: boolean; steps: string[] };
 
-const READ_ONLY_TOOL = /^(?:read|grep|find|ls|search|query|get|list|fetch|view|inspect|status|show|diff|log|cat|question|questionnaire|ask|jar_ask)(?:$|[_-])/i;
+const READ_ONLY_TOOL = /(?:^|[_-])(?:read|grep|find|ls|search|query|get|list|fetch|view|inspect|status|show|diff|log|cat)$/i;
 const ALWAYS_READ_ONLY = new Set(["read", "bash", "grep", "find", "ls", "questionnaire", "jar_ask"]);
 
 function assistantText(message: unknown): string {
