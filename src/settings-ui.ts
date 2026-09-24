@@ -26,7 +26,7 @@ export async function openJarSettings(
     const accents: JarAccent[] = ["follow", ...availableAccents.filter((name): name is JarAccent =>
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
     const fields = () => page === "footer" ? FOOTER_FIELDS.length : 4;
-    const pageSize = () => Math.min(5, Math.max(2, (process.stdout.rows ?? 20) - 10));
+    const pageSize = () => Math.min(fields(), Math.max(4, (process.stdout.rows ?? 24) - 9));
     const firstVisible = () => Math.min(Math.max(0, selected - pageSize() + 1), Math.max(0, fields() - pageSize()));
     const visibleCount = () => Math.min(pageSize(), fields());
     const apply = (index: number) => {
