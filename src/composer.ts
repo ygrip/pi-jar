@@ -20,6 +20,28 @@ export function shortSessionId(id?: string): string {
   return tail.slice(0, 8);
 }
 
+const SESSION_FIRST = ["ember", "quiet", "steady", "silver", "warm", "clear", "gentle", "lunar"] as const;
+const SESSION_LAST = ["trail", "lantern", "forge", "orbit", "harbor", "path", "spark", "grove"] as const;
+
+function sessionHash(value: string): number {
+  let hash = 2166136261;
+  for (const char of value) {
+    hash ^= char.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+/** Prefer Pi's human session title; otherwise derive a stable readable alias from the thread id. */
+export function sessionDisplayName(name?: string, id?: string): string {
+  const explicit = name?.trim().replace(/\s+/g, " ");
+  if (explicit) return explicit;
+  const hash = sessionHash(id?.trim() || "pi-jar");
+  const first = SESSION_FIRST[hash % SESSION_FIRST.length]!;
+  const last = SESSION_LAST[Math.floor(hash / SESSION_FIRST.length) % SESSION_LAST.length]!;
+  return `${first}-${last}`;
+}
+
 /** Frame a real editor without changing its keyboard, history or autocomplete implementation. */
 export function roundedInput(lines: string[], width: number, focused: boolean, theme: EditorTheme, focusPaint?: (text: string) => string, icon = "▟•ᴗ•▙", session = ""): string[] {
   if (width < 8 || lines.length < 2) return lines.map((line) => truncateToWidth(line, Math.max(0, width)));
@@ -112,14 +134,21 @@ export class ComposerStyle {
     if (changed && this.enabled) this.tui?.requestRender();
   }
   private stopTimer(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+  refreshSession(ctx: ExtensionContext): void {
+    const manager = ctx.sessionManager as { getSessionId?: () => string; getSessionName?: () => string | undefined } | undefined;
+    const next = sessionDisplayName(manager?.getSessionName?.(), manager?.getSessionId?.());
+    if (next === this.session) return;
+    this.session = next;
+    if (this.enabled) this.tui?.requestRender();
+  }
   enable(ctx: ExtensionContext): boolean {
     if (!ctx.hasUI || ctx.mode !== "tui") return false;
     if (this.enabled) return true;
     try {
       const previous = ctx.ui.getEditorComponent();
       const draft = ctx.ui.getEditorText();
-      const sessionId = (ctx.sessionManager as { getSessionId?: () => string } | undefined)?.getSessionId?.();
-      this.session = shortSessionId(sessionId);
+      const manager = ctx.sessionManager as { getSessionId?: () => string; getSessionName?: () => string | undefined } | undefined;
+      this.session = sessionDisplayName(manager?.getSessionName?.(), manager?.getSessionId?.());
       const factory: EditorFactory = (tui, theme, keys) => {
         this.tui = tui;
         const paint = (text: string) => ctx.ui.theme?.fg("accent", text) ?? theme.borderColor(text);
