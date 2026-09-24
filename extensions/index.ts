@@ -4,16 +4,20 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
+import { registerAskTool } from "../src/ask-tool.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
 import { promptText } from "../src/dialogs.ts";
 import { renderFooter } from "../src/footer.ts";
 import { openJarHistory } from "../src/history-ui.ts";
+import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, migrateLegacySettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
 import { openJarSettings } from "../src/settings-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
+import { ModelRoleManager } from "../src/model-roles.ts";
+import { PlanMode } from "../src/plan.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { ACTIVE_STATES, collectStatuses, type JarRole } from "../src/status.ts";
 import { manageTasks } from "../src/tasks-ui.ts";
@@ -42,6 +46,7 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeGit: AbortController | undefined;
   let welcomeBranch = (): string | null => null;
   let todos: TodoStore | undefined;
+  let goals: GoalStore | undefined;
   const composer = new ComposerStyle();
   let footerSettings = visualSettings.footer;
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
@@ -73,6 +78,12 @@ export default function piJar(pi: ExtensionAPI): void {
     } catch { /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
   };
   registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
+  registerAskTool(pi);
+  const modelRoles = new ModelRoleManager(pi);
+  modelRoles.register();
+  const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
+  planMode.register();
+
   const applyWorking = (ctx: ExtensionContext) => {
     const active = enabled && working.phase !== "idle";
     if (!active || !ctx.hasUI || ctx.mode !== "tui") stopWorkingClock();
@@ -295,7 +306,7 @@ export default function piJar(pi: ExtensionAPI): void {
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: ctx.sessionManager?.getSessionName?.(),
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
-                context, memory, cost: formatCost(cost), quota, roles, extras: live.extras,
+                context, goal: goals?.current(), memory, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
             } catch {
@@ -363,6 +374,10 @@ export default function piJar(pi: ExtensionAPI): void {
     try { todos?.restore(ctx.sessionManager.getBranch()); } catch { todos?.restore([]); }
     updateTaskWidget(ctx);
   };
+  const restoreGoal = (ctx: ExtensionContext) => {
+    try { goals?.restore(ctx.sessionManager.getBranch()); } catch { goals?.restore([]); }
+    footerTui?.requestRender();
+  };
   pi.on("session_start", (_event, ctx) => {
     migrateLegacySettings(getAgentDir());
     visualSettings = loadVisualSettings(getAgentDir());
@@ -376,7 +391,9 @@ export default function piJar(pi: ExtensionAPI): void {
     working.end();
     quotaCache?.stop();
     todos = new TodoStore((entry) => pi.appendEntry(TASK_ENTRY, entry));
+    goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
     restoreTodos(ctx);
+    restoreGoal(ctx);
     // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
@@ -417,11 +434,38 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); updateCost(ctx); });
   pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
-  pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); composer.refreshSession(ctx); });
-  pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); updateCost(ctx); });
+  pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); composer.refreshSession(ctx); });
+  pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); });
   pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); footerTui?.requestRender(); });
+  pi.on("before_agent_start", async () => {
+    const goal = goals?.current();
+    if (!goal) return;
+    return {
+      message: {
+        customType: "pi-jar.goal-context",
+        content: [
+          "[PI-JAR ACTIVE GOAL]",
+          goal,
+          "Keep jar_todo synchronized with concrete steps that move this goal forward. Reuse matching open tasks, add missing work, and mark tasks done as outcomes complete."
+        ].join("\n"),
+        display: false
+      }
+    };
+  });
+  pi.on("context", async (event) => {
+    const goal = goals?.current();
+    let keptGoal = false;
+    const messages = [...event.messages].reverse().filter((raw) => {
+      const message = raw as Record<string, unknown>;
+      if (message.customType !== "pi-jar.goal-context") return true;
+      if (!goal || keptGoal) return false;
+      keptGoal = true;
+      return true;
+    }).reverse();
+    return { messages };
+  });
   pi.on("session_shutdown", (_event, ctx) => {
     stopWelcome(ctx);
     composer.disable(ctx);
@@ -432,6 +476,7 @@ export default function piJar(pi: ExtensionAPI): void {
     quotaCache?.stop();
     quotaCache = undefined;
     todos = undefined;
+    goals = undefined;
     disposeFooter?.();
     disposeFooter = undefined;
     demo = false;
@@ -447,6 +492,37 @@ export default function piJar(pi: ExtensionAPI): void {
     handler: async (ctx) => {
       if (!ctx.hasUI || ctx.mode !== "tui") return;
       await openSettings(ctx);
+    }
+  });
+
+  pi.registerCommand("goal", {
+    description: "Set, show or clear the active branch-aware goal; the agent keeps jar_todo aligned to it",
+    handler: async (args, ctx) => {
+      const store = goals;
+      if (!store) { ctx.ui.notify("Goal state is unavailable before the session starts", "warning"); return; }
+      const raw = args.trim();
+      if (/^(?:clear|off|none)$/i.test(raw)) {
+        if (store.clear()) {
+          footerTui?.requestRender();
+          ctx.ui.notify("Active goal cleared", "info");
+        }
+        return;
+      }
+      let next = raw;
+      if (!next && ctx.hasUI && ctx.mode === "tui") {
+        const edited = await ctx.ui.editor("◎ Active goal", store.current() ?? "");
+        next = edited?.trim() ?? "";
+      }
+      if (!next) {
+        ctx.ui.notify(store.current() ? "Active goal: " + store.current() : "No active goal. Use /goal <outcome>.", "info");
+        return;
+      }
+      if (!store.set(next)) {
+        ctx.ui.notify("Could not set goal; keep it concise and plain-text", "error");
+        return;
+      }
+      footerTui?.requestRender();
+      ctx.ui.notify("◎ Goal active · " + store.current(), "info");
     }
   });
 
