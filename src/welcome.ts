@@ -27,7 +27,7 @@ const FLAME_FRAMES = [
     "         ░         ",
     "       ░▒▓░        ",
     "      ▒▓█▓▒   ░    ",
-    "   ░  ▒████▓▒       ",
+    "   ░  ▒████▓▒      ",
     "     ▒██▓███▒      ",
     "    ▒██▓██▓██▒     ",
     "   ▒██████████▒    ",
@@ -137,8 +137,13 @@ const center = (line: string, width: number) => {
   const left = Math.floor(room / 2);
   return " ".repeat(left) + line + " ".repeat(room - left);
 };
-const flameCell = (line: string) => center(line.trimEnd(), FLAME_WIDTH);
-const artCell = (line: string) => center(line.trimEnd(), ART_WIDTH);
+const fixedCell = (line: string, width: number) => {
+  const value = truncateToWidth(line, width);
+  return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
+};
+const flameCell = (line: string) => fixedCell(line, FLAME_WIDTH);
+const flameArtCell = (line: string) => center(line, ART_WIDTH);
+const piArtCell = (line: string) => center(fixedCell(line, 21), ART_WIDTH);
 
 function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
   const w = Math.max(8, width);
@@ -224,8 +229,8 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
   ];
   const wide = width >= 72;
   const art = wide ? [
-    ...flame.map((line) => paintFlame(artCell(line))),
-    ...PI_LARGE.map((line) => fg("accent", artCell(line)))
+    ...flame.map((line) => paintFlame(flameArtCell(line))),
+    ...PI_LARGE.map((line) => fg("accent", piArtCell(line)))
   ] : [...compactFlame, ...PI_COMPACT.map((line) => fg("accent", line))];
   const details = card(wide ? width - ART_WIDTH - 2 : width, fg, info);
   if (!wide) return [...art.map(fit), ...details.map(fit)];
