@@ -19,5 +19,5 @@ export function roleFrame(state: RoleState, frame: number, animations = true): s
 }
 
 export const WORKING_FRAMES = ["◇", "◆", "◇", "◈"] as const;
-/** Subtle welcome motion: 8 frames per ~1.5 seconds, static when disabled. */
-export const WELCOME_INTERVAL_MS = 180;
+/** Smooth torch motion with drifting embers, static when motion is disabled. */
+export const WELCOME_INTERVAL_MS = 140;
