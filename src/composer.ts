@@ -3,19 +3,29 @@ import { truncateToWidth, visibleWidth, type EditorComponent, type EditorTheme, 
 import type { WorkingPhase } from "./working.ts";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
-const ICONS: Record<WorkingPhase, readonly string[]> = {
-  idle: ["◇"], generating: ["◇", "◈", "◆", "◈"], tool: ["◐", "◓", "◑", "◒"], waiting: ["○"]
+const PETS: Record<WorkingPhase, readonly string[]> = {
+  idle: ["▟•ᴗ•▙"],
+  generating: ["▟•ᴗ•▙", "▟•o•▙", "▟•◡•▙", "▟•o•▙"],
+  tool: ["▟>ᴗ<▙", "▟•ᴗ<▙", "▟<ᴗ•▙", "▟>ᴗ<▙"],
+  waiting: ["▟-ᴗ-▙"]
 };
 export function composerIcon(phase: WorkingPhase, frame = 0): string {
-  const icons = ICONS[phase];
-  return icons[frame % icons.length] ?? "◇";
+  const icons = PETS[phase];
+  return icons[frame % icons.length] ?? "▟•ᴗ•▙";
+}
+export function shortSessionId(id?: string): string {
+  const clean = id?.trim();
+  if (!clean) return "";
+  const tail = clean.includes("-") ? clean.split("-").at(-1)! : clean;
+  return tail.slice(0, 8);
 }
 
 /** Frame a real editor without changing its keyboard, history or autocomplete implementation. */
-export function roundedInput(lines: string[], width: number, focused: boolean, theme: EditorTheme, focusPaint?: (text: string) => string, icon = "◇"): string[] {
+export function roundedInput(lines: string[], width: number, focused: boolean, theme: EditorTheme, focusPaint?: (text: string) => string, icon = "▟•ᴗ•▙", session = ""): string[] {
   if (width < 8 || lines.length < 2) return lines.map((line) => truncateToWidth(line, Math.max(0, width)));
   const border = focused && focusPaint ? focusPaint : theme.borderColor;
-  const title = truncateToWidth(` ${icon} `, width - 3);
+  const meta = session ? `${icon} · session ${session}` : icon;
+  const title = truncateToWidth(` ${meta} `, width - 3);
   const top = border("╭─" + title + "─".repeat(Math.max(0, width - 3 - visibleWidth(title))) + "╮");
   const bottom = border("╰" + "─".repeat(width - 2) + "╯");
   return [top, ...lines.slice(1, -1).map((line) => border("│") + line + " ".repeat(Math.max(0, width - 2 - visibleWidth(line))) + border("│")), bottom];
@@ -25,14 +35,16 @@ class RoundedEditor extends CustomEditor {
   private readonly colors: EditorTheme;
   private readonly paint: (text: string) => string;
   private readonly icon: () => string;
-  constructor(tui: TUI, colors: EditorTheme, keys: ConstructorParameters<typeof CustomEditor>[2], paint: (text: string) => string, icon: () => string) {
+  private readonly session: () => string;
+  constructor(tui: TUI, colors: EditorTheme, keys: ConstructorParameters<typeof CustomEditor>[2], paint: (text: string) => string, icon: () => string, session: () => string) {
     super(tui, colors, keys);
     this.colors = colors;
     this.paint = paint;
     this.icon = icon;
+    this.session = session;
   }
   override render(width: number): string[] {
-    return roundedInput(super.render(width < 8 ? width : width - 2), width, this.focused, this.colors, this.paint, this.icon());
+    return roundedInput(super.render(width < 8 ? width : width - 2), width, this.focused, this.colors, this.paint, this.icon(), this.session());
   }
   override handleMouse(event: Parameters<NonNullable<EditorComponent["handleMouse"]>>[0]) {
     return super.handleMouse({ ...event, x: event.x - 1, width: Math.max(1, event.width - 2) });
@@ -44,11 +56,13 @@ class ThemedEditor implements EditorComponent {
   private readonly theme: EditorTheme;
   private readonly paint: (text: string) => string;
   private readonly icon: () => string;
-  constructor(base: EditorComponent, theme: EditorTheme, paint: (text: string) => string, icon: () => string) {
+  private readonly session: () => string;
+  constructor(base: EditorComponent, theme: EditorTheme, paint: (text: string) => string, icon: () => string, session: () => string) {
     this.base = base;
     this.theme = theme;
     this.paint = paint;
     this.icon = icon;
+    this.session = session;
   }
   get focused(): boolean { return "focused" in this.base ? !!this.base.focused : false; }
   set focused(value: boolean) { if ("focused" in this.base) this.base.focused = value; }
@@ -62,7 +76,7 @@ class ThemedEditor implements EditorComponent {
   setText(text: string) { this.base.setText(text); }
   handleInput(data: string) { this.base.handleInput(data); }
   invalidate() { this.base.invalidate(); }
-  render(width: number): string[] { return roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, this.icon()); }
+  render(width: number): string[] { return roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, this.icon(), this.session()); }
   addToHistory(text: string) { this.base.addToHistory?.(text); }
   insertTextAtCursor(text: string) { this.base.insertTextAtCursor?.(text); }
   getExpandedText() { return this.base.getExpandedText?.() ?? this.base.getText(); }
@@ -81,7 +95,9 @@ export class ComposerStyle {
   private phase: WorkingPhase = "idle";
   private frame = 0;
   private animations = true;
+  private session = "";
   private icon = () => composerIcon(this.phase, this.frame);
+  private sessionLabel = () => this.session;
   setActivity(phase: WorkingPhase, animations: boolean): void {
     const changed = this.phase !== phase || this.animations !== animations;
     if (!changed && (this.timer || !this.enabled || !animations || (phase !== "generating" && phase !== "tool"))) return;
@@ -102,10 +118,14 @@ export class ComposerStyle {
     try {
       const previous = ctx.ui.getEditorComponent();
       const draft = ctx.ui.getEditorText();
+      const sessionId = (ctx.sessionManager as { getSessionId?: () => string } | undefined)?.getSessionId?.();
+      this.session = shortSessionId(sessionId);
       const factory: EditorFactory = (tui, theme, keys) => {
         this.tui = tui;
         const paint = (text: string) => ctx.ui.theme?.fg("accent", text) ?? theme.borderColor(text);
-        return previous ? new ThemedEditor(previous(tui, theme, keys), theme, paint, this.icon) : new RoundedEditor(tui, theme, keys, paint, this.icon);
+        return previous
+          ? new ThemedEditor(previous(tui, theme, keys), theme, paint, this.icon, this.sessionLabel)
+          : new RoundedEditor(tui, theme, keys, paint, this.icon, this.sessionLabel);
       };
       this.previous = previous;
       this.owner = factory;
@@ -124,6 +144,7 @@ export class ComposerStyle {
     this.tui = undefined;
     this.phase = "idle";
     this.frame = 0;
+    this.session = "";
     try {
       if (ctx.hasUI && ctx.mode === "tui" && this.owner && ctx.ui.getEditorComponent() === this.owner) {
         const draft = ctx.ui.getEditorText();
