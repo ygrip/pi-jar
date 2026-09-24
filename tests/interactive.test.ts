@@ -223,7 +223,10 @@ test("composer restores previous editor and draft, respects later editor owners,
   });
   current = original;
   const widgets = new Map<string, Function>();
-  const ctx = { hasUI: true, mode: "tui", sessionManager: { getSessionId: () => "019a0a2b-f81d-7350-8188-abcdef123456" }, ui: {
+  const ctx = { hasUI: true, mode: "tui", sessionManager: {
+    getSessionId: () => "019a0a2b-f81d-7350-8188-abcdef123456",
+    getSessionName: () => "Welcome polish"
+  }, ui: {
     getEditorComponent: () => current,
     setEditorComponent: (factory: typeof current) => { current = factory; },
     getEditorText: () => draft,
