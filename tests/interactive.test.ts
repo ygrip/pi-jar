@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { ComposerStyle, composerIcon, roundedInput, shortSessionId } from "../src/composer.ts";
+import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import piJar from "../extensions/index.ts";
 import { promptChoice, promptText, todoView } from "../src/dialogs.ts";
 import { TASK_ENTRY, TodoStore, type TodoEvent } from "../src/tasks.ts";
@@ -135,6 +136,26 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
   component?.handleInput("s");
   component?.handleInput("\r");
   assert.equal(await answer, "yes");
+});
+
+test("default Pi tools stay compact until their card is expanded", () => {
+  const definitions: any[] = [];
+  installCompactBuiltinTools({ registerTool(definition: unknown) { definitions.push(definition); } } as never);
+  assert.deepEqual(definitions.map((tool) => tool.name), ["read", "bash", "edit", "write"]);
+  const colors = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+
+  const bash = definitions.find((tool) => tool.name === "bash")!;
+  const bashResult = { content: [{ type: "text", text: "first log line\nsecond log line" }] };
+  assert.match(bash.renderResult(bashResult, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n"), /Ctrl\+E to expand/);
+  assert.match(bash.renderResult(bashResult, { expanded: true, isPartial: false }, colors, {}).render(120).join("\n"), /second log line/);
+
+  const edit = definitions.find((tool) => tool.name === "edit")!;
+  const editResult = { content: [{ type: "text", text: "Applied" }], details: { diff: "@@\n-old\n+new" } };
+  assert.match(edit.renderResult(editResult, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n"), /\+1.*-1/);
+  assert.match(edit.renderResult(editResult, { expanded: true, isPartial: false }, colors, {}).render(120).join("\n"), /\+new/);
+
+  const write = definitions.find((tool) => tool.name === "write")!;
+  assert.match(write.renderCall({ path: "pet.ts", content: "one\ntwo" }, colors, { expanded: true }).render(120).join("\n"), /two/);
 });
 
 test("rounded input fits, shows the pet sprite and exposes the short session id", () => {
