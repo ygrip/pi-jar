@@ -2,7 +2,7 @@
 
 A role-aware, animated theme and TUI extension for [Pi](https://github.com/earendil-works/pi), inspired by the visual language of Setara and the multi-agent character of Punakawan.
 
-> **Status:** themed footer and public-status adapter for `@earendil-works/*` Pi 0.85.1. Team Mode, Advisor Flow and SoL-Pi do not yet publish a pi-jar role contract here.
+> **Status:** themed footer, first-class workflows and public-status adapter for `@earendil-works/*` Pi 0.85.1. Team Mode, Advisor Flow and SoL-Pi do not yet publish a pi-jar role contract here.
 
 ## What pi-jar is
 
@@ -12,13 +12,13 @@ pi-jar is not just a color theme. It is a Pi package that combines:
 - observed Pi working states with steady, theme-colored wording and animated icons (static when motion is off);
 - publisher-driven teammate names and labels (including Gareng, Petruk or Bagong if a publisher uses them);
 - a responsive, softly rounded footer for model, colorized live thinking effort, session name, CWD, context percentage, process RAM (RSS), session cost, quota, branch and extension statuses; configure fields through `/jar settings` or `/jar footer`;
-- a welcome that remains until the first interactive prompt, then dissolves away (or hides immediately with motion off), with a taller torch-shaped `π`, warm truecolor flame layers, drifting/fading embers, randomized hopeful copy, and a Settings action that opens the settings view from both regular and fullscreen TUI modes;
+- a welcome that remains until the first interactive prompt, then dissolves away (or hides immediately with motion off), with a taller torch-shaped `π`, a layered yellow/orange flame with a curling inner core, larger rising/fading ember sparks, randomized hopeful copy, and a Settings action that opens the settings view from both regular and fullscreen TUI modes;
 - a first-party, branch-aware native task tool that the agent is instructed to maintain automatically for multi-step work, plus a human-friendly `/jar tasks` view;
 - first-class `/plan` mode with real read-only tool gating, a dedicated plan review TUI, and explicit **implement now**, **compact then implement**, or **stop** actions;
 - a first-class `jar_ask` model tool for described numbered choices, multi-select checkboxes, custom pasted/multiline answers, and a **Chat about this** escape hatch;
 - a branch-aware `/goal` that stays visible in the footer and is injected into the agent context so `jar_todo` follows the active outcome automatically;
 - configurable `/roles` model assignments (`default`, `smol`, `slow`, `plan`, `commit`, `task`, `advisor`) with provider/model and optional thinking effort; the `plan` role is applied automatically while `/plan` is active;
-- a rounded composer with a tiny expressive terminal pet whose silhouette, ears/arms and eyes react to activity, plus a human session title; when Pi has no title, pi-jar derives a stable readable alias instead of exposing the raw thread id;
+- a rounded composer with a tiny cat-like terminal pet whose ears and expression react to activity without hand-like corner glyphs, plus a human session title; when Pi has no title, pi-jar derives a stable readable alias instead of exposing the raw thread id;
 - a centralized full-screen visual settings view with keyboard controls and clickable controls when Pi receives mouse events;
 - compact-by-default rendering for Pi's default read/shell/edit/write tools, with the real output or diff still available through click or Ctrl+E (Pi's native Ctrl+O also works);
 - a separate read-only `/jar history` conversation timeline for the active session branch.

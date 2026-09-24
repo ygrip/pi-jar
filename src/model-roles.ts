@@ -180,9 +180,10 @@ export class ModelRoleManager {
           const role = (parts[1] ?? "").toLowerCase();
           const target = parts[2] ?? "";
           const slash = target.indexOf("/");
-          if (!isRole(role) || slash <= 0) { ctx.ui.notify("Usage: /roles set ROLE PROVIDER/MODEL [effort]", "error"); return; }
-          const thinking = parts[3];
-          if (thinking && !isThinking(thinking)) { ctx.ui.notify("Unknown thinking effort: " + thinking, "error"); return; }
+          if (!isRole(role) || slash <= 0 || slash === target.length - 1) { ctx.ui.notify("Usage: /roles set ROLE PROVIDER/MODEL [effort]", "error"); return; }
+          const requestedThinking = parts[3];
+          const thinking = isThinking(requestedThinking) ? requestedThinking : undefined;
+          if (requestedThinking && !thinking) { ctx.ui.notify("Unknown thinking effort: " + requestedThinking, "error"); return; }
           this.update(role, { provider: target.slice(0, slash), model: target.slice(slash + 1), ...(thinking ? { thinking } : {}) });
           ctx.ui.notify("Assigned " + role + " → " + target, "info");
           return;

@@ -9,8 +9,9 @@ export const PLAN_ENTRY = "pi-jar.plan";
 type PlanAction = "implement" | "compact" | "stop";
 type PlanState = { v: 1; enabled: boolean; steps: string[] };
 
-const READ_ONLY_TOOL = /(?:^|[_-])(?:read|grep|find|ls|search|query|get|list|fetch|view|inspect|status|show|diff|log|cat)$/i;
-const ALWAYS_READ_ONLY = new Set(["read", "bash", "grep", "find", "ls", "questionnaire", "jar_ask"]);
+// Only tools with known read-only semantics are allowed. Name suffixes (for example
+// "remote_get") do not prove that an extension or MCP tool is safe to invoke.
+export const PLAN_SAFE_TOOLS = new Set(["read", "bash", "grep", "find", "ls", "jar_ask"]);
 
 function assistantText(message: unknown): string {
   if (!message || typeof message !== "object") return "";
@@ -23,10 +24,6 @@ function assistantText(message: unknown): string {
     const item = block as Record<string, unknown>;
     return item.type === "text" && typeof item.text === "string" ? item.text : "";
   }).filter(Boolean).join("\n");
-}
-
-function isReadOnlyTool(name: string): boolean {
-  return ALWAYS_READ_ONLY.has(name) || READ_ONLY_TOOL.test(name);
 }
 
 async function planReview(ctx: ExtensionContext, steps: readonly string[]): Promise<PlanAction | undefined> {
@@ -82,6 +79,8 @@ export class PlanMode {
   private toolsBefore: string[] | undefined;
   private lastAssistant = "";
   private reviewing = false;
+  private compacting = false;
+  private compactGeneration = 0;
   private restoreRole: (() => Promise<void>) | undefined;
   private readonly pi: ExtensionAPI;
   private readonly todos: () => TodoStore | undefined;
@@ -108,8 +107,7 @@ export class PlanMode {
 
   private planTools(active: string[]): string[] {
     const available = new Set(this.pi.getAllTools().map((tool) => tool.name));
-    return [...new Set(active.filter((name) => available.has(name) && isReadOnlyTool(name))
-      .concat([...ALWAYS_READ_ONLY].filter((name) => available.has(name))))];
+    return [...new Set(active.filter((name) => available.has(name) && PLAN_SAFE_TOOLS.has(name)))];
   }
 
   private async enter(ctx: ExtensionContext, persist = true): Promise<void> {
@@ -125,11 +123,13 @@ export class PlanMode {
   }
 
   private async leave(ctx: ExtensionContext, persist = true): Promise<void> {
+    this.enabled = false;
+    this.compacting = false;
+    this.compactGeneration++;
     if (this.toolsBefore) this.pi.setActiveTools(this.toolsBefore);
     this.toolsBefore = undefined;
     if (this.restoreRole) await this.restoreRole();
     this.restoreRole = undefined;
-    this.enabled = false;
     this.updateStatus(ctx);
     if (persist) this.persist();
   }
@@ -163,20 +163,28 @@ export class PlanMode {
   }
 
   private compactThenImplement(ctx: ExtensionContext): void {
+    this.compacting = true;
+    const generation = ++this.compactGeneration;
     const plan = planTextFromSteps(this.steps);
     ctx.ui.notify("Compacting context while preserving the approved plan…", "info");
     ctx.compact({
       customInstructions: "Preserve this approved implementation plan exactly enough to execute it after compaction:\n" + plan,
       onComplete: () => {
+        if (!this.enabled || generation !== this.compactGeneration) return;
+        this.compacting = false;
         ctx.ui.notify("Context compacted · starting approved plan", "info");
         void this.implement(ctx);
       },
-      onError: (error) => ctx.ui.notify("Compaction failed; plan mode is still active: " + error.message, "error")
+      onError: (error) => {
+        if (generation !== this.compactGeneration) return;
+        this.compacting = false;
+        ctx.ui.notify("Compaction failed; plan mode is still active: " + error.message, "error");
+      }
     });
   }
 
   private async review(ctx: ExtensionContext): Promise<void> {
-    if (this.reviewing || !this.enabled || !this.steps.length) return;
+    if (this.reviewing || this.compacting || !this.enabled || !this.steps.length) return;
     this.reviewing = true;
     try {
       const action = await planReview(ctx, this.steps);
@@ -230,13 +238,14 @@ export class PlanMode {
     this.pi.on("tool_call", async (event) => {
       if (!this.enabled) return;
       if (event.toolName === "bash") {
-        const command = (event.input as Record<string, unknown>).command;
+        if (!this.pi.getActiveTools().includes("bash")) return { block: true, reason: "Plan mode is read-only: bash is not active." };
+        const command = event.input && typeof event.input === "object" ? (event.input as Record<string, unknown>).command : undefined;
         if (typeof command !== "string" || !isSafePlanCommand(command)) {
           return { block: true, reason: "Plan mode is read-only: this shell command is not on the read-only allowlist." };
         }
         return;
       }
-      if (!isReadOnlyTool(event.toolName)) return { block: true, reason: "Plan mode is read-only: tool " + event.toolName + " is disabled until the plan is approved." };
+      if (!PLAN_SAFE_TOOLS.has(event.toolName) || !this.pi.getActiveTools().includes(event.toolName)) return { block: true, reason: "Plan mode is read-only: tool " + event.toolName + " is disabled until the plan is approved." };
     });
 
     this.pi.on("before_agent_start", async () => {

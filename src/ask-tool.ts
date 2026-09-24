@@ -103,7 +103,7 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
 async function askOne(ctx: ExtensionContext, question: AskQuestion, index: number, total: number): Promise<AskAnswer> {
   const id = cleanText(question.id ?? "q" + String(index + 1), 64) || "q" + String(index + 1);
   const picked = await pickQuestion(ctx, question, index, total);
-  if (picked.kind === "cancel") return { id, cancelled: true };
+  if (!picked || picked.kind === "cancel") return { id, cancelled: true };
   if (picked.kind === "custom") {
     const text = await ctx.ui.editor("✎ Your answer · " + cleanText(question.header ?? "Question", 48), "");
     return text?.trim() ? { id, answer: text.trim() } : { id, cancelled: true };

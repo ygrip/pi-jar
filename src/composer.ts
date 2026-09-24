@@ -3,17 +3,17 @@ import { truncateToWidth, visibleWidth, type EditorComponent, type EditorTheme, 
 import type { WorkingPhase } from "./working.ts";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
-// Tiny five-cell mascot. The silhouette, ears/arms and eyes move with the
-// phase so it feels alive without making the composer title jump around.
+// Small cat-like face: the edge glyphs read as ears rather than hands.
+// Expressions change by phase while keeping a stable five-cell footprint.
 const PETS: Record<WorkingPhase, readonly string[]> = {
-  idle: ["╭•ᴗ•╮"],
-  generating: ["╭•ᴗ•╮", "╰◕ᴗ◕╯", "╭^ᴗ^╮", "╰•◡•╯"],
-  tool: ["╭>ᴗ<╮", "╰^ᴗ^╯", "╭<ᴗ>╮", "╰>ᴗ<╯"],
-  waiting: ["╰-ᴗ-╯"]
+  idle: ["ᐠ•ᴗ•ᐟ"],
+  generating: ["ᐠ•ᴗ•ᐟ", "ᐢ◕ᴗ◕ᐢ", "ᐠ•o•ᐟ", "ᐢ^ᴗ^ᐢ"],
+  tool: ["ᐢ>ᴗ<ᐢ", "ᐠ•ᴗ•ᐟ", "ᐢ×ᴗ×ᐢ", "ᐠ>◡<ᐟ"],
+  waiting: ["ᐠ-ᴗ-ᐟ"]
 };
 export function composerIcon(phase: WorkingPhase, frame = 0): string {
   const icons = PETS[phase];
-  return icons[frame % icons.length] ?? "╭•ᴗ•╮";
+  return icons[frame % icons.length] ?? "ᐠ•ᴗ•ᐟ";
 }
 export function shortSessionId(id?: string): string {
   const clean = id?.trim();
@@ -45,7 +45,7 @@ export function sessionDisplayName(name?: string, id?: string): string {
 }
 
 /** Frame a real editor without changing its keyboard, history or autocomplete implementation. */
-export function roundedInput(lines: string[], width: number, focused: boolean, theme: EditorTheme, focusPaint?: (text: string) => string, icon = "╭•ᴗ•╮", session = ""): string[] {
+export function roundedInput(lines: string[], width: number, focused: boolean, theme: EditorTheme, focusPaint?: (text: string) => string, icon = "ᐠ•ᴗ•ᐟ", session = ""): string[] {
   if (width < 8 || lines.length < 2) return lines.map((line) => truncateToWidth(line, Math.max(0, width)));
   const border = focused && focusPaint ? focusPaint : theme.borderColor;
   const meta = session ? `${icon} · session ${session}` : icon;

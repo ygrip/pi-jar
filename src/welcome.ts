@@ -38,113 +38,129 @@ export function hopefulWelcomeMessage(random: () => number = Math.random): strin
   return HOPEFUL_WELCOME_MESSAGES[index]!;
 }
 
-// Narrow, asymmetric silhouettes keep the flame recognizably organic. Ember
-// particles are layered separately so the body can flicker without the whole
-// torch teleporting sideways.
+// Tall, layered pixel flames inspired by a real torch: a dark outer rim,
+ // orange body, yellow-hot shell and a curling orange pocket inside. The body
+ // stays anchored while eight silhouettes sway and the ember layer drifts.
 const FLAME_FRAMES = [
   [
-    "          ░          ",
-    "         ░▒          ",
-    "        ▒▓▒          ",
-    "       ▒▓█▓▒         ",
-    "      ▒▓███▓▒        ",
-    "    ░▒▓████▓▒        ",
-    "     ▒▓██▓██▒        ",
-    "   ░▒▓██████▓▒       ",
-    "    ▒▓██████▓▒       ",
-    "      ▒▓███▓▒        ",
-    "        ▒██▒         "
+    "           ░           ",
+    "          ░▒           ",
+    "         ░▒▓░          ",
+    "        ░▒▓█▓▒         ",
+    "       ░▒▓████▒        ",
+    "      ░▒▓██@██▓▒       ",
+    "     ░▒▓██@@@██▓▒      ",
+    "    ░▒▓██@@▓@██▓▒      ",
+    "   ░▒▓██@▓▓▓@██▓▒      ",
+    "   ░▒▓██████████▓▒     ",
+    "    ░▒▓████████▓▒      ",
+    "      ▒▓██████▓▒       ",
+    "        ▒████▒         "
   ],
   [
-    "        ░            ",
-    "        ▒░           ",
-    "       ▒▓▒           ",
-    "      ▒▓██▒          ",
-    "     ▒▓███▓▒         ",
-    "    ▒▓██████▒        ",
-    "   ░▒▓██▓███▓▒       ",
-    "    ▒▓██████▓▒       ",
-    "   ▒▓████████▓▒      ",
-    "     ▒▓████▓▒        ",
-    "       ▒███▒         "
+    "         ░             ",
+    "        ░▒             ",
+    "       ░▒▓░            ",
+    "       ▒▓█▓▒           ",
+    "      ▒▓████▓▒         ",
+    "     ░▒▓██@██▓▒        ",
+    "    ░▒▓██@@@██▓▒       ",
+    "   ░▒▓██@▓@@██▓▒       ",
+    "   ▒▓██@▓▓▓@███▓▒      ",
+    "    ▒▓██████████▓▒     ",
+    "     ▒▓████████▓▒      ",
+    "      ▒▓██████▓▒       ",
+    "        ▒████▒         "
   ],
   [
-    "           ░         ",
-    "         ░▒          ",
-    "        ▒▓▒          ",
-    "        ▒██▒         ",
-    "      ▒▓███▓▒        ",
-    "     ▒▓██▓██▒        ",
-    "   ░▒▓███████▓▒      ",
-    "    ▒▓██████▓▒       ",
-    "     ▒▓█████▓▒       ",
-    "      ▒▓███▒         ",
-    "        ▒██▒         "
+    "             ░         ",
+    "            ▒░         ",
+    "          ░▒▓░         ",
+    "         ▒▓██▒         ",
+    "       ░▒▓████▓▒       ",
+    "      ▒▓██@███▓▒       ",
+    "     ▒▓██@@@███▓▒      ",
+    "    ▒▓██@@▓@@██▓▒      ",
+    "   ▒▓██@▓▓▓@███▓▒      ",
+    "   ░▒▓██████████▓▒     ",
+    "     ▒▓████████▓▒      ",
+    "       ▒▓████▓▒        ",
+    "        ▒████▒         "
   ],
   [
-    "       ░             ",
-    "       ░▒            ",
-    "        ▒▓▒          ",
-    "       ▒▓█▓▒         ",
-    "     ▒▓████▒         ",
-    "    ▒▓██▓██▓▒        ",
-    "   ▒▓████████▓▒      ",
-    "    ▒▓███████▓▒      ",
-    "     ▒▓█████▓▒       ",
-    "       ▒███▒         ",
-    "        ▒██▒         "
+    "        ░              ",
+    "        ░▒             ",
+    "         ▒▓░           ",
+    "        ▒▓██▒          ",
+    "      ░▒▓████▒         ",
+    "     ▒▓██@███▓▒        ",
+    "    ▒▓██@@@███▓▒       ",
+    "   ▒▓██@@▓@@██▓▒       ",
+    "   ▒▓██@▓▓▓@██▓▒       ",
+    "    ▒▓██████████▓▒     ",
+    "     ▒▓████████▓▒      ",
+    "      ▒▓██████▓▒       ",
+    "        ▒████▒         "
   ],
   [
-    "          ░          ",
-    "        ░▒           ",
-    "        ▒▓▒          ",
-    "      ▒▓██▒          ",
-    "     ▒▓████▓▒        ",
-    "   ░▒▓██▓███▓▒       ",
-    "    ▒▓██████▓▒       ",
-    "   ▒▓████████▓▒      ",
-    "     ▒▓█████▓▒       ",
-    "      ▒▓███▒         ",
-    "        ▒██▒         "
+    "           ░           ",
+    "         ░▒            ",
+    "        ░▒▓░           ",
+    "       ▒▓██▓▒          ",
+    "      ▒▓█████▒         ",
+    "    ░▒▓██@███▓▒        ",
+    "   ░▒▓██@@@███▓▒       ",
+    "    ▒▓██@▓@@██▓▒       ",
+    "   ▒▓██@▓▓▓@███▓▒      ",
+    "    ▒▓██████████▓▒     ",
+    "     ▒▓████████▓▒      ",
+    "       ▒▓████▓▒        ",
+    "        ▒████▒         "
   ],
   [
-    "        ░            ",
-    "         ▒░          ",
-    "        ▒▓▒          ",
-    "       ▒▓██▒         ",
-    "      ▒▓███▓▒        ",
-    "     ▒▓██████▒       ",
-    "   ░▒▓██▓████▓▒      ",
-    "    ▒▓███████▓▒      ",
-    "    ▒▓██████▓▒       ",
-    "      ▒▓███▓▒        ",
-    "        ▒██▒         "
+    "         ░             ",
+    "          ▒░           ",
+    "         ▒▓░           ",
+    "        ▒▓██▒          ",
+    "       ▒▓████▓▒        ",
+    "      ▒▓██@███▓▒       ",
+    "    ░▒▓██@@@███▓▒      ",
+    "   ░▒▓██@@▓@@██▓▒      ",
+    "    ▒▓██@▓▓▓@██▓▒      ",
+    "    ▒▓██████████▓▒     ",
+    "     ▒▓████████▓▒      ",
+    "      ▒▓██████▓▒       ",
+    "        ▒████▒         "
   ],
   [
-    "           ░         ",
-    "          ▒░         ",
-    "        ▒▓▒          ",
-    "       ▒▓█▓▒         ",
-    "      ▒▓███▓▒        ",
-    "    ▒▓██▓██▓▒        ",
-    "   ▒▓████████▓▒      ",
-    "    ▒▓██████▓▒       ",
-    "     ▒▓█████▓▒       ",
-    "       ▒███▒         ",
-    "        ▒██▒         "
+    "             ░         ",
+    "           ░▒          ",
+    "          ▒▓░          ",
+    "        ░▒▓█▓▒         ",
+    "       ▒▓████▓▒        ",
+    "      ▒▓██@███▓▒       ",
+    "     ▒▓██@@@███▓▒      ",
+    "    ▒▓██@@▓@@██▓▒      ",
+    "   ░▒▓██@▓▓▓@██▓▒      ",
+    "    ▒▓██████████▓▒     ",
+    "     ▒▓████████▓▒      ",
+    "       ▒▓████▓▒        ",
+    "        ▒████▒         "
   ],
   [
-    "       ░             ",
-    "        ░▒           ",
-    "       ▒▓▒           ",
-    "      ▒▓██▒          ",
-    "    ░▒▓████▓▒        ",
-    "     ▒▓██▓██▒        ",
-    "   ▒▓████████▓▒      ",
-    "    ▒▓███████▓▒      ",
-    "     ▒▓█████▓▒       ",
-    "      ▒▓███▒         ",
-    "        ▒██▒         "
+    "        ░              ",
+    "         ▒░            ",
+    "        ▒▓░            ",
+    "       ▒▓██▒           ",
+    "     ░▒▓████▓▒         ",
+    "    ░▒▓██@███▓▒        ",
+    "     ▒▓██@@@███▓▒      ",
+    "    ▒▓██@@▓@@██▓▒      ",
+    "   ▒▓██@▓▓▓@███▓▒      ",
+    "    ▒▓██████████▓▒     ",
+    "     ▒▓████████▓▒      ",
+    "      ▒▓██████▓▒       ",
+    "        ▒████▒         "
   ]
 ] as const;
 
@@ -165,25 +181,30 @@ const PI_COMPACT = [
   "  ▄█   █▄  "
 ] as const;
 
-const ART_WIDTH = 26;
-const FLAME_WIDTH = 21;
+const ART_WIDTH = 28;
+const FLAME_WIDTH = 23;
 const FIRE_RGB = {
-  core: "#FFE27A",
-  hot: "#FFB347",
-  orange: "#FF7A1A",
-  edge: "#D94A22",
-  spark: "#FFD166",
-  ember: "#FF9F1C",
-  fading: "#A9441F"
+  core: "#FFF2A6",
+  hot: "#FFD45A",
+  orange: "#FF8A1F",
+  edge: "#B83A18",
+  inner: "#FF6A00",
+  spark: "#FFE16A",
+  ember: "#FF991F",
+  fading: "#A94320"
 } as const;
 
 const EMBERS = [
-  { x: 2, startY: 8, phase: 0, life: 10, drift: 0.5 },
-  { x: 18, startY: 9, phase: 3, life: 11, drift: -0.5 },
-  { x: 4, startY: 7, phase: 6, life: 13, drift: -0.3 },
-  { x: 16, startY: 8, phase: 8, life: 12, drift: 0.35 },
-  { x: 1, startY: 9, phase: 10, life: 14, drift: 0.45 },
-  { x: 20, startY: 7, phase: 2, life: 9, drift: -0.4 }
+  { x: 2, startY: 10, phase: 0, life: 14, drift: 0.45 },
+  { x: 20, startY: 10, phase: 3, life: 15, drift: -0.45 },
+  { x: 4, startY: 8, phase: 6, life: 17, drift: -0.25 },
+  { x: 18, startY: 9, phase: 9, life: 16, drift: 0.30 },
+  { x: 1, startY: 11, phase: 12, life: 18, drift: 0.35 },
+  { x: 21, startY: 7, phase: 2, life: 13, drift: -0.35 },
+  { x: 6, startY: 12, phase: 5, life: 15, drift: 0.20 },
+  { x: 16, startY: 12, phase: 8, life: 14, drift: -0.20 },
+  { x: 3, startY: 6, phase: 10, life: 16, drift: 0.30 },
+  { x: 19, startY: 6, phase: 1, life: 17, drift: -0.30 }
 ] as const;
 
 const center = (line: string, width: number) => {
@@ -212,13 +233,13 @@ function addEmbers(lines: readonly string[], frame: number): string[] {
   const canvas = lines.map((line) => [...flameCell(line)]);
   for (const particle of EMBERS) {
     const age = (frame + particle.phase) % particle.life;
-    if (age > 6) continue;
+    if (age > 8) continue;
     const rise = Math.floor(age / 2);
     const y = particle.startY - rise;
     const x = Math.round(particle.x + particle.drift * age);
     if (y < 0 || y >= canvas.length || x < 0 || x >= FLAME_WIDTH) continue;
     if (canvas[y]![x] !== " ") continue;
-    canvas[y]![x] = age <= 1 ? "•" : age <= 4 ? "·" : ".";
+    canvas[y]![x] = age <= 1 ? "S" : age <= 4 ? "s" : ".";
   }
   return canvas.map((row) => row.join(""));
 }
@@ -229,9 +250,10 @@ function paintFlame(line: string): string {
     .replace(/▓+/g, (part) => rgb(FIRE_RGB.hot, part))
     .replace(/▒+/g, (part) => rgb(FIRE_RGB.orange, part))
     .replace(/░+/g, (part) => rgb(FIRE_RGB.edge, part))
-    .replace(/•+/g, (part) => rgb(FIRE_RGB.spark, part))
-    .replace(/·+/g, (part) => rgb(FIRE_RGB.ember, part))
-    .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, part));
+    .replace(/@+/g, (part) => rgb(FIRE_RGB.inner, "█".repeat(part.length)))
+    .replace(/S+/g, (part) => rgb(FIRE_RGB.spark, "■".repeat(part.length)))
+    .replace(/s+/g, (part) => rgb(FIRE_RGB.ember, "▪".repeat(part.length)))
+    .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, "·".repeat(part.length)));
 }
 
 function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
@@ -305,7 +327,7 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
   const fit = (line: string) => truncateToWidth(line, width);
   const step = ((frame % FLAME_FRAMES.length) + FLAME_FRAMES.length) % FLAME_FRAMES.length;
   const flame = addEmbers(FLAME_FRAMES[step] ?? FLAME_FRAMES[0], frame).map((line) => paintFlame(line));
-  const compactFlame = flame.slice(1, 9);
+  const compactFlame = flame.slice(2, 10);
   if (width < 32) return [
     ...compactFlame.map((line) => fit(line)),
     ...PI_COMPACT.map((line) => fit(fg("accent", line))),

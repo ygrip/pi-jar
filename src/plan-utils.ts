@@ -17,6 +17,10 @@ function safeGit(tokens: string[]): boolean {
   const rest = tokens.slice(2).join(" ");
   if (GIT_MUTATION.test(rest) || OUTPUT_FLAG.test(rest)) return false;
   if (tokens.some((token) => ["--ext-diff", "--textconv"].includes(token))) return false;
+  // git grep -O launches an arbitrary pager. Git also accepts abbreviated long
+  // options; reject every spelling/prefix rather than just the full flag.
+  if (sub === "grep" && tokens.slice(2).some((token) =>
+    token.startsWith("--open") || (/^-[A-Za-z]*O/.test(token)))) return false;
   if (sub === "remote" && tokens.length > 2 && !["-v", "show", "get-url"].includes(tokens[2] ?? "")) return false;
   return true;
 }
