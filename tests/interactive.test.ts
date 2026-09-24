@@ -138,24 +138,34 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
   assert.equal(await answer, "yes");
 });
 
-test("default Pi tools stay compact until their card is expanded", () => {
+test("default Pi tools keep native metadata while collapsed cards stay brief", () => {
   const definitions: any[] = [];
   installCompactBuiltinTools({ registerTool(definition: unknown) { definitions.push(definition); } } as never);
   assert.deepEqual(definitions.map((tool) => tool.name), ["read", "bash", "edit", "write"]);
   const colors = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
+  for (const tool of definitions) {
+    assert.ok(tool.parameters);
+    assert.equal(typeof tool.execute, "function");
+    assert.ok(tool.promptSnippet, `${tool.name} prompt snippet preserved`);
+  }
+
   const bash = definitions.find((tool) => tool.name === "bash")!;
   const bashResult = { content: [{ type: "text", text: "first log line\nsecond log line" }] };
-  assert.match(bash.renderResult(bashResult, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n"), /Ctrl\+E to expand/);
-  assert.match(bash.renderResult(bashResult, { expanded: true, isPartial: false }, colors, {}).render(120).join("\n"), /second log line/);
+  const bashCollapsed = bash.renderResult(bashResult, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n");
+  assert.match(bashCollapsed, /\[ expand \].*Ctrl\+E/);
+  assert.doesNotMatch(bashCollapsed, /second log line/);
 
   const edit = definitions.find((tool) => tool.name === "edit")!;
   const editResult = { content: [{ type: "text", text: "Applied" }], details: { diff: "@@\n-old\n+new" } };
-  assert.match(edit.renderResult(editResult, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n"), /\+1.*-1/);
-  assert.match(edit.renderResult(editResult, { expanded: true, isPartial: false }, colors, {}).render(120).join("\n"), /\+new/);
+  const editCollapsed = edit.renderResult(editResult, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n");
+  assert.match(editCollapsed, /\+1.*-1/);
+  assert.doesNotMatch(editCollapsed, /\+new/);
 
   const write = definitions.find((tool) => tool.name === "write")!;
-  assert.match(write.renderCall({ path: "pet.ts", content: "one\ntwo" }, colors, { expanded: true }).render(120).join("\n"), /two/);
+  const writeCollapsed = write.renderCall({ path: "pet.ts", content: "one\ntwo" }, colors, { expanded: false }).render(120).join("\n");
+  assert.match(writeCollapsed, /2 lines/);
+  assert.doesNotMatch(writeCollapsed, /two/);
 });
 
 test("rounded input fits, shows the pet sprite and exposes the short session id", () => {
