@@ -27,8 +27,8 @@ test("layered flame silhouettes animate above π; welcome and footer fit termina
     assert.ok(text.includes("pi-jar"));
     assert.doesNotMatch(text, /π/); // no second, literal symbol beneath the pixel artwork
     if (width >= 40) {
-      if (width >= 72) { assert.match(text, /test-model/); assert.match(text, /ctx 82%/); }
       assert.match(text, /quota off/);
+      assert.match(text, /Welcome to pi-jar/);
       if (width >= 72) assert.match(text, /\/tasks/);
       assert.doesNotMatch(text, /\/subagents-fleet/);
     }
@@ -122,7 +122,7 @@ test("hub dispatches only installed native managers and never invents unavailabl
   piJar(pi as unknown as Parameters<typeof piJar>[0]);
   events.get("session_start")?.({}, ctx);
   assert.match(welcome()?.render(80).join(" ") ?? "", /PROJECT.*pi-jar/);
-  assert.match(welcome()?.render(80).join(" ") ?? "", /model/);
+  assert.match(welcome()?.render(80).join(" ") ?? "", /Welcome to pi-jar/);
   assert.match(welcome()?.render(80).join(" ") ?? "", /MANAGERS.*\/tasks/);
   await handlers.get("jar")?.("hub", ctx);
   assert.deepEqual(selectChoices, ["Tasks · Team Mode (/tasks)"]);
@@ -184,7 +184,7 @@ test("welcome Settings action opens the pointer-accessible pane without submitti
   } as never);
   events.get("session_start")?.({}, ctx);
   // Simulate fullscreen dispatch through a container at a nonzero screen origin.
-  // Pi only synthesizes click when the target handled press first.
+  // The control opens on press so terminal/multiplexer click synthesis is not required.
   for (const width of [24, 40, 80]) {
     const widget = widgets.get("pi-jar.welcome")!;
     const lines = widget.render(width);
