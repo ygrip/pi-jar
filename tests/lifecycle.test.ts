@@ -252,6 +252,12 @@ test("standalone flame above large π freezes on motion-off and replays safely",
     for (let step = 0; step < 4; step++) intervals.values().next().value?.callback();
     assert.equal(welcome(), undefined);
     assert.equal(intervals.size, 0);
+    // Slash commands (e.g. `/plan <idea>`) skip `input`; the turn they start still dismisses.
+    await commands.get("jar")?.("animations off", ctx);
+    await commands.get("jar")?.("welcome", ctx);
+    assert.ok(welcome());
+    events.get("agent_start")?.({}, ctx);
+    assert.equal(welcome(), undefined);
     events.get("session_shutdown")?.({}, ctx);
     assert.equal(welcome(), undefined);
   } finally {

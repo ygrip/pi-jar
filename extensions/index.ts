@@ -438,8 +438,9 @@ export default function piJar(pi: ExtensionAPI): void {
     if (visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
     showWelcome(ctx);
   });
-  pi.on("input", (event, ctx) => {
-    if (event.source !== "interactive" || !welcomeTui || welcomeDismiss) return;
+  // Any real prompt dismisses the welcome. Slash commands bypass `input`, so `agent_start` covers them.
+  const dismissWelcome = (ctx: ExtensionContext) => {
+    if (!welcomeTui || welcomeDismiss) return;
     if (!animations) { stopWelcome(ctx); return; }
     welcomeDismiss = 1;
     if (welcomeInterval) clearInterval(welcomeInterval);
@@ -449,8 +450,9 @@ export default function piJar(pi: ExtensionAPI): void {
       else welcomeTui?.requestRender();
     }, 90);
     welcomeTui.requestRender();
-  });
-  pi.on("agent_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
+  };
+  pi.on("input", (event, ctx) => { if (event.source === "interactive") dismissWelcome(ctx); });
+  pi.on("agent_start", (_event, ctx) => { dismissWelcome(ctx); working.start(); applyWorking(ctx); });
   pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
   pi.on("message_end", (event, ctx) => {
     if (event.message.role === "assistant") {
