@@ -6,7 +6,7 @@ A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earend
 
 ## See it in action
 
-![pi-jar welcome: pixel flame over the π, the hero message and workspace card, and the composer with Ember](docs/assets/pi-jar-demo.gif)
+![pi-jar welcome: pixel flame over the π, the hero message and workspace card, and the composer with Ember](https://raw.githubusercontent.com/ygrip/pi-jar/main/docs/assets/pi-jar-demo.gif)
 
 The showcase is captured from a real pi-jar terminal session: the torch-style `π`, animated flame and embers, live workspace state, tasks, roles and composer are the actual TUI rather than a mockup. Capture and media guidelines live in [docs/SHOWCASE.md](docs/SHOWCASE.md).
 
@@ -32,8 +32,10 @@ The showcase is captured from a real pi-jar terminal session: the torch-style `�
 ## Install
 
 ```bash
-pi install git:github.com/ygrip/pi-jar
+pi install npm:pi-jar
 ```
+
+Or track the repository directly with `pi install git:github.com/ygrip/pi-jar`.
 
 Restart Pi, then pick a theme with `/settings`: `pi-jar-dark`, or `pi-jar-dark-<accent>` (`gray`, `pink`, `teal`, `azure`, `violet`, `amber`). For the closest match set your terminal background to `#0B1018` (Pi themes cannot change the terminal's own background).
 

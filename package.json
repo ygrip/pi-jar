@@ -26,7 +26,7 @@
     "extensions",
     "src",
     "themes",
-    "docs",
+    "docs/*.md",
     "README.md",
     "LICENSE"
   ],
@@ -36,7 +36,8 @@
     ],
     "themes": [
       "./themes"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/ygrip/pi-jar/main/docs/assets/pi-jar-demo.gif"
   },
   "scripts": {
     "check": "tsc --noEmit",

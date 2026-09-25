@@ -84,3 +84,12 @@ With a logged-in model, run end to end:
 pi-jar adds about 0.2 s to Pi's first render (mostly module import). To keep startup lean it never blocks `session_start`: the provider quota lookup, the welcome's recent-session scan and its `git` calls start 1.5 s after the session starts, and the card and footer fill in when they finish.
 
 Most startup time in a full setup comes from extension loading, which Pi does one package at a time. Measure a package by launching it alone (`pi -ne -e <path>`) and compare with `pi --no-extensions`. Large packages and ones installed from git (loaded as TypeScript source) cost the most, and the first launch after `pi update` is slow while Pi rebuilds its transpile cache. Keep rarely used packages out of the global `packages` list (load them with `-e`, or in project settings).
+
+## Publishing
+
+pi-jar is published to npm as `pi-jar`. The `pi-package` keyword lists it in the [Pi package gallery](https://pi.dev/packages), and `pi.image` in `package.json` supplies the gallery preview (the demo GIF, served from GitHub rather than shipped in the tarball).
+
+1. `npm run check && npm test`
+2. Bump `version` in `package.json`, commit and push.
+3. `npm pack --dry-run` — the tarball holds `extensions/`, `src/`, `themes/`, `docs/*.md`, `README.md` and `LICENSE` only.
+4. `npm login` (once), then `npm publish`.

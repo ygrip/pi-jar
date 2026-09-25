@@ -712,7 +712,7 @@ export default function piJar(pi: ExtensionAPI): void {
         }
         const valid = selected === "default" || ACCENT_NAMES.some((name) => name === selected);
         const failure = applied ? "" : !valid ? `Unknown pi-jar accent: ${selected || "(empty)"}; use /jar accent`
-          : !loadedAccents(ctx).includes(selected) ? `Pi-jar accent ${selected} is not loaded. Install with pi install git:github.com/ygrip/pi-jar and restart Pi, or launch with --theme <pi-jar>/themes`
+          : !loadedAccents(ctx).includes(selected) ? `Pi-jar accent ${selected} is not loaded. Install with pi install npm:pi-jar and restart Pi, or launch with --theme <pi-jar>/themes`
           : `Could not apply pi-jar accent: ${selected}`;
         ctx.ui.notify(applied ? `pi-jar accent: ${selected}` : failure, applied ? "info" : "warning");
         return;
