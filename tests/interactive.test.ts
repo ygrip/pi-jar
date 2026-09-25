@@ -139,6 +139,22 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
   assert.equal(await answer, "yes");
 });
 
+test("pi-jar dialogs accept mouse clicks on choices and to-do rows", async () => {
+  let component: any;
+  const ctx = { hasUI: true, mode: "tui", ui: { custom(factory: Function) {
+    return new Promise((resolve) => { component = factory({ requestRender() {} }, theme, {}, resolve); });
+  } } };
+  const choice = promptChoice(ctx as never, "Choice", "A wrapped question about the choice", ["First", "Second"]);
+  const rows: string[] = component.render(22);
+  const second = rows.findIndex((line) => line.includes("Second"));
+  component.handleMouse({ type: "click", button: "left", x: 5, y: second });
+  assert.equal(await choice, 1);
+  const toggled = todoView(ctx as never, () => [{ id: "a", title: "Clicked", done: false }], { value: "all" });
+  component.render(40);
+  component.handleMouse({ type: "click", button: "left", x: 4, y: 1 });
+  assert.deepEqual(await toggled, { kind: "toggle", id: "a" });
+});
+
 test("does not claim Pi's built-in Ctrl+E cursor-line-end shortcut", () => {
   const shortcuts = new Map<string, unknown>();
   piJar({ on() {}, registerCommand() {}, registerShortcut(key: string, options: unknown) {
@@ -187,7 +203,7 @@ test("rounded input fits, shows the pet sprite and exposes a human session label
   const lines = ["top", "draft", "bottom"];
   const idle = roundedInput(lines, 40, false, theme as never, paint);
   const focused = roundedInput(lines, 40, true, theme as never, paint, composerIcon("idle"), "ember-trail");
-  assert.ok(focused[0]?.includes("ᐠ•ᴗ•ᐟ"));
+  assert.ok(focused[0]?.includes("♨(•ᴗ•)♨"));
   assert.ok(focused[0]?.includes("session ember-trail"));
   const widths = new Set<number>();
   for (const phase of ["idle", "generating", "tool", "waiting"] as const) {
@@ -197,7 +213,7 @@ test("rounded input fits, shows the pet sprite and exposes a human session label
   assert.equal(widths.size, 1);
   assert.ok([...widths][0]! > 1);
   assert.notEqual(composerIcon("generating", 0)[0], composerIcon("generating", 1)[0], "mascot ears animate without hand-like glyphs");
-  assert.notEqual(composerIcon("generating", 0)[1], composerIcon("generating", 1)[1], "mascot eyes change with expression");
+  assert.notEqual(composerIcon("generating", 0)[2], composerIcon("generating", 1)[2], "mascot eyes change with expression");
   assert.doesNotMatch(composerIcon("idle"), /[╭╮╰╯]/, "mascot no longer uses corner glyphs that read like hands");
   assert.equal(sessionDisplayName("Welcome polish", "019a0a2b-f81d-7350-8188-abcdef123456"), "Welcome polish");
   const fallback = sessionDisplayName(undefined, "019a0a2b-f81d-7350-8188-abcdef123456");
@@ -257,7 +273,7 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.notEqual(current, original);
   assert.equal(draft, "keep this draft");
   const decorated = current?.({}, theme, {}) as { render(width: number): string[]; setText(text: string): void };
-  assert.ok(decorated.render(80)[0]?.includes("ᐠ•ᴗ•ᐟ"));
+  assert.ok(decorated.render(80)[0]?.includes("♨(•ᴗ•)♨"));
   assert.ok(decorated.render(80)[0]?.includes("session Welcome polish"));
   decorated.setText("editing");
   style.disable(ctx as never);
@@ -276,21 +292,15 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.equal(widgets.size, 0);
 });
 
-test("regular composer maps screen clicks into editor rows and releases mouse mode", () => {
+test("regular composer never captures terminal mouse reporting or scrollback", () => {
   let factory: Function | undefined = () => ({
-    render: () => ["top", "first line", "second line", "bottom"],
-    handleMouse(event: unknown) { clicks.push(event); return { handled: true }; },
+    render: () => ["top", "draft", "bottom"],
     getText: () => "draft", setText() {}, handleInput() {}, invalidate() {}
   });
-  const clicks: any[] = [];
   const writes: string[] = [];
-  let listener: ((data: string) => { consume?: boolean } | undefined) | undefined;
-  let previousLines: string[] = [];
-  let redraws = 0;
+  let listeners = 0;
   const tui = { mode: "regular", terminal: { write(value: string) { writes.push(value); } },
-    requestRender() { redraws++; },
-    captureRenderState: () => ({ previousLines, previousViewportTop: 1, previousWidth: 40 }),
-    addInputListener(fn: typeof listener) { listener = fn; return () => { listener = undefined; }; }
+    requestRender() {}, addInputListener() { listeners++; return () => {}; }
   };
   const ctx = { hasUI: true, mode: "tui", sessionManager: {}, ui: {
     getEditorComponent: () => factory, setEditorComponent(value: Function | undefined) { factory = value; },
@@ -299,22 +309,10 @@ test("regular composer maps screen clicks into editor rows and releases mouse mo
   const style = new ComposerStyle();
   assert.equal(style.enable(ctx as never), true);
   const editor = factory?.(tui, theme, {}) as { render(width: number): string[] };
-  const rendered = editor.render(40);
-  previousLines = ["other row", "scrolled row", ...rendered, "footer"];
-  assert.equal(listener?.("\x1b[<0;8;3M")?.consume, true);
-  assert.equal(clicks.length, 1);
-  assert.equal(clicks[0].y, 1);
-  assert.equal(clicks[0].x, 6); // border coordinate removed
-  assert.equal(clicks[0].width, 38); // rounded border delegates to native editor
-  assert.equal(listener?.("\x1b[<0;8;1M")?.consume, true);
-  assert.equal(listener?.("\x1b[<64;8;3M")?.consume, true); // wheel is never forwarded into editor text
-  assert.equal(listener?.("\x1b[<0;8;3m")?.consume, true); // release cannot leak as input
-  assert.equal(clicks.length, 1);
-  assert.ok(redraws > 0);
-  assert.equal(writes.filter((line) => line.includes("?1000h")).length, 1);
+  assert.ok(editor.render(40)[0]?.includes("♨(•ᴗ•)♨"));
   style.disable(ctx as never);
-  assert.equal(listener, undefined);
-  assert.equal(writes.filter((line) => line.includes("?1000l")).length, 1);
+  assert.equal(listeners, 0);
+  assert.deepEqual(writes, [], "terminal owns its mouse wheel and selection");
 });
 
 test("composer icon tracks observed phases, refreshes session title, honors motion-off and stops after interruption", async () => {
@@ -338,7 +336,7 @@ test("composer icon tracks observed phases, refreshes session title, honors moti
   assert.equal(style.enable(ctx as never), true);
   const editor = current?.(tui, theme, {}) as { render(width: number): string[] };
   const icon = () => editor.render(40)[0] ?? "";
-  assert.ok(icon().includes("ᐠ•ᴗ•ᐟ"));
+  assert.ok(icon().includes("♨(•ᴗ•)♨"));
   assert.ok(icon().includes("session Welcome polish"));
   sessionName = "Flame pass";
   style.refreshSession(ctx as never);
@@ -346,15 +344,15 @@ test("composer icon tracks observed phases, refreshes session title, honors moti
   style.setActivity("generating", true);
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.ok(redraws > 0);
-  assert.ok(icon().includes("ᐢ◕ᴗ◕ᐢ"));
+  assert.ok(icon().includes("⌁(◕ᴗ◕)♨"));
   style.setActivity("tool", false);
-  assert.ok(icon().includes("ᐢ>ᴗ<ᐢ"));
+  assert.ok(icon().includes("♨(>ᴗ<)♨"));
   const stopped = redraws;
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.equal(redraws, stopped);
   style.setActivity("generating", true);
   style.setActivity("idle", true); // interrupted
-  assert.ok(icon().includes("ᐠ•ᴗ•ᐟ"));
+  assert.ok(icon().includes("♨(•ᴗ•)♨"));
   const stoppedAfterInterrupt = redraws;
   await new Promise((resolve) => setTimeout(resolve, 270));
   assert.equal(redraws, stoppedAfterInterrupt);

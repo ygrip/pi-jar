@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { cleanText } from "./status.ts";
 
@@ -42,6 +42,9 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
     ];
     let selected = 0;
     const checked = new Set<number>();
+    let hitRows: number[] = [];
+    let scroll = 0;
+    let lastSelected = selected;
     const totalRows = () => options.length + actions.length;
     const choose = () => {
       if (selected < options.length) {
@@ -69,7 +72,21 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
         } else if (matchesKey(data, Key.enter) || data === " ") choose();
         tui.requestRender();
       },
+      handleMouse(event: TuiMouseEvent) {
+        if (event.type === "wheel" && event.wheelDelta) {
+          scroll = Math.max(0, scroll + Math.sign(event.wheelDelta) * 3);
+          tui.requestRender(); return { handled: true };
+        }
+        if (event.type !== "click" || event.button !== "left") return;
+        const index = hitRows[event.y];
+        if (index === undefined) return;
+        selected = index;
+        choose();
+        tui.requestRender();
+        return { handled: true };
+      },
       render(width: number): string[] {
+        hitRows = [];
         const inner = Math.max(1, width - 4);
         const badge = "◆ QUESTION " + String(index + 1) + "/" + String(total) + (multi ? " · MULTI SELECT" : "");
         const title = question.header ? cleanText(question.header, 48) : "Clarification";
@@ -77,23 +94,36 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
           fit(theme.fg("accent", "╭─ " + badge + " ─"), width),
           fit(theme.fg("muted", "│ " + title), width)
         ];
-        for (const row of wrapTextWithAnsi(cleanText(question.question, 900), inner)) lines.push(fit("│ " + row, width));
-        lines.push(fit(theme.fg("dim", "├" + "─".repeat(Math.max(0, width - 1))), width));
+        const content: { line: string; target?: number }[] = [];
+        for (const row of wrapTextWithAnsi(cleanText(question.question, 900), inner)) content.push({ line: fit("│ " + row, width) });
+        content.push({ line: fit(theme.fg("dim", "├" + "─".repeat(Math.max(0, width - 1))), width) });
         options.forEach((option, at) => {
           const active = selected === at;
           const marker = multi ? (checked.has(at) ? "☑" : "☐") : (active ? "●" : "○");
           const number = String(at + 1).padStart(2, " ") + ".";
-          lines.push(fit(theme.fg(active ? "accent" : "muted", "│ " + (active ? "❯ " : "  ") + marker + " " + number + " " + option.label), width));
-          if (option.description) lines.push(fit(theme.fg("dim", "│      " + option.description), width));
+          content.push({ target: at, line: fit(theme.fg(active ? "accent" : "muted", "│ " + (active ? "❯ " : "  ") + marker + " " + number + " " + option.label), width) });
+          if (option.description) content.push({ target: at, line: fit(theme.fg("dim", "│      " + option.description), width) });
         });
         actions.forEach((action, at) => {
           const row = options.length + at;
           const active = row === selected;
           const chip = "[ " + action.icon + " " + action.label + " ]";
-          lines.push(fit(theme.fg(active ? "accent" : "dim", "│ " + (active ? "❯ " : "  ") + chip), width));
+          content.push({ target: row, line: fit(theme.fg(active ? "accent" : "dim", "│ " + (active ? "❯ " : "  ") + chip), width) });
         });
-        const hint = multi ? "↑↓ move · Space toggle · Enter choose · 1-9 quick select · Esc cancel" : "↑↓ move · Enter choose · 1-9 quick select · Esc cancel";
-        lines.push(fit(theme.fg("dim", "╰─ " + hint), width));
+        const page = Math.max(3, Math.min(16, (process.stdout.rows ?? 24) - 5));
+        if (selected !== lastSelected) {
+          const target = content.findIndex((row) => row.target === selected);
+          if (target < scroll) scroll = target;
+          else if (target >= scroll + page) scroll = target - page + 1;
+          lastSelected = selected;
+        }
+        scroll = Math.max(0, Math.min(scroll, Math.max(0, content.length - page)));
+        content.slice(scroll, scroll + page).forEach((row) => {
+          if (row.target !== undefined) hitRows[lines.length] = row.target;
+          lines.push(row.line);
+        });
+        const hint = multi ? "↑↓ move · Space/Enter toggle · wheel scroll · Esc cancel" : "↑↓ move · Enter choose · wheel scroll · Esc cancel";
+        lines.push(fit(theme.fg("dim", `╰─ ${scroll + 1}–${Math.min(scroll + page, content.length)}/${content.length} · ${hint}`), width));
         return lines.map((line) => visibleWidth(line) <= width ? line : fit(line, width));
       }
     };

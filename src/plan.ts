@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { type ModelRoleManager } from "./model-roles.ts";
 import { extractPlanSteps, isSafePlanCommand, planTextFromSteps } from "./plan-utils.ts";
 import { cleanText } from "./status.ts";
@@ -7,11 +7,18 @@ import { type TodoStore } from "./tasks.ts";
 
 export const PLAN_ENTRY = "pi-jar.plan";
 type PlanAction = "implement" | "compact" | "stop";
-type PlanState = { v: 1; enabled: boolean; steps: string[] };
+type PlanState = { v: 1; enabled: boolean; steps: string[]; text?: string };
 
 // Only tools with known read-only semantics are allowed. Name suffixes (for example
 // "remote_get") do not prove that an extension or MCP tool is safe to invoke.
 export const PLAN_SAFE_TOOLS = new Set(["read", "bash", "grep", "find", "ls", "jar_ask"]);
+
+function safePlanText(value: string): string {
+  return value.slice(0, 20000)
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g, "")
+    .replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, "")
+    .trim();
+}
 
 function assistantText(message: unknown): string {
   if (!message || typeof message !== "object") return "";
@@ -26,7 +33,7 @@ function assistantText(message: unknown): string {
   }).filter(Boolean).join("\n");
 }
 
-async function planReview(ctx: ExtensionContext, steps: readonly string[]): Promise<PlanAction | undefined> {
+async function planReview(ctx: ExtensionContext, steps: readonly string[], text: string): Promise<PlanAction | undefined> {
   if (!ctx.hasUI || ctx.mode !== "tui") return undefined;
   const actions: { value: PlanAction; label: string; description: string; icon: string }[] = [
     { value: "implement", label: "Implement now", description: "Keep the current context and start execution.", icon: "▶" },
@@ -35,38 +42,55 @@ async function planReview(ctx: ExtensionContext, steps: readonly string[]): Prom
   ];
   return ctx.ui.custom<PlanAction | undefined>((tui, theme, _keys, done) => {
     let selected = 0;
+    let scroll = 0;
+    let actionRows: number[] = [];
     return {
       invalidate() {},
       handleInput(data: string) {
         if (matchesKey(data, Key.escape)) return done("stop");
         if (matchesKey(data, Key.up)) selected = (selected + actions.length - 1) % actions.length;
         else if (matchesKey(data, Key.down)) selected = (selected + 1) % actions.length;
+        else if (matchesKey(data, Key.pageUp)) scroll = Math.max(0, scroll - 6);
+        else if (matchesKey(data, Key.pageDown)) scroll += 6;
         else if (/^[1-3]$/.test(data)) return done(actions[Number(data) - 1]!.value);
         else if (matchesKey(data, Key.enter)) return done(actions[selected]!.value);
         tui.requestRender();
       },
+      handleMouse(event: TuiMouseEvent) {
+        if (event.type === "wheel" && event.wheelDelta) {
+          scroll = Math.max(0, scroll + Math.sign(event.wheelDelta) * 3);
+          tui.requestRender(); return { handled: true };
+        }
+        if (event.type !== "click" || event.button !== "left") return;
+        const index = actionRows.indexOf(event.y);
+        if (index < 0) return;
+        selected = index;
+        done(actions[index]!.value);
+        return { handled: true };
+      },
       render(width: number): string[] {
         const fit = (text: string) => truncateToWidth(text, Math.max(0, width));
         const inner = Math.max(1, width - 5);
-        const maxSteps = Math.max(3, Math.min(12, (process.stdout.rows ?? 24) - 12));
+        const maxRows = Math.max(3, Math.min(16, (process.stdout.rows ?? 24) - 12));
+        const content = text ? text.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(1, inner - 2)))
+          : steps.flatMap((step, index) => wrapTextWithAnsi(`${index + 1}. ${step}`, Math.max(1, inner - 2)));
+        scroll = Math.min(scroll, Math.max(0, content.length - maxRows));
         const lines = [
           fit(theme.fg("accent", "╭─ ◆ PLAN READY ─ [ READ ONLY ] ─")),
           fit(theme.fg("muted", "│ Review the plan before Pi gets write access.")),
           fit(theme.fg("dim", "├" + "─".repeat(Math.max(0, width - 1))))
         ];
-        for (let index = 0; index < Math.min(steps.length, maxSteps); index++) {
-          const prefix = "│ " + String(index + 1).padStart(2, " ") + ". ";
-          const wrapped = wrapTextWithAnsi(cleanText(steps[index]!, 240), Math.max(1, inner - 4));
-          wrapped.forEach((row, at) => lines.push(fit(theme.fg(at === 0 ? "muted" : "dim", at === 0 ? prefix + row : "│     " + row))));
-        }
-        if (steps.length > maxSteps) lines.push(fit(theme.fg("dim", "│    … +" + String(steps.length - maxSteps) + " more steps")));
+        for (const row of content.slice(scroll, scroll + maxRows)) lines.push(fit(theme.fg("muted", "│ " + row)));
+        if (content.length > maxRows) lines.push(fit(theme.fg("dim", `│  Plan lines ${scroll + 1}–${Math.min(content.length, scroll + maxRows)}/${content.length} · PgUp/PgDn scroll`)));
         lines.push(fit(theme.fg("dim", "├" + "─".repeat(Math.max(0, width - 1)))));
+        actionRows = [];
         actions.forEach((action, index) => {
+          actionRows.push(lines.length);
           const active = index === selected;
           lines.push(fit(theme.fg(active ? "accent" : "muted", "│ " + (active ? "❯ " : "  ") + String(index + 1) + ". [ " + action.icon + " " + action.label + " ]")));
           lines.push(fit(theme.fg("dim", "│      " + action.description)));
         });
-        lines.push(fit(theme.fg("dim", "╰─ ↑↓ choose · 1-3 quick select · Enter confirm · Esc stop")));
+        lines.push(fit(theme.fg("dim", "╰─ ↑↓ choose · PgUp/PgDn plan · 1-3 quick select · Enter confirm · Esc stop")));
         return lines;
       }
     };
@@ -76,6 +100,7 @@ async function planReview(ctx: ExtensionContext, steps: readonly string[]): Prom
 export class PlanMode {
   private enabled = false;
   private steps: string[] = [];
+  private planText = "";
   private toolsBefore: string[] | undefined;
   private lastAssistant = "";
   private reviewing = false;
@@ -98,7 +123,7 @@ export class PlanMode {
   latestSteps(): string[] { return [...this.steps]; }
 
   private persist(): void {
-    this.pi.appendEntry(PLAN_ENTRY, { v: 1, enabled: this.enabled, steps: this.steps } satisfies PlanState);
+    this.pi.appendEntry(PLAN_ENTRY, { v: 1, enabled: this.enabled, steps: this.steps, text: this.planText } satisfies PlanState);
   }
 
   private updateStatus(ctx: ExtensionContext): void {
@@ -152,20 +177,20 @@ export class PlanMode {
       "Implement the approved plan now.",
       "Keep jar_todo synchronized as each step is completed.",
       "Approved plan:",
-      planTextFromSteps(this.steps)
+      this.planText || planTextFromSteps(this.steps)
     ].join("\n\n");
   }
 
   private async implement(ctx: ExtensionContext): Promise<void> {
     this.seedTodos(ctx);
     await this.leave(ctx);
-    this.pi.sendUserMessage(this.executeMessage());
+    this.pi.sendUserMessage(this.executeMessage(), { deliverAs: "followUp" });
   }
 
   private compactThenImplement(ctx: ExtensionContext): void {
     this.compacting = true;
     const generation = ++this.compactGeneration;
-    const plan = planTextFromSteps(this.steps);
+    const plan = this.planText || planTextFromSteps(this.steps);
     ctx.ui.notify("Compacting context while preserving the approved plan…", "info");
     ctx.compact({
       customInstructions: "Preserve this approved implementation plan exactly enough to execute it after compaction:\n" + plan,
@@ -187,7 +212,7 @@ export class PlanMode {
     if (this.reviewing || this.compacting || !this.enabled || !this.steps.length) return;
     this.reviewing = true;
     try {
-      const action = await planReview(ctx, this.steps);
+      const action = await planReview(ctx, this.steps, this.planText);
       if (action === "implement") await this.implement(ctx);
       else if (action === "compact") this.compactThenImplement(ctx);
       else if (action === "stop") {
@@ -207,10 +232,11 @@ export class PlanMode {
       if (entry.type !== "custom" || entry.customType !== PLAN_ENTRY || !entry.data || typeof entry.data !== "object") continue;
       const data = entry.data as Record<string, unknown>;
       if (data.v !== 1 || typeof data.enabled !== "boolean" || !Array.isArray(data.steps)) continue;
-      state = { v: 1, enabled: data.enabled, steps: data.steps.filter((item): item is string => typeof item === "string").map((item) => cleanText(item, 240)).filter(Boolean).slice(0, 50) };
+      state = { v: 1, enabled: data.enabled, steps: data.steps.filter((item): item is string => typeof item === "string").map((item) => cleanText(item, 240)).filter(Boolean).slice(0, 50), text: typeof data.text === "string" ? safePlanText(data.text) : "" };
     }
     if (this.enabled) await this.leave(ctx, false);
     this.steps = state?.steps ?? [];
+    this.planText = state?.text ?? "";
     if (state?.enabled) await this.enter(ctx, false);
     else this.updateStatus(ctx);
   }
@@ -228,7 +254,7 @@ export class PlanMode {
         const wasEnabled = this.enabled;
         if (!this.enabled) await this.enter(ctx);
         if (text) {
-          this.pi.sendUserMessage(text);
+          this.pi.sendUserMessage(text, { deliverAs: "followUp" });
           return;
         }
         if (wasEnabled && this.steps.length) await this.review(ctx);
@@ -284,11 +310,17 @@ export class PlanMode {
 
     this.pi.on("agent_end", async (_event, ctx) => {
       if (!this.enabled || !this.lastAssistant) return;
-      const next = extractPlanSteps(this.lastAssistant);
+      const draft = this.lastAssistant;
+      const next = extractPlanSteps(draft);
       this.lastAssistant = "";
-      if (!next.length) return;
+      if (!next.length) {
+        ctx.ui.notify("No numbered plan found. Add a Plan: section with numbered steps, or use /plan off.", "warning");
+        return;
+      }
       this.steps = next;
+      this.planText = safePlanText(draft);
       this.persist();
+      // agent_end may still be processing when approval finishes; implement() queues a follow-up.
       await this.review(ctx);
     });
 

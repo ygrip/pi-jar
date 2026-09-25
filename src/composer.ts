@@ -1,20 +1,18 @@
 import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, stripTerminalSequences, truncateToWidth, visibleWidth, type EditorComponent, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
-import { acquireRegularMouse } from "./regular-mouse.ts";
+import { truncateToWidth, visibleWidth, type EditorComponent, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import type { WorkingPhase } from "./working.ts";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
-// Small cat-like face: the edge glyphs read as ears rather than hands.
-// Expressions change by phase while keeping a stable five-cell footprint.
+// An ember with a rounded face and flickering plume; every phase has the same width.
 const PETS: Record<WorkingPhase, readonly string[]> = {
-  idle: ["ᐠ•ᴗ•ᐟ"],
-  generating: ["ᐠ•ᴗ•ᐟ", "ᐢ◕ᴗ◕ᐢ", "ᐠ•o•ᐟ", "ᐢ^ᴗ^ᐢ"],
-  tool: ["ᐢ>ᴗ<ᐢ", "ᐠ•ᴗ•ᐟ", "ᐢ×ᴗ×ᐢ", "ᐠ>◡<ᐟ"],
-  waiting: ["ᐠ-ᴗ-ᐟ"]
+  idle: ["♨(•ᴗ•)♨"],
+  generating: ["♨(•ᴗ•)♨", "⌁(◕ᴗ◕)♨", "♨(•o•)⌁", "⌁(^ᴗ^)♨"],
+  tool: ["♨(>ᴗ<)♨", "⌁(•ᴗ•)♨", "♨(×ᴗ×)⌁", "⌁(>◡<)♨"],
+  waiting: ["♨(-ᴗ-)♨"]
 };
 export function composerIcon(phase: WorkingPhase, frame = 0): string {
   const icons = PETS[phase];
-  return icons[frame % icons.length] ?? "ᐠ•ᴗ•ᐟ";
+  return icons[frame % icons.length] ?? "♨(•ᴗ•)♨";
 }
 export function shortSessionId(id?: string): string {
   const clean = id?.trim();
@@ -46,7 +44,7 @@ export function sessionDisplayName(name?: string, id?: string): string {
 }
 
 /** Frame a real editor without changing its keyboard, history or autocomplete implementation. */
-export function roundedInput(lines: string[], width: number, focused: boolean, theme: EditorTheme, focusPaint?: (text: string) => string, icon = "ᐠ•ᴗ•ᐟ", session = ""): string[] {
+export function roundedInput(lines: string[], width: number, focused: boolean, theme: EditorTheme, focusPaint?: (text: string) => string, icon = "♨(•ᴗ•)♨", session = ""): string[] {
   if (width < 8 || lines.length < 2) return lines.map((line) => truncateToWidth(line, Math.max(0, width)));
   const border = focused && focusPaint ? focusPaint : theme.borderColor;
   const meta = session ? `${icon} · session ${session}` : icon;
@@ -116,14 +114,11 @@ export class ComposerStyle {
   private owner?: EditorFactory;
   private previous?: EditorFactory;
   private tui?: TUI;
-  private pointerCleanup?: () => void;
   private timer?: ReturnType<typeof setInterval>;
   private phase: WorkingPhase = "idle";
   private frame = 0;
   private animations = true;
   private session = "";
-  private pointerOverlay?: () => boolean;
-  setPointerOverlay(visible: () => boolean): void { this.pointerOverlay = visible; }
   private icon = () => composerIcon(this.phase, this.frame);
   private sessionLabel = () => this.session;
   setActivity(phase: WorkingPhase, animations: boolean): void {
@@ -147,43 +142,6 @@ export class ComposerStyle {
     this.session = next;
     if (this.enabled) this.tui?.requestRender();
   }
-  private installPointer(tui: TUI, editor: EditorComponent): void {
-    this.pointerCleanup?.();
-    this.pointerCleanup = undefined;
-    const main = tui as TUI & { captureRenderState?: () => {
-      previousLines: string[]; previousViewportTop: number; previousWidth: number;
-    } };
-    if (tui.mode !== "regular" || !main.captureRenderState || !editor.handleMouse) return;
-    const release = acquireRegularMouse(tui);
-    let rendered: string[] = [];
-    const originalRender = editor.render.bind(editor);
-    editor.render = (width) => { rendered = originalRender(width); return rendered; };
-    const remove = tui.addInputListener((data) => {
-      const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
-      if (!mouse) return;
-      // Ignore scroll and modified clicks. Main-screen mouse mode can send wheel
-      // events; do not mistake them for editor clicks or insert escape bytes.
-      const button = Number(mouse[1]);
-      if (mouse[4] !== "M" || button !== 0 || !rendered.length) return this.pointerOverlay?.() ? undefined : { consume: true };
-      const state = main.captureRenderState?.();
-      if (!state || !state.previousWidth) return { consume: true };
-      const normalize = (line: string) => stripTerminalSequences(line.replaceAll(CURSOR_MARKER, "")).trimEnd();
-      const lines = state.previousLines;
-      let start = -1;
-      for (let row = 0; row <= lines.length - rendered.length; row++) {
-        if (rendered.every((line, index) => normalize(lines[row + index] ?? "") === normalize(line))) start = row;
-      }
-      const row = state.previousViewportTop + Number(mouse[3]) - 1 - start;
-      if (start < 0 || row < 0 || row >= rendered.length) return this.pointerOverlay?.() ? undefined : { consume: true };
-      editor.handleMouse?.({ type: "click", button: "left", x: Number(mouse[2]) - 1,
-        y: row, screenX: Number(mouse[2]) - 1, screenY: Number(mouse[3]) - 1,
-        width: state.previousWidth, height: rendered.length,
-        shift: false, alt: false, ctrl: false });
-      tui.requestRender();
-      return { consume: true };
-    });
-    this.pointerCleanup = () => { remove(); release(); };
-  }
   enable(ctx: ExtensionContext): boolean {
     if (!ctx.hasUI || ctx.mode !== "tui") return false;
     if (this.enabled) return true;
@@ -198,7 +156,6 @@ export class ComposerStyle {
         const editor = previous
           ? new ThemedEditor(previous(tui, theme, keys), theme, paint, this.icon, this.sessionLabel)
           : new RoundedEditor(tui, theme, keys, paint, this.icon, this.sessionLabel);
-        this.installPointer(tui, editor);
         return editor;
       };
       this.previous = previous;
@@ -214,8 +171,6 @@ export class ComposerStyle {
     }
   }
   disable(ctx: ExtensionContext): void {
-    this.pointerCleanup?.();
-    this.pointerCleanup = undefined;
     this.stopTimer();
     this.tui = undefined;
     this.phase = "idle";

@@ -40,10 +40,12 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
       assert.notDeepEqual(left(before).slice(0, 13), left(after).slice(0, 13)); // flame and embers breathe
       assert.deepEqual(left(before).slice(13), left(after).slice(13)); // π and spacing stay grounded
       assert.ok(left(before).slice(0, 13).some((line) => line.includes("████")));
+      assert.match(left(before)[7]!, /●.{3}●/, "eyes sit apart on the moving flame head");
+      assert.match(left(before)[9]!, /ᴗ/, "mouth stays below the eyes");
       assert.ok(left(before).slice(13, 20).some((line) => line.includes("██")));
-      assert.ok(Array.from({ length: 8 }, (_, frame) => welcomeLines(width, frame, plain.fg, info).join(""))
-        .some((rendered) => stripTerminalSequences(rendered).includes("■")), "at least one large ember spark is visible");
-      assert.ok(before.join("").includes("\x1b[38;2;255;106;0m"), "inner flame uses a distinct orange pocket");
+      assert.ok(Array.from({ length: 24 }, (_, frame) => welcomeLines(width, frame, plain.fg, info).join(""))
+        .some((rendered) => stripTerminalSequences(rendered).includes("▪")), "rising ember particles are visible");
+      assert.ok(before.join("").includes("\x1b[38;2;255;212;90m"), "independently moving hot core stays bright");
       const centerOf = (line: string) => {
         const start = line.search(/\S/);
         const end = line.length - 1 - [...line].reverse().join("").search(/\S/);
@@ -75,6 +77,27 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
     if (width >= 32) assert.match(lines.join(" "), /5h 14%/);
     if (width < 32) assert.doesNotMatch(lines.join(" "), /5h 14%/);
   }
+});
+
+test("procedural flame keeps its face inside the body and its base planted across frames", () => {
+  const faces: string[] = [];
+  const bases: string[] = [];
+  for (let frame = 0; frame <= 2000; frame++) {
+    const flame = welcomeLines(80, frame, plain.fg).slice(0, 13).map((line) => stripTerminalSequences(line).slice(0, 28));
+    const eyes = flame[7]!;
+    const mouth = flame[9]!;
+    const glyph = Math.floor(frame / 8) % 13 === 12 ? "─" : "●";
+    const left = eyes.indexOf(glyph);
+    const right = eyes.lastIndexOf(glyph);
+    assert.ok(left > 0 && right - left === 4, `frame ${frame}: eyes stay spaced`);
+    assert.ok(eyes[left - 1] !== " " && eyes[right + 1] !== " ", `frame ${frame}: eyes remain inside the silhouette`);
+    assert.ok(mouth.includes("ᴗ"), `frame ${frame}: mouth remains visible`);
+    assert.ok(flame.every((row) => visibleWidth(row) === 28), "flame art has stable row widths");
+    faces.push(eyes);
+    bases.push(flame[12]!);
+  }
+  assert.equal(new Set(bases).size, 1, "the lower flame does not wobble horizontally");
+  assert.ok(new Set(faces).size > 1, "the expression follows body motion");
 });
 
 test("hopeful welcome copy is varied, bounded and injectable per render", () => {
@@ -267,22 +290,15 @@ test("welcome Settings action opens the pointer-accessible pane without submitti
   events.get("session_shutdown")?.({}, ctx);
 });
 
-test("welcome Settings is clickable in regular mode and restores terminal mouse reporting", async () => {
+test("regular welcome leaves terminal mouse reporting and scrollback untouched", () => {
   const events = new Map<string, Function>();
   let widget: Component | undefined;
-  let listener: ((data: string) => { consume?: boolean } | undefined) | undefined;
-  let previousLines: string[] = [];
+  let listeners = 0;
   const writes: string[] = [];
-  let opened = 0;
   const tui = {
-    mode: "regular",
-    requestRender() {},
+    mode: "regular", requestRender() {},
     terminal: { write(data: string) { writes.push(data); } },
-    addInputListener(fn: typeof listener) {
-      listener = fn;
-      return () => { listener = undefined; };
-    },
-    captureRenderState() { return { previousLines, previousViewportTop: 1 }; }
+    addInputListener() { listeners++; return () => {}; }
   };
   const ctx = {
     hasUI: true, mode: "tui", cwd: "/not-a-real-pi-jar-project", isIdle: () => true,
@@ -290,34 +306,17 @@ test("welcome Settings is clickable in regular mode and restores terminal mouse 
     getContextUsage: () => ({ percent: 0 }),
     ui: {
       setWorkingIndicator() {}, setFooter() {}, notify() {},
-      setWidget(_key: string, factory?: Function) {
-        widget = factory ? factory(tui, plain) : undefined;
-      },
-      async custom(factory: Function) {
-        opened++;
-        const pane = factory({ requestRender() {} }, plain, {}, () => {});
-        pane.handleInput("\x1b");
-      }
+      setWidget(_key: string, factory?: Function) { widget = factory ? factory(tui, plain) : undefined; }
     }
   };
-  piJar({
-    on: (name: string, handler: Function) => events.set(name, handler),
-    getCommands: () => [], registerCommand() {}
-  } as never);
+  piJar({ on: (name: string, handler: Function) => events.set(name, handler),
+    getCommands: () => [], registerCommand() {} } as never);
   events.get("session_start")?.({}, ctx);
-  assert.ok(widget);
-  previousLines = ["old terminal row", ...widget!.render(120)];
-  assert.equal(writes.filter((value) => value.includes("\x1b[?1000h")).length, 1, "mouse reporting has one owner and is not toggled during render");
-  const y = previousLines.findIndex((line) => stripTerminalSequences(line).includes("[ ⚙ Settings ↗ ]"));
-  assert.ok(y >= 0);
-  const row = stripTerminalSequences(previousLines[y]!);
-  const x = visibleWidth(row.slice(0, row.indexOf("[ ⚙ Settings ↗ ]"))) + 3;
-  assert.ok(listener);
-  listener!(`\x1b[<0;${x + 1};${y}M`);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(opened, 1);
-  assert.ok(writes.some((value) => value.includes("\x1b[?1000h")));
-  assert.ok(writes.some((value) => value.includes("\x1b[?1000l")));
-  assert.equal(listener, undefined);
+  const rendered = widget?.render(120).map(stripTerminalSequences).join(" ") ?? "";
+  assert.match(rendered, /\/jar settings/);
+  assert.doesNotMatch(rendered, /\[ ⚙ Settings ↗ \]/, "regular mode must not advertise an unclickable button");
+  events.get("session_shutdown")?.({}, ctx);
+  assert.equal(listeners, 0);
+  assert.deepEqual(writes, [], "terminal owns its mouse wheel and selection");
 });
 

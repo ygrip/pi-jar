@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Input, Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Input, Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import type { Todo } from "./tasks.ts";
 import { cleanText } from "./status.ts";
 
@@ -14,16 +14,23 @@ export async function promptText(ctx: ExtensionContext, title: string, question:
     input.setValue(initial);
     input.onSubmit = (value) => done(value.trim() || undefined);
     input.onEscape = () => done(undefined);
+    let footerRow = 0;
     return {
       invalidate() { input.invalidate(); },
       handleInput(data: string) { input.handleInput(data); tui.requestRender(); },
+      handleMouse(event: TuiMouseEvent) {
+        if (event.type !== "click" || event.button !== "left") return;
+        if (event.y === footerRow) { done(input.getValue().trim() || undefined); return { handled: true }; }
+      },
       render(width: number): string[] {
-        return [
+        const lines = [
           fit(theme.fg("accent", `╭─ ${cleanText(title, 56)} ─`), width),
           ...wrapTextWithAnsi(cleanText(question, 160), Math.max(1, width - 2)).map((line) => fit(theme.fg("muted", `│ ${line}`), width)),
           ...input.render(Math.max(1, width - 2)).map((line) => fit("│ " + line, width)),
           fit(theme.fg("dim", "╰─ Enter: confirm · Esc: cancel"), width)
         ];
+        footerRow = lines.length - 1;
+        return lines;
       }
     };
   });
@@ -33,6 +40,7 @@ export async function promptChoice(ctx: ExtensionContext, title: string, questio
   if (!ctx.hasUI || ctx.mode !== "tui" || !choices.length) return undefined;
   return ctx.ui.custom<number | undefined>((tui, theme, _keys, done) => {
     let selected = Math.max(0, Math.min(choices.length - 1, initial));
+    let firstChoiceRow = 0;
     return {
       invalidate() {},
       handleInput(data: string) {
@@ -42,10 +50,19 @@ export async function promptChoice(ctx: ExtensionContext, title: string, questio
         if (matchesKey(data, Key.down)) selected = (selected + 1) % choices.length;
         tui.requestRender();
       },
+      handleMouse(event: TuiMouseEvent) {
+        if (event.type !== "click" || event.button !== "left") return;
+        const index = event.y - firstChoiceRow;
+        if (index >= 0 && index < choices.length) { selected = index; done(index); return { handled: true }; }
+      },
       render(width: number): string[] {
-        return [
+        const heading = [
           fit(theme.fg("accent", `╭─ ${cleanText(title, 56)} ─`), width),
-          ...wrapTextWithAnsi(cleanText(question, 160), Math.max(1, width - 2)).map((line) => fit(theme.fg("muted", `│ ${line}`), width)),
+          ...wrapTextWithAnsi(cleanText(question, 160), Math.max(1, width - 2)).map((line) => fit(theme.fg("muted", `│ ${line}`), width))
+        ];
+        firstChoiceRow = heading.length;
+        return [
+          ...heading,
           ...choices.map((choice, index) => fit(theme.fg(index === selected ? "accent" : "dim", `${index === selected ? "❯" : " "} ${cleanText(choice, 80)}`), width)),
           fit(theme.fg("dim", "╰─ ↑↓: choose · Enter: confirm · Esc: cancel"), width)
         ];
@@ -62,6 +79,7 @@ export async function todoView(ctx: ExtensionContext, todos: () => Todo[], filte
   return ctx.ui.custom<TodoAction | undefined>((tui, theme, _keys, done) => {
     let selected = 0;
     const filtered = () => todos().filter((item) => filter.value === "all" || (filter.value === "done") === item.done);
+    let firstVisible = 0;
     return {
       invalidate() {},
       handleInput(data: string) {
@@ -78,11 +96,24 @@ export async function todoView(ctx: ExtensionContext, todos: () => Todo[], filte
         else if (items[selected] && data === "d") return done({ kind: "delete", id: items[selected].id });
         tui.requestRender();
       },
+      handleMouse(event: TuiMouseEvent) {
+        if (event.type === "wheel" && event.wheelDelta) {
+          selected = Math.max(0, Math.min(filtered().length - 1, selected + Math.sign(event.wheelDelta)));
+          tui.requestRender(); return { handled: true };
+        }
+        if (event.type !== "click" || event.button !== "left") return;
+        const index = firstVisible + event.y - 1;
+        const item = filtered()[index];
+        if (event.y >= 1 && event.y <= 12 && item) {
+          selected = index; done({ kind: "toggle", id: item.id }); return { handled: true };
+        }
+      },
       render(width: number): string[] {
         const items = filtered();
         selected = Math.min(selected, Math.max(0, items.length - 1));
         const count = todos().filter((item) => !item.done).length;
         const start = Math.max(0, selected - 11);
+        firstVisible = start;
         return [
           fit(theme.fg("accent", `╭─ pi-jar to-do · ${count} open · ${filter.value} ─`), width),
           ...(items.length ? items.slice(start, start + 12).map((item, index) =>

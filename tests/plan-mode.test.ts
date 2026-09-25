@@ -7,7 +7,7 @@ import type { ModelRoleManager } from "../src/model-roles.ts";
 function harness() {
   const events = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
-  const sent: string[] = [];
+  const sent: { text: string; options?: { deliverAs?: string } }[] = [];
   let active = ["read", "bash", "write", "jar_ask", "remote_get"];
   let branch: unknown[] = [];
   let compactOptions: { onComplete: () => void; onError: (error: Error) => void } | undefined;
@@ -19,7 +19,7 @@ function harness() {
     getAllTools: () => ["read", "bash", "write", "jar_ask", "remote_get"].map((name) => ({ name })),
     setActiveTools(names: string[]) { active = [...names]; },
     appendEntry() {},
-    sendUserMessage(text: string) { sent.push(text); }
+    sendUserMessage(text: string, options?: { deliverAs?: string }) { sent.push({ text, options }); }
   } as unknown as ExtensionAPI;
   const ctx = {
     hasUI: true, mode: "tui", sessionManager: { getBranch: () => branch },
@@ -70,6 +70,24 @@ test("stopping from review restores the exact original tool set", async () => {
   await h.events.get("agent_end")!({}, h.ctx);
   assert.deepEqual(h.active(), ["read", "bash", "write", "jar_ask", "remote_get"]);
   assert.deepEqual(h.sent, []);
+});
+
+test("approved implementation queues a follow-up with the complete plan", async () => {
+  const h = harness();
+  h.setReviewAction("implement");
+  await h.commands.get("plan")!("", h.ctx);
+  await h.events.get("message_end")!({ message: { role: "assistant", content: "Plan:\n1. Inspect behavior\n\nRationale: keep this context." } }, h.ctx);
+  await h.events.get("agent_end")!({}, h.ctx);
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0]?.options?.deliverAs, "followUp");
+  assert.match(h.sent[0]!.text, /Rationale: keep this context/);
+  assert.deepEqual(h.active(), ["read", "bash", "write", "jar_ask", "remote_get"]);
+});
+
+test("plan command queues its prompt while the agent is processing", async () => {
+  const h = harness();
+  await h.commands.get("plan")!("Describe a plan", h.ctx);
+  assert.deepEqual(h.sent, [{ text: "Describe a plan", options: { deliverAs: "followUp" } }]);
 });
 
 test("compaction callback implements at most once", async () => {

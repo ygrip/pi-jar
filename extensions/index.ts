@@ -1,4 +1,4 @@
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -6,7 +6,6 @@ import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-wo
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { registerAskTool } from "../src/ask-tool.ts";
 import { ComposerStyle } from "../src/composer.ts";
-import { acquireRegularMouse } from "../src/regular-mouse.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
 import { promptText } from "../src/dialogs.ts";
@@ -16,6 +15,7 @@ import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, migrateLegacySettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
 import { openJarSettings } from "../src/settings-ui.ts";
+import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
 import { PlanMode } from "../src/plan.ts";
@@ -43,13 +43,11 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeFrame = 0;
   let welcomeDismiss = 0;
   let welcomeTui: TUI | undefined;
-  let welcomePointerCleanup: (() => void) | undefined;
   let welcomeGit: AbortController | undefined;
   let welcomeBranch = (): string | null => null;
   let todos: TodoStore | undefined;
   let goals: GoalStore | undefined;
   const composer = new ComposerStyle();
-  composer.setPointerOverlay(() => !!welcomeTui && !welcomeDismiss);
   let footerSettings = visualSettings.footer;
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
@@ -113,8 +111,6 @@ export default function piJar(pi: ExtensionAPI): void {
     welcomeGit = undefined;
     if (welcomeInterval) clearInterval(welcomeInterval);
     welcomeInterval = undefined;
-    welcomePointerCleanup?.();
-    welcomePointerCleanup = undefined;
     welcomeTui = undefined;
     if (ctx?.hasUI && ctx.mode === "tui") {
       try { ctx.ui.setWidget(WELCOME_KEY, undefined); } catch { /* optional widget API */ }
@@ -127,38 +123,6 @@ export default function piJar(pi: ExtensionAPI): void {
     void openSettings(ctx);
   };
 
-  const installRegularWelcomePointer = (tui: TUI, ctx: ExtensionContext) => {
-    if (tui.mode !== "regular") return;
-    const main = tui as TUI & {
-      captureRenderState?: () => { previousLines: string[]; previousViewportTop: number };
-    };
-    if (!main.captureRenderState || !tui.terminal?.write || !tui.addInputListener) return;
-
-    // Pi intentionally leaves mouse reporting off on its regular screen. While
-    // the transient welcome is visible, opt into click-only SGR reporting so
-    // Settings behaves like the button it looks like, then restore the terminal
-    // immediately when the welcome closes.
-    welcomePointerCleanup?.();
-    const release = acquireRegularMouse(tui);
-    const remove = tui.addInputListener((data) => {
-      const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
-      if (!mouse) return;
-      const button = Number(mouse[1]);
-      const x = Number(mouse[2]) - 1;
-      const screenY = Number(mouse[3]) - 1;
-      const kind = mouse[4];
-      if (kind === "M" && (button & 3) === 0 && (button & 32) === 0 && (button & 64) === 0) {
-        const state = main.captureRenderState?.();
-        const line = state?.previousLines[state.previousViewportTop + screenY];
-        if (line && welcomeSettingsHit([line], x, 0)) queueMicrotask(() => openWelcomeSettings(ctx));
-      }
-      return { consume: true };
-    });
-    welcomePointerCleanup = () => {
-      remove();
-      release();
-    };
-  };
   const showWelcome = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui" || !enabled) return;
     stopWelcome(ctx);
@@ -200,7 +164,6 @@ export default function piJar(pi: ExtensionAPI): void {
       }
       ctx.ui.setWidget(WELCOME_KEY, (tui, theme) => {
         welcomeTui = tui;
-        installRegularWelcomePointer(tui, ctx);
         let visibleLines: string[] = [];
         return { invalidate() {}, handleMouse(event: TuiMouseEvent) {
           if (event.button !== "left" || welcomeDismiss
@@ -213,7 +176,7 @@ export default function piJar(pi: ExtensionAPI): void {
           const live = collectStatuses(statuses, Date.now());
           const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, Date.now()) : undefined;
           const lines = welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), {
-            ...info, roles: live.roles,
+            ...info, settingsClickable: tui.mode !== "regular", roles: live.roles,
             quota: quota?.week?.used ?? quota?.fiveHour?.used
           });
           if (!welcomeDismiss) { visibleLines = lines; return lines; }
@@ -458,7 +421,8 @@ export default function piJar(pi: ExtensionAPI): void {
     const messages = [...event.messages].reverse().filter((raw) => {
       const message = raw as { customType?: string };
       if (message.customType !== "pi-jar.goal-context") return true;
-      if (!goal || keptGoal) return false;
+      if (!goal || keptGoal || typeof (message as { content?: unknown }).content !== "string" ||
+          !(message as { content: string }).content.startsWith("[PI-JAR ACTIVE GOAL]\n" + goal + "\n")) return false;
       keptGoal = true;
       return true;
     }).reverse();
@@ -530,6 +494,25 @@ export default function piJar(pi: ExtensionAPI): void {
       }
       if (!command || command === "status") {
         ctx.ui.notify(`pi-jar: UI ${enabled ? "on" : "off"}; animations ${animations ? "on" : "off"}; quota ${quotaCache?.enabled ? "on" : "off"} (session-only); composer ${composer.enabled ? "on" : "off"}; ${todos?.all().length ?? 0} to-dos; demo ${demo ? "on" : "off"}`, "info");
+        return;
+      }
+      if (command === "sessions" || command.startsWith("sessions ")) {
+        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify("Session search requires the interactive TUI", "warning"); return; }
+        let sessions;
+        try { sessions = (await SessionManager.list(ctx.cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime()); }
+        catch (error) { ctx.ui.notify("Could not search sessions: " + String(error), "error"); return; }
+        if (!sessions.length) { ctx.ui.notify("No sessions found for this project", "info"); return; }
+        const selected = await pickSession(ctx, sessions, args.trim().slice(8).trim());
+        if (selected && selected !== ctx.sessionManager.getSessionFile()) {
+          // Never access the old command context after a successful switch.
+          const result = await ctx.switchSession(selected);
+          if (result.cancelled) ctx.ui.notify("Session switch cancelled", "info");
+        }
+        return;
+      }
+      if (command.startsWith("name ")) {
+        const name = args.trim().slice(5).trim();
+        if (name) { pi.setSessionName(name); ctx.ui.notify("Session named: " + name, "info"); }
         return;
       }
       if (command === "history") {
@@ -625,7 +608,7 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "quota on" && quotaCache) quotaCache.enabled = true;
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaCache.stop(); }
       else {
-        ctx.ui.notify("Usage: /jar [status|settings|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        ctx.ui.notify("Usage: /jar [status|settings|sessions [search]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
       }
       if (!["animations on", "animations off", "ui on", "ui off"].includes(command)) installUi(ctx);

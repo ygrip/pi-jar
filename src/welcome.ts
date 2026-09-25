@@ -15,6 +15,7 @@ export interface WelcomeInfo {
   branch?: string;
   dirty?: boolean;
   message?: string;
+  settingsClickable?: boolean;
 }
 
 type WelcomeColor = "accent" | "warning" | "error" | "muted" | "dim";
@@ -177,7 +178,8 @@ function paintFlame(line: string): string {
     .replace(/░+/g, (part) => rgb(FIRE_RGB.edge, part))
     .replace(/S+/g, (part) => rgb(FIRE_RGB.spark, "■".repeat(part.length)))
     .replace(/s+/g, (part) => rgb(FIRE_RGB.ember, "▪".repeat(part.length)))
-    .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, "·".repeat(part.length)));
+    .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, "·".repeat(part.length)))
+    .replace(/[●ᴗ─]/g, (part) => rgb("#432319", part));
 }
 
 function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
@@ -229,7 +231,9 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
     cell(label("MANAGERS", managers)),
     cell(git),
     divider,
-    cell(fg("accent", "[ ⚙ Settings ↗ ]") + fg("dim", narrow ? "  /jar settings" : "  ·  /jar hub  ·  /jar welcome")),
+    cell(info.settingsClickable === false
+      ? fg("accent", "/jar settings") + fg("dim", "  ·  /jar hub  ·  /jar welcome")
+      : fg("accent", "[ ⚙ Settings ↗ ]") + fg("dim", narrow ? "  /jar settings" : "  ·  /jar hub  ·  /jar welcome")),
     fg("dim", "╰" + "─".repeat(w - 2) + "╯")
   ];
 }
@@ -249,7 +253,18 @@ export function welcomeSettingsHit(lines: readonly string[], x: number, y: numbe
 export function welcomeLines(width: number, frame: number, fg: Paint, info: WelcomeInfo = {}): string[] {
   if (width <= 0) return [];
   const fit = (line: string) => truncateToWidth(line, width);
-  const flame = addEmbers(organicFlame(frame), frame).map((line) => paintFlame(line));
+  const flameRows = organicFlame(frame).map((line) => [...line]);
+  // Anchor the expression to the moving body, not the canvas: the face stays
+  // inside the flame as the upper silhouette and hot core curl independently.
+  const blink = Math.floor(frame / 8) % 13 === 12;
+  for (const [y, offsets, glyph] of [[7, [-2, 2], blink ? "─" : "●"], [9, [0], "ᴗ"]] as const) {
+    const row = flameRows[y]!;
+    const left = row.findIndex((cell) => cell !== " ");
+    const right = row.reduce((last, cell, x) => cell === " " ? last : x, -1);
+    const center = Math.round((left + right) / 2);
+    for (const offset of offsets) if (row[center + offset] !== " ") row[center + offset] = glyph;
+  }
+  const flame = addEmbers(flameRows.map((row) => row.join("")), frame).map((line) => paintFlame(line));
   const compactFlame = flame.slice(2, 10);
   if (width < 32) return [
     ...compactFlame.map((line) => fit(line)),
