@@ -2,7 +2,7 @@ import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth } 
 import { FLAME_RAMP, FLAME_WIDTH, flameFrame, rgb, supportsTruecolor } from "./flame.ts";
 import { cleanText } from "./status.ts";
 
-export type WelcomeAction = "settings" | "refresh" | "roles" | "plan" | "goal";
+export type WelcomeAction = "settings" | "refresh" | "roles" | "plan" | "goal" | `resume:${number}`;
 
 export interface WelcomeInfo {
   version?: string;
@@ -28,6 +28,8 @@ export interface WelcomeInfo {
   /** Pi fullscreen mode delivers mouse events; otherwise keyboard hints are shown. */
   settingsClickable?: boolean;
   flameSeed?: number;
+  /** Recent sessions for this project (loaded in the background). */
+  recent?: readonly { title: string; age: string; goal?: string; plan?: string }[];
 }
 
 type WelcomeColor = "accent" | "warning" | "error" | "muted" | "dim";
@@ -191,6 +193,10 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
     cell(label("TASKS", tasks, info.tasks ? "accent" : "muted")),
     cell(label("ROLES", info.rolesSummary ?? "all roles follow the current model")),
     ...(team ? [cell(label("TEAM", team, lead?.state === "failed" ? "error" : "muted"))] : []),
+    ...(info.recent?.length ? [divider, ...info.recent.map((session, index) => cell(
+      fg("dim", (index ? "" : "RECENT").padEnd(labelWidth)) + fg("accent", `↺ ${index + 1} `) + fg("muted", cleanText(session.title, 60))
+      + fg("dim", " · " + session.age + (session.goal ? " · goal: " + session.goal : "") + (session.plan ? " · plan: " + session.plan : ""))
+    )), ...(info.settingsClickable === false ? [cell(fg("dim", " ".repeat(labelWidth) + "/jar resume N to continue"))] : [])] : []),
     divider,
     ...actions.map(cell),
     fg("dim", "╰" + "─".repeat(w - 2) + "╯")
@@ -202,6 +208,9 @@ export function welcomeHit(lines: readonly string[], x: number, y: number): Welc
   const line = lines[y];
   if (!line) return undefined;
   const text = stripTerminalSequences(line);
+  // A whole RECENT row resumes that session.
+  const recent = /│ (?:RECENT)?\s*↺ (\d) /.exec(text);
+  if (recent && x >= visibleWidth(text.slice(0, recent.index))) return `resume:${Number(recent[1])}`;
   for (const item of ACTIONS) {
     const offset = text.indexOf(item.label);
     if (offset < 0) continue;

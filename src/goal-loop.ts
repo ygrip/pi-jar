@@ -232,8 +232,11 @@ export class GoalLoop {
       const open = this.tasks().filter((item) => !item.done).length;
       if (open) return;
       const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
+      const unsafeCommand = !(typeof input.command === "string" && isSafePlanCommand(input.command));
       const mutating = WRITE_TOOLS.has(event.toolName)
-        || (goal.phase === "implement" && event.toolName === "bash" && !(typeof input.command === "string" && isSafePlanCommand(input.command)));
+        || (goal.phase === "implement" && event.toolName === "bash" && unsafeCommand)
+        || (goal.phase === "implement" && event.toolName === "jar_shell" && input.action === "start" && unsafeCommand)
+        || (event.toolName === "jar_delegate" && input.write === true);
       if (!mutating) return;
       return { block: true, reason: goal.phase === "audit"
         ? "Goal audit: do not edit during the audit. Add jar_todo tasks for the gaps you found instead."

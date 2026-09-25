@@ -3,6 +3,7 @@ import { Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth,
 import { Mascot, MASCOT_FACE_WIDTH, mascotFace, paintFace, paintTip, type MascotMood } from "./mascot.ts";
 import type { SuggestionState } from "./suggest.ts";
 import type { WorkingPhase } from "./working.ts";
+import { imageChip, imageInfo, imagePaths } from "./attachments.ts";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 type MouseEvent = Parameters<NonNullable<EditorComponent["handleMouse"]>>[0];
@@ -63,6 +64,8 @@ export interface RoundedInputOptions {
   paintedIcon?: string;
   /** Known number of editor content rows (lets the frame skip heuristics). */
   visibleRows?: number;
+  /** A painted row directly below the frame (image attachment chips). */
+  below?: string;
   dim?: (text: string) => string;
 }
 
@@ -98,7 +101,8 @@ export function roundedInput(lines: string[], width: number, focused: boolean, t
   });
   // Autocomplete rows stay below the frame, indented to line up with the text.
   const trailing = lines.slice(bottom + 1).map((line) => truncateToWidth(" " + line, width));
-  return [truncateToWidth(top, width), ...content, truncateToWidth(bottomLine, width), ...trailing];
+  return [truncateToWidth(top, width), ...content, truncateToWidth(bottomLine, width),
+    ...(options.below ? [truncateToWidth(" " + options.below, width)] : []), ...trailing];
 }
 
 export interface ComposerDecor {
@@ -115,6 +119,8 @@ export interface ComposerDecor {
   typed(): void;
   poke(): void;
   dim(text: string): string;
+  /** Chips for images referenced in the draft, or undefined. */
+  attachments(text: string): string | undefined;
 }
 
 /** The face starts after `╭─ ` in the top border. */
@@ -159,7 +165,8 @@ class RoundedEditor extends CustomEditor {
     const framed = roundedInput(inner, width, this.focused, this.colors, this.paint, this.decor.icon(), this.decor.session(), {
       ...(ghost ? { ghost } : {}), ...(this.decor.hint() ? { hint: this.decor.hint()! } : {}),
       ...(this.decor.paintedIcon() ? { paintedIcon: this.decor.paintedIcon()! } : {}),
-      ...(visibleRows != null ? { visibleRows } : {}), dim: this.decor.dim
+      ...(visibleRows != null ? { visibleRows } : {}), dim: this.decor.dim,
+      ...(this.decor.attachments(this.getText()) ? { below: this.decor.attachments(this.getText())! } : {})
     });
     const tip = width >= 8 ? this.decor.tip(width) : undefined;
     this.tipRows = tip ? 1 : 0;
@@ -224,7 +231,8 @@ class ThemedEditor implements EditorComponent {
   render(width: number): string[] {
     const ghost = this.base.getText() === "" ? this.decor.ghost() : undefined;
     const framed = roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, this.decor.icon(), this.decor.session(), {
-      ...(ghost ? { ghost } : {}), ...(this.decor.paintedIcon() ? { paintedIcon: this.decor.paintedIcon()! } : {}), dim: this.decor.dim
+      ...(ghost ? { ghost } : {}), ...(this.decor.paintedIcon() ? { paintedIcon: this.decor.paintedIcon()! } : {}), dim: this.decor.dim,
+      ...(this.decor.attachments(this.base.getText()) ? { below: this.decor.attachments(this.base.getText())! } : {})
     });
     const tip = width >= 8 ? this.decor.tip(width) : undefined;
     this.tipRows = tip ? 1 : 0;
@@ -254,6 +262,7 @@ export class ComposerStyle {
   private animations = true;
   private mascotOn = true;
   private session = "";
+  private cwd = process.cwd();
   private lastKey = "";
   private readonly mascot = new Mascot();
   private suggestions?: SuggestionState;
@@ -283,7 +292,13 @@ export class ComposerStyle {
     },
     typed: () => this.suggestions?.clear(),
     poke: () => { this.mascot.flash("poke", 1500); this.tui?.requestRender(); },
-    dim: (text) => this.colors?.fg("dim", text) ?? `\x1b[2m${text}\x1b[22m`
+    dim: (text) => this.colors?.fg("dim", text) ?? `\x1b[2m${text}\x1b[22m`,
+    attachments: (text) => {
+      if (!/\.(png|jpe?g|gif|webp)\b/i.test(text)) return undefined;
+      const chips = imagePaths(text, this.cwd).map(imageInfo).filter((info) => !!info).map((info) => imageChip(info!));
+      if (!chips.length) return undefined;
+      return chips.map((chip) => this.colors?.fg("accent", chip) ?? chip).join(this.colors?.fg("dim", "   ") ?? "   ");
+    }
   };
 
   /** Share the suggestion state rendered as ghost text. */
@@ -346,6 +361,7 @@ export class ComposerStyle {
     try {
       const previous = ctx.ui.getEditorComponent();
       const draft = ctx.ui.getEditorText();
+      if (ctx.cwd) this.cwd = ctx.cwd;
       const manager = ctx.sessionManager as { getSessionId?: () => string; getSessionName?: () => string | undefined } | undefined;
       this.session = sessionDisplayName(manager?.getSessionName?.(), manager?.getSessionId?.());
       const factory: EditorFactory = (tui, theme, keys) => {

@@ -18,6 +18,8 @@ export interface FooterView extends JarStatus {
   settings?: FooterSettings;
   context: string;
   goal?: string;
+  /** pi-jar's own short indicators (changes to review, running shells), shown before extras. */
+  chips?: readonly string[];
   memory?: string;
   cost?: string;
   quota?: Quota;
@@ -122,7 +124,8 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   const extras = show.extras ? view.extras.slice(0, contentWidth >= 100 ? 2 : 1).map((status) => theme.fg("muted", status)) : [];
   if (show.extras && remaining) extras.push(theme.fg("dim", `+${remaining}`));
   if (show.branch && contentWidth >= 52 && view.branch) extras.push(theme.fg("dim", `git ${cleanText(view.branch, 28)}`));
-  const joined = [...segments, ...extras].join(theme.fg("dim", "  ·  "));
+  const chips = (view.chips ?? []).map((chip) => theme.fg("warning", cleanText(chip, 32)));
+  const joined = [...segments, ...chips, ...extras].join(theme.fg("dim", "  ·  "));
   if (joined) lines.push(truncateToWidth(joined, contentWidth));
   if (contentWidth < 90 && ((show.quota && windows.length) || (show.memory && view.memory))) {
     const summary = [...(show.memory && view.memory ? [view.memory] : []), ...(show.quota ? windows : [])].join("  ·  ");
