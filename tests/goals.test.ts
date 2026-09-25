@@ -151,7 +151,7 @@ test("the loop pauses on interruption, errors, the round limit, plan mode and bl
 
 test("goal progress summarizes tasks, rounds and phase", () => {
   const goal = { id: "g", text: "Ship", status: "active" as const, phase: "audit" as const, rounds: 2 };
-  const todos = [{ id: "a", title: "A", done: true }, { id: "b", title: "B", done: false }];
+  const todos = [{ id: "a", title: "A", done: true, status: "completed" as const }, { id: "b", title: "B", done: false, status: "pending" as const }];
   assert.equal(goalProgress(goal, todos, 8), "Ship · 1/2 tasks · round 2/8 · auditing");
   assert.equal(goalProgress({ ...goal, status: "paused", reason: "limit" }, [], 8), "Ship · paused (limit)");
   assert.equal(goalProgress(undefined, [], 8), undefined);

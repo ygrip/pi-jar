@@ -40,11 +40,14 @@ export class WorkingState {
   prompt(open: boolean): void { this.waiting = open; }
   toolStart(id: string, name: string): void { this.tools.set(id, cleanText(name, 24) || "tool"); }
   toolEnd(id: string): void { this.tools.delete(id); }
-  view(animations: boolean, fg: (color: WorkingColor, text: string) => string, now = Date.now(), effort?: string): WorkingView {
+  /** `task` is the running jar_todo's active form; like Claude, it replaces the generic wording. */
+  view(animations: boolean, fg: (color: WorkingColor, text: string) => string, now = Date.now(), effort?: string, task?: string): WorkingView {
     const phase = this.phase;
+    const activity = task ? cleanText(task, 60).replace(/[.…]+$/, "") : "";
     const elapsed = this.startedAt === undefined ? 0 : Math.max(0, Math.floor((now - this.startedAt) / 1000));
     const stage = STAGES.reduce<number>((index, threshold, next) => elapsed >= threshold ? next : index, 0);
-    const word = phase === "tool" ? `Tracing light through ${[...this.tools.values()][0] ?? "tool"}…`
+    const word = activity && (phase === "tool" || phase === "generating") ? activity + "…"
+      : phase === "tool" ? `Tracing light through ${[...this.tools.values()][0] ?? "tool"}…`
       : phase === "generating" ? PROGRESSION[Math.max(0, stage)]
       : phase === "waiting" ? "Holding the lantern for your answer…" : undefined;
     const color: WorkingColor = phase === "tool" ? "warning" : phase === "waiting" ? "muted" : "accent";

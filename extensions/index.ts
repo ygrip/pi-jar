@@ -25,7 +25,7 @@ import { registerSuggestions, SuggestionState } from "../src/suggest.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { ACTIVE_STATES, collectStatuses, type JarRole } from "../src/status.ts";
 import { manageTasks } from "../src/tasks-ui.ts";
-import { registerTaskTool } from "../src/task-tool.ts";
+import { registerTaskTool, todoRow } from "../src/task-tool.ts";
 import { TASK_ENTRY, TodoStore } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
@@ -67,20 +67,32 @@ export default function piJar(pi: ExtensionAPI): void {
   let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
   let settingsOpen = false;
 
+  // A finished list stays visible (all struck through) until the user's next prompt, like Claude.
+  let todosAcknowledged = false;
   const updateTaskWidget = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui") return;
-    const open = todos?.all().filter((item) => !item.done) ?? [];
+    const items = todos?.all() ?? [];
+    const open = items.filter((item) => !item.done);
+    if (open.length) todosAcknowledged = false;
+    const visible = enabled && items.length > 0 && (open.length > 0 || !todosAcknowledged);
     try {
-      ctx.ui.setWidget("pi-jar.todos", !enabled || !open.length ? undefined : (_tui, theme) => ({
+      ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (_tui, theme) => ({
         invalidate() {},
         render(width: number) {
           const colors = ctx.ui.theme ?? theme;
-          const shown = open.slice(0, 3);
+          const all = todos?.all() ?? [];
+          const done = all.filter((item) => item.done).length;
+          // Show a window of up to 8 rows that keeps the running (or next open) task in view.
+          const focus = Math.max(0, all.findIndex((item) => item.status === "in_progress") >= 0
+            ? all.findIndex((item) => item.status === "in_progress") : all.findIndex((item) => !item.done));
+          const start = Math.max(0, Math.min(focus - 2, all.length - 8));
+          const shown = all.slice(start, start + 8);
           const rows = [
-            colors.fg("accent", `Tasks · ${open.length} open`) + colors.fg("dim", " · tracked automatically · /jar tasks"),
-            ...shown.map((item) => colors.fg("muted", `  ○ ${item.title}`))
+            colors.fg("accent", "Tasks") + colors.fg("dim", ` · ${done}/${all.length} done` + (done === all.length ? " · all complete" : "") + " · /jar tasks"),
+            ...(start > 0 ? [colors.fg("dim", `  … ${start} earlier`)] : []),
+            ...shown.map((item) => todoRow(item, (color, text) => colors.fg(color, text), (text) => colors.bold(text))),
+            ...(start + shown.length < all.length ? [colors.fg("dim", `  … +${all.length - start - shown.length} more`)] : [])
           ];
-          if (open.length > shown.length) rows.push(colors.fg("dim", `  … +${open.length - shown.length} more`));
           // Pi inserts a spacer before widgets, but not between widgets and the composer.
           return [...rows.map((line) => truncateToWidth(line, Math.max(0, width))), truncateToWidth(" ", Math.max(0, width))];
         }
@@ -127,8 +139,9 @@ export default function piJar(pi: ExtensionAPI): void {
     composer.setActivity(enabled ? working.phase : "idle", animations);
     try {
       if (!enabled) { workingIndicatorKey = ""; ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); return; }
+      const task = todos?.current();
       const view = working.view(animations, (color, text) => ctx.ui.theme?.fg(color, text) ?? text,
-        Date.now(), ctx.thinkingLevel);
+        Date.now(), ctx.thinkingLevel, task ? task.activeForm ?? task.title : undefined);
       ctx.ui.setWorkingMessage?.(view.message);
       const indicatorKey = `${working.phase}:${animations}`;
       if (indicatorKey !== workingIndicatorKey) {
@@ -451,7 +464,11 @@ export default function piJar(pi: ExtensionAPI): void {
     }, 90);
     welcomeTui.requestRender();
   };
-  pi.on("input", (event, ctx) => { if (event.source === "interactive") dismissWelcome(ctx); });
+  pi.on("input", (event, ctx) => {
+    if (event.source !== "interactive") return;
+    dismissWelcome(ctx);
+    if (!todosAcknowledged && todos?.all().every((item) => item.done)) { todosAcknowledged = true; updateTaskWidget(ctx); }
+  });
   pi.on("agent_start", (_event, ctx) => { dismissWelcome(ctx); working.start(); applyWorking(ctx); });
   pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
   pi.on("message_end", (event, ctx) => {

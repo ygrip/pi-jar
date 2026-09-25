@@ -8,7 +8,7 @@ A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earend
 
 | Area | What you get |
 | --- | --- |
-| **Welcome** | Animated pixel flame with randomized embers and sparks over a large `π`; a live card with project, git, session, plan, goal, tasks and roles; clickable actions (fullscreen) or keyboard hints (regular mode). |
+| **Welcome** | A fierce pixel flame with several licking tongues, embers and sparks over a large `π`; a large, flame-colored welcome message up top; a live card with project, git, session, plan, goal, tasks and roles; clickable actions (fullscreen) or keyboard hints (regular mode). |
 | **Composer** | Rounded input that grows with your draft (up to ~60% of the terminal), click-to-place cursor in fullscreen, dim **next-prompt suggestions** you accept with <kbd>Tab</kbd>, and **Ember** — a tiny flame mascot that blinks, cheers, focuses, dozes and reacts. |
 | **Plan mode** | Read-only exploration; the agent must write a structured plan file and submit it. You review it in a split view (headings on the left, section on the right) and approve, compact-and-approve, refine or stop. |
 | **Goal mode** | Set an outcome; the agent must break it into tracked tasks and keeps working until they are done, then an **auditor** pass verifies the goal before it can be marked complete. |
@@ -66,7 +66,7 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 
 The welcome stays until your first prompt, then dissolves (or hides immediately with motion off).
 
-- **Flame** — a small heat-spreading fire simulation shaped into a torch, drawn with half-block "pixels" in a ten-step ember→gold palette. Embers rise and fade, rare sparks flash, and a gentle wind sways the tip. Every frame is deterministic per seed, so motion-off shows a frozen, still-lit flame. Terminals without 24-bit color get shaded blocks in theme colors. See [docs/FLAME.md](docs/FLAME.md).
+- **Flame** — a small heat-spreading fire simulation shaped by five independently flickering tongues, so it breaks into several protruding spikes, drawn with half-block "pixels" in a ten-step ember→gold palette. Embers and sparks tear off the tips, and a gentle wind bends them. Every frame is deterministic per seed, so motion-off shows a frozen, still-lit flame. Terminals without 24-bit color get shaded blocks in theme colors. See [docs/FLAME.md](docs/FLAME.md).
 - **Card** — `pi-jar` version, model, effort and active role; project + git branch/dirty; context, quota and cost; plan state; goal progress; open tasks with the next one; configured roles; live teammates published by other extensions; a hopeful message.
 - **Actions** — `[ ⚙ Settings ]  [ ↻ Refresh ]  [ ◆ Roles ]  [ ▤ Plan ]  [ ◎ Goal ]` in fullscreen (act on press). In regular mode the same row shows `ctrl+alt+s settings · ctrl+alt+r refresh · /roles · /plan · /goal`.
 
@@ -163,7 +163,7 @@ Roles map a purpose to a model. They live in `~/.pi/agent/pi-jar-roles.json` (Pi
 
 ## Tasks, questions and history
 
-- **`jar_todo`** — the agent keeps a branch-aware checklist for any multi-step request (list first, add missing outcomes, mark done as they complete). `/jar tasks` is your view/editor: `a` add, <kbd>Space</kbd>/<kbd>Enter</kbd> check, `e` edit, `d` delete, `f` filter.
+- **`jar_todo`** — a Claude-style task list the agent keeps for any multi-step request. It writes the full list at once; each task is `pending`, `in_progress` (exactly one at a time) or `completed`, with an `activeForm` ("Running tests") that replaces the working spinner text while it runs. The live checklist above the composer shows `✔` struck-through done tasks, a bold `◼` current task and `☐` pending ones; a finished list stays until your next prompt. `/jar tasks` is your view/editor: `a` add, <kbd>Space</kbd>/<kbd>Enter</kbd> check, `e` edit, `d` delete, `f` filter.
 - **`jar_ask`** — structured questions: numbered options with descriptions, single or multi-select, *Type your own answer* (multi-line, paste-friendly) and *Chat about this* to discuss before choosing.
 - **`/jar history`** — separate, read-only timeline of the active branch (paging, search, expandable details). Pi's native transcript is untouched.
 - Pi's built-in read/shell/edit/write tool cards render compactly; the full output or diff stays one click or <kbd>Ctrl</kbd>+<kbd>O</kbd> away.

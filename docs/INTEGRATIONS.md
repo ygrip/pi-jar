@@ -46,7 +46,7 @@ ctx.ui.setStatus("pi-jar.quota.openai-codex", JSON.stringify({
 
 | Custom type | Contents | Replay |
 | --- | --- | --- |
-| `pi-jar.task` | versioned to-do events (`add`, `edit`, `toggle`, `delete`) | active branch on start, tree navigation and compaction |
+| `pi-jar.task` | versioned to-do events (`write`, `add`, `edit`, `status`, `delete`; legacy `toggle` accepted) | active branch on start, tree navigation and compaction |
 | `pi-jar.goal` | goal events (`set`, `status`, `round`; v1 `set`/`clear` accepted) | active branch |
 | `pi-jar.plan` | plan state (`enabled`, `steps`, `text`, `path`, `title`) | active branch |
 
@@ -56,7 +56,7 @@ Hidden context messages (`pi-jar.plan-context`, `pi-jar.plan-reminder`, `pi-jar.
 
 | Tool | Purpose |
 | --- | --- |
-| `jar_todo` | branch-aware checklist (`list`, `add`, `done`, `open`, `edit`, `delete`) |
+| `jar_todo` | branch-aware checklist: `todos` full-list writes (`content`, `status` pending/in_progress/completed, `activeForm`), plus `list`, `add`, `start`, `done`, `open`, `edit`, `delete` |
 | `jar_ask` | structured questions answered in the TUI |
 | `jar_plan_submit` | submit a plan file for review (plan mode only) |
 | `jar_goal` | `get`, `complete` (with evidence, audit phase only), `block` |

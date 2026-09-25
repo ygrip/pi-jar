@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import type { Todo } from "./tasks.ts";
+import { todoMark, type Todo } from "./tasks.ts";
 import { cleanText } from "./status.ts";
 
 const fit = (line: string, width: number) => truncateToWidth(line, Math.max(0, width));
@@ -117,7 +117,7 @@ export async function todoView(ctx: ExtensionContext, todos: () => Todo[], filte
         return [
           fit(theme.fg("accent", `╭─ pi-jar to-do · ${count} open · ${filter.value} ─`), width),
           ...(items.length ? items.slice(start, start + 12).map((item, index) =>
-            fit(theme.fg(start + index === selected ? "accent" : item.done ? "dim" : "muted", `${start + index === selected ? "❯" : " "} ${item.done ? "☑" : "☐"} ${item.title}`), width))
+            fit(theme.fg(start + index === selected ? "accent" : item.done ? "dim" : item.status === "in_progress" ? "warning" : "muted", `${start + index === selected ? "❯" : " "} ${todoMark(item)} ${item.title}`), width))
             : [fit(theme.fg("dim", "  No items in this view"), width)]),
           fit(theme.fg("dim", "╰─ ↑↓: select · Space: check · a: add · e: edit · d: delete · f: filter · Esc: close"), width)
         ];

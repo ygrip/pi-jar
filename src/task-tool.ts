@@ -2,15 +2,21 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { Todo } from "./tasks.ts";
-import { TodoStore } from "./tasks.ts";
+import { TODO_STATUSES, TodoStore, todoMark } from "./tasks.ts";
 
-const ACTIONS = ["list", "add", "done", "open", "edit", "delete"] as const;
+const ACTIONS = ["write", "list", "add", "start", "done", "open", "edit", "delete"] as const;
 const Action = Type.Unsafe<(typeof ACTIONS)[number]>({ type: "string", enum: ACTIONS as any });
+const Status = Type.Unsafe<(typeof TODO_STATUSES)[number]>({ type: "string", enum: TODO_STATUSES as any });
 
 const Parameters = Type.Object({
-  action: Action,
-  id: Type.Optional(Type.String({ description: "Task id returned by jar_todo list/add." })),
-  title: Type.Optional(Type.String({ description: "Concise actionable task title." })),
+  todos: Type.Optional(Type.Array(Type.Object({
+    content: Type.String({ description: "Imperative task title, e.g. \"Run the tests\"." }),
+    status: Status,
+    activeForm: Type.Optional(Type.String({ description: "Present-continuous form shown while it runs, e.g. \"Running the tests\"." }))
+  }), { description: "The complete, updated task list. Replaces the current list." })),
+  action: Type.Optional(Action),
+  id: Type.Optional(Type.String({ description: "Task id for start/done/open/edit/delete." })),
+  title: Type.Optional(Type.String({ description: "Concise actionable task title for add/edit." })),
   details: Type.Optional(Type.String({ description: "Optional short task context for a new task." }))
 });
 
@@ -20,16 +26,17 @@ interface TaskToolDetails {
   changed?: string;
 }
 
-const snapshot = (store: TodoStore) => store.all();
-
 const summary = (items: readonly Todo[]) => {
-  const open = items.filter((item) => !item.done).length;
-  return `${open} open · ${items.length - open} done`;
+  const done = items.filter((item) => item.done).length;
+  const current = items.find((item) => item.status === "in_progress");
+  return `${done}/${items.length} done` + (current ? ` · now: ${current.title}` : "");
 };
 
 const lines = (items: readonly Todo[]) => items.length
-  ? items.map((item) => `${item.done ? "☑" : "☐"} ${item.title} [${item.id}]`).join("\n")
+  ? items.map((item) => `${todoMark(item)} [${item.status}] ${item.title} (${item.id})`).join("\n")
   : "No tracked tasks.";
+
+const REMINDER = "Keep using jar_todo to track progress: mark the next task in_progress before starting it and completed as soon as it is verified.";
 
 export function registerTaskTool(
   pi: ExtensionAPI,
@@ -40,74 +47,89 @@ export function registerTaskTool(
   pi.registerTool({
     name: "jar_todo",
     label: "tasks",
-    description: "Maintain pi-jar's branch-aware session task list. Use it proactively for multi-step work so progress remains visible without user prompting.",
-    promptSnippet: "Track multi-step work with jar_todo; keep the checklist synchronized as you work.",
+    description: "Maintain pi-jar's session task list, shown live to the user. Send `todos` with the complete updated list (each with content, status pending|in_progress|completed, and activeForm). Single-task actions (start, done, open, add, edit, delete, list) are also available.",
+    promptSnippet: "Track multi-step work with jar_todo: write the full list, keep exactly one task in_progress, complete tasks as they finish.",
     promptGuidelines: [
-      "For any request requiring two or more substantive actions, use jar_todo proactively without waiting for the user: list current tasks, add any missing actionable steps, and mark each step done as it completes.",
-      "When using jar_todo, keep titles concise and outcome-oriented, reuse matching open tasks instead of creating duplicates, and do not create tasks for trivial single-step questions."
+      "Use jar_todo proactively, without waiting for the user, for any task with three or more distinct steps, when the user gives several tasks, or right after receiving new instructions. Skip it for single trivial requests and pure questions.",
+      "Prefer jar_todo with `todos` (the full updated list). Each item has `content` (imperative, e.g. \"Run tests\"), `status`, and `activeForm` (present continuous, e.g. \"Running tests\"), which the user sees while it runs.",
+      "Keep exactly one task in_progress at a time. Mark a task in_progress before you start it and completed immediately after it is verified; do not batch completions.",
+      "Only mark a task completed when it is fully done. If tests fail, work is partial or you are blocked, keep it in_progress and add a task for what must be resolved. Remove tasks that are no longer relevant."
     ],
     parameters: Parameters,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const current = store();
+      const action = params.todos ? "write" : params.action ?? "list";
       if (!current) {
-        return { content: [{ type: "text", text: "Task tracking is unavailable before a Pi session starts." }], details: { action: params.action, items: [] } satisfies TaskToolDetails };
+        return { content: [{ type: "text", text: "Task tracking is unavailable before a Pi session starts." }], details: { action, items: [] } satisfies TaskToolDetails };
       }
       let changedId: string | undefined;
-      let ok = true;
-      switch (params.action) {
+      let error: string | undefined;
+      switch (action) {
         case "list":
+          break;
+        case "write":
+          if (!params.todos) { error = "write needs `todos`: the complete updated list."; break; }
+          error = current.write(params.todos.map((item) => ({ title: item.content, status: item.status, ...(item.activeForm ? { activeForm: item.activeForm } : {}) })));
           break;
         case "add": {
           const item = params.title?.trim() ? current.add(params.title, params.details) : undefined;
-          ok = !!item;
+          if (!item) error = "add needs a short title.";
           changedId = item?.id;
           break;
         }
+        case "start":
         case "done":
         case "open":
-          ok = !!params.id && current.setDone(params.id, params.action === "done");
-          changedId = ok ? params.id : undefined;
+          if (!params.id || !current.setStatus(params.id, action === "start" ? "in_progress" : action === "done" ? "completed" : "pending")) error = `${action} needs a valid id from jar_todo list.`;
+          else changedId = params.id;
           break;
         case "edit":
-          ok = !!params.id && !!params.title?.trim() && current.edit(params.id, params.title);
-          changedId = ok ? params.id : undefined;
+          if (!params.id || !params.title?.trim() || !current.edit(params.id, params.title)) error = "edit needs a valid id and a title.";
+          else changedId = params.id;
           break;
         case "delete":
-          ok = !!params.id && current.delete(params.id);
-          changedId = ok ? params.id : undefined;
+          if (!params.id || !current.delete(params.id)) error = "delete needs a valid id from jar_todo list.";
+          else changedId = params.id;
           break;
       }
-      if (params.action !== "list" && ok) changed(ctx);
-      const items = snapshot(current);
-      const message = ok
-        ? `${params.action === "list" ? "Tasks" : "Task list updated"}: ${summary(items)}\n${lines(items)}`
-        : `Could not ${params.action} task. Provide the required title/id from jar_todo list.`;
+      if (action !== "list" && !error) changed(ctx);
+      const items = current.all();
+      const message = error
+        ? `Could not ${action} tasks: ${error}\n${lines(items)}`
+        : `${action === "list" ? "Tasks" : "Task list updated"} (${summary(items)}):\n${lines(items)}${action === "list" ? "" : "\n" + REMINDER}`;
       return {
         content: [{ type: "text", text: message }],
-        details: { action: params.action, items, ...(changedId ? { changed: changedId } : {}) } satisfies TaskToolDetails
+        details: { action, items, ...(changedId ? { changed: changedId } : {}) } satisfies TaskToolDetails
       };
     },
     renderCall(args, theme) {
       let text = theme.fg("toolTitle", theme.bold("tasks"));
-      text += " " + theme.fg("accent", args.action);
-      if (args.title) text += " " + theme.fg("muted", args.title);
+      if (args.todos) text += " " + theme.fg("accent", `update · ${args.todos.length} item${args.todos.length === 1 ? "" : "s"}`);
+      else {
+        text += " " + theme.fg("accent", args.action ?? "list");
+        if (args.title) text += " " + theme.fg("muted", args.title);
+      }
       return new Text(text, 0, 0);
     },
     renderResult(result, { expanded, isPartial }, theme) {
       if (isPartial) return new Text(theme.fg("warning", "Updating tasks…"), 0, 0);
       const details = result.details as TaskToolDetails | undefined;
       const items = details?.items ?? [];
-      let text = theme.fg("success", summary(items));
-      if (!expanded) {
-        const next = items.find((item) => !item.done);
-        if (next) text += theme.fg("dim", ` · next: ${next.title}`);
-        text += theme.fg("dim", " · expand for checklist");
-        return new Text(text, 0, 0);
-      }
-      for (const item of items) {
-        text += "\n  " + theme.fg(item.done ? "dim" : "accent", `${item.done ? "☑" : "☐"} ${item.title}`);
-      }
+      if (!items.length) return new Text(theme.fg("dim", "No tracked tasks."), 0, 0);
+      // Like Claude: the checklist itself is the result. Collapsed shows up to 8 rows.
+      const shown = expanded ? items : items.slice(0, 8);
+      let text = theme.fg("dim", summary(items));
+      for (const item of shown) text += "\n" + todoRow(item, (color, value) => theme.fg(color, value), (value) => theme.bold(value));
+      if (shown.length < items.length) text += "\n" + theme.fg("dim", `  … +${items.length - shown.length} more (expand)`);
       return new Text(text, 0, 0);
     }
   });
+}
+
+type TodoColor = "accent" | "muted" | "dim" | "success";
+/** One checklist row: completed rows are struck through, the running one is bold. */
+export function todoRow(item: Todo, fg: (color: TodoColor, text: string) => string, bold: (text: string) => string = (text) => text): string {
+  if (item.status === "completed") return fg("success", "  ✔ ") + fg("dim", "\x1b[9m" + item.title + "\x1b[29m");
+  if (item.status === "in_progress") return fg("accent", "  ◼ ") + fg("accent", bold(item.title));
+  return fg("muted", "  ☐ " + item.title);
 }

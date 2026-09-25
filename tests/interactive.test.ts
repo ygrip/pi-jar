@@ -117,6 +117,57 @@ test("native jar_todo tool tells the agent to track multi-step work and updates 
   assert.equal(changes, 2);
 });
 
+test("jar_todo writes the full list like Claude: statuses, one in progress, stable ids, replay", async () => {
+  let tool: any;
+  const events: unknown[] = [];
+  const store = new TodoStore((event) => { events.push(event); });
+  registerTaskTool({ registerTool(definition: unknown) { tool = definition; } } as never, () => store, () => {});
+  const write = (todos: unknown[]) => tool.execute("w", { todos }, undefined, undefined, {} as never);
+  const first = await write([
+    { content: "Inspect repo", status: "in_progress", activeForm: "Inspecting repo" },
+    { content: "Fix bug", status: "pending", activeForm: "Fixing bug" },
+    { content: "Run tests", status: "pending" }
+  ]);
+  assert.match(first.content[0].text, /0\/3 done · now: Inspect repo/);
+  assert.equal(store.current()?.activeForm, "Inspecting repo");
+  const id = store.all()[0]!.id;
+  await write([
+    { content: "Inspect repo", status: "completed" },
+    { content: "Fix bug", status: "in_progress", activeForm: "Fixing bug" },
+    { content: "Run tests", status: "pending" }
+  ]);
+  assert.equal(store.all()[0]!.id, id, "same title keeps its id");
+  assert.deepEqual(store.all().map((item) => item.status), ["completed", "in_progress", "pending"]);
+  assert.equal(store.all()[0]!.done, true);
+  const rejected = await write([{ content: "A", status: "in_progress" }, { content: "B", status: "in_progress" }]);
+  assert.match(rejected.content[0].text, /Only one task may be in_progress/);
+  assert.equal(store.all().length, 3, "invalid writes change nothing");
+  // start parks the previous in-progress task.
+  await tool.execute("s", { action: "start", id: store.all()[2]!.id }, undefined, undefined, {} as never);
+  assert.deepEqual(store.all().map((item) => item.status), ["completed", "pending", "in_progress"]);
+  const replay = new TodoStore(() => {});
+  replay.restore(events.map((data) => ({ type: "custom", customType: TASK_ENTRY, data })));
+  assert.deepEqual(replay.all(), store.all());
+  // v1 toggle events still replay as completed.
+  const legacy = new TodoStore(() => {});
+  legacy.restore([{ type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "add", id: "x1", title: "Old" } },
+    { type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "toggle", id: "x1", done: true } }]);
+  assert.equal(legacy.get("x1")?.status, "completed");
+  // The rendered result is the checklist.
+  const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+  const text = tool.renderResult({ details: { items: store.all() } }, { expanded: false, isPartial: false }, theme).render(80).join("\n");
+  assert.match(text, /✔ .*Inspect repo/);
+  assert.match(text, /◼ Run tests/);
+  assert.match(text, /☐ Fix bug/);
+});
+
+test("working message shows the running task's active form", () => {
+  const state = new WorkingState();
+  state.start(0);
+  assert.match(state.view(false, (_c, t) => t, 1000, undefined, "Running the tests").message ?? "", /^Running the tests… \(1s\)/);
+  assert.match(state.view(false, (_c, t) => t, 1000).message ?? "", /A spark remains/);
+});
+
 test("task dialog is keyboard-accessible, width bounded and filters without deleting another manager's state", async () => {
   let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
   const ctx = {
@@ -125,7 +176,7 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
     } }
   };
   const filter = { value: "all" as const } as { value: "all" | "open" | "done" };
-  const pending = todoView(ctx as never, () => [{ id: "one", title: "Write tests", done: false }], filter);
+  const pending = todoView(ctx as never, () => [{ id: "one", title: "Write tests", done: false, status: "pending" as const }], filter);
   assert.ok(component?.render(16).every((line) => visibleWidth(line) <= 16));
   assert.match(component?.render(80).join(" ") ?? "", /☐ Write tests/);
   component?.handleInput("f");
@@ -154,7 +205,7 @@ test("pi-jar dialogs accept mouse clicks on choices and to-do rows", async () =>
   const second = rows.findIndex((line) => line.includes("Second"));
   component.handleMouse({ type: "click", button: "left", x: 5, y: second });
   assert.equal(await choice, 1);
-  const toggled = todoView(ctx as never, () => [{ id: "a", title: "Clicked", done: false }], { value: "all" });
+  const toggled = todoView(ctx as never, () => [{ id: "a", title: "Clicked", done: false, status: "pending" as const }], { value: "all" });
   component.render(40);
   component.handleMouse({ type: "click", button: "left", x: 4, y: 1 });
   assert.deepEqual(await toggled, { kind: "toggle", id: "a" });
