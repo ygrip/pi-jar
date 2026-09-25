@@ -1,6 +1,6 @@
 /**
- * Pixel flame: a small heat-spreading fire automaton shaped into a torch, drawn with
- * half blocks (two simulated rows per terminal row) plus rising embers and sparks.
+ * Pixel flame: a small heat-spreading fire automaton shaped by several flickering tongues,
+ * drawn with half blocks (two simulated rows per terminal row) plus rising embers and sparks.
  * Every frame is a pure function of (seed, frame) so tests and motion-off stay stable.
  */
 
@@ -10,9 +10,24 @@ const SIM_ROWS = 24;
 export const FLAME_ROWS = SIM_ROWS / 2;
 const MAX_HEAT = 9;
 const WARMUP = 28;
-const MAX_PARTICLES = 6;
-/** Chance a rising cell loses one heat step; tuned so the tip reaches the top third. */
-const COOLING = 0.4;
+export const MAX_PARTICLES = 8;
+/** Chance a rising cell loses one heat step; tuned so the tallest tongue reaches the top. */
+const COOLING = 0.22;
+
+/**
+ * Flame tongues: offset from center, rest height (fraction of the grid), base half width,
+ * flicker phase/speed and outward lean. Each flickers on its own, so the silhouette
+ * breaks into several licking spikes instead of one smooth teardrop.
+ */
+const TONGUES = [
+  { offset: 0, height: 1, width: 2.1, phase: 0, speed: 0.23, lean: 0 },
+  { offset: -3.2, height: 0.82, width: 1.5, phase: 1.7, speed: 0.31, lean: -1.4 },
+  { offset: 3.2, height: 0.86, width: 1.5, phase: 3.1, speed: 0.27, lean: 1.4 },
+  { offset: -6, height: 0.6, width: 1.1, phase: 4.4, speed: 0.37, lean: -1.7 },
+  { offset: 6, height: 0.64, width: 1.1, phase: 0.9, speed: 0.34, lean: 1.7 }
+] as const;
+/** Fraction of the grid covered by the solid body that joins the tongues. */
+const BODY = 0.17;
 
 /** Heat ramp from deep ember red to a pale-gold core. Index 0 is transparent. */
 export const FLAME_RAMP = [
@@ -77,6 +92,9 @@ export class FlameSim {
   private particles: Particle[] = [];
   private readonly random: () => number;
   private readonly center: number;
+  /** Live reach of each tongue this frame (fraction of the grid). */
+  private reach: number[] = TONGUES.map((tongue) => tongue.height);
+  private wind = 0;
 
   constructor(seed = 1, width = FLAME_WIDTH, rows = SIM_ROWS) {
     this.width = width;
@@ -88,30 +106,56 @@ export class FlameSim {
     this.frame = 0;
   }
 
-  /** Half width of the torch body at a simulated row; narrows toward the tip. */
-  private halfWidth(y: number): number {
-    const height = (this.rows - 1 - y) / (this.rows - 1);
-    return Math.max(0.6, 5.6 * (1 - height * 0.8));
+  /** Center column of tongue `index` at height fraction `along` of its reach. */
+  private tongueX(index: number, along: number): number {
+    const tongue = TONGUES[index]!;
+    return this.center + tongue.offset * (1 - 0.25 * along) + (tongue.lean + this.wind * 1.4) * along * along;
   }
 
-  /** Teardrop envelope: the hottest a cell may be, so heat always reads as one torch. */
+  /** The hottest a cell may be: a solid body at the base, then the union of the tongues. */
   private envelope(x: number, y: number): number {
-    const distance = Math.abs(x - this.center) / this.halfWidth(y);
-    return distance >= 1.15 ? 0 : Math.round(MAX_HEAT * Math.min(1, 1.35 - distance * 0.8));
+    if (x <= 0 || x >= this.width - 1) return 0;
+    const v = (this.rows - 1 - y) / (this.rows - 1);
+    let cap = 0;
+    if (v < BODY) {
+      const distance = Math.abs(x - this.center) / (7.8 - v * 9);
+      if (distance < 1) cap = MAX_HEAT * Math.min(1, 1.3 - distance * 0.6);
+    }
+    for (let index = 0; index < TONGUES.length; index++) {
+      const reach = this.reach[index]!;
+      if (v > reach) continue;
+      const along = v / reach;
+      const half = TONGUES[index]!.width * Math.pow(1 - along, 0.7) + 0.35;
+      const distance = Math.abs(x - this.tongueX(index, along)) / half;
+      if (distance < 1) cap = Math.max(cap, MAX_HEAT * Math.min(1, 1.25 - distance * 0.5));
+    }
+    return Math.round(cap);
+  }
+
+  /** Each tongue breathes on its own sine and sometimes licks upward. */
+  private flicker(): void {
+    const t = this.frame;
+    this.wind = Math.sin(t * 0.13) * 0.6 + Math.sin(t * 0.041 + 1.3) * 0.4;
+    this.reach = TONGUES.map((tongue, index) => {
+      const breath = 0.88 + 0.16 * Math.sin(t * tongue.speed + tongue.phase);
+      const lick = this.random() < 0.14 ? 0.18 : 0;
+      const previous = this.reach[index] ?? tongue.height;
+      return Math.min(1, Math.max(0.2, previous * 0.45 + tongue.height * (breath + lick) * 0.55));
+    });
   }
 
   step(): void {
     const { width, rows, random } = this;
     const heat = this.heat;
     const base = (rows - 1) * width;
-    // A flickering, torch-shaped source: hot core, cooler shoulders, nothing at the edges.
+    this.flicker();
+    const wind = this.wind;
+    // A flickering bed of coals: hot across the body, cooler shoulders, nothing at the edges.
     for (let x = 0; x < width; x++) {
       const distance = Math.abs(x - this.center);
-      heat[base + x] = distance <= 3 ? MAX_HEAT - (random() < 0.18 ? 1 : 0)
-        : distance <= 5 ? MAX_HEAT - 2 - Math.floor(random() * 2) : 0;
+      heat[base + x] = distance <= 5 ? MAX_HEAT - (random() < 0.18 ? 1 : 0)
+        : distance <= 7 ? MAX_HEAT - 2 - Math.floor(random() * 2) : 0;
     }
-    const t = this.frame;
-    const wind = Math.sin(t * 0.13) * 0.6 + Math.sin(t * 0.041 + 1.3) * 0.4;
     for (let y = 1; y < rows; y++) {
       for (let x = 0; x < width; x++) {
         const source = heat[y * width + x]!;
@@ -122,6 +166,17 @@ export class FlameSim {
         if (target < 0 || target >= width) continue;
         const cooled = source - (random() < COOLING ? 1 : 0);
         heat[(y - 1) * width + target] = Math.max(0, Math.min(this.envelope(target, y - 1), cooled));
+      }
+    }
+    // Fuel each tongue's core so its spike stays lit to the tip; the spread feathers it.
+    for (let index = 0; index < TONGUES.length; index++) {
+      const top = Math.round((rows - 1) * (1 - this.reach[index]!));
+      for (let y = rows - 2; y > top; y--) {
+        if (random() > 0.7) continue;
+        const along = (rows - 1 - y) / ((rows - 1) * this.reach[index]!);
+        const x = Math.round(this.tongueX(index, along));
+        const at = y * width + x;
+        heat[at] = Math.max(heat[at]!, Math.min(this.envelope(x, y), Math.round(2 + (MAX_HEAT - 2) * (1 - along))));
       }
     }
     this.moveParticles();
@@ -137,19 +192,21 @@ export class FlameSim {
     const random = this.random;
     this.particles = this.particles
       .map((particle) => ({ ...particle, y: particle.y + particle.vy, x: particle.x + particle.drift + (random() - 0.5) * 0.3, life: particle.life - 1 }))
-      .filter((particle) => particle.life > 0 && particle.y >= 0 && particle.x >= 0 && particle.x < this.width);
+      .filter((particle) => particle.life > 0 && particle.y >= 0 && particle.x >= 1 && particle.x < this.width - 1.5);
     const spawn = (spark: boolean) => {
       if (this.particles.length >= MAX_PARTICLES) return;
-      const x = Math.round(this.center + (random() - 0.5) * (spark ? 3 : 7));
+      // Particles tear off the tongue tips.
+      const index = Math.floor(random() * TONGUES.length);
+      const x = Math.round(this.tongueX(index, 0.9) + (random() - 0.5) * 2);
       const top = this.topOf(Math.max(0, Math.min(this.width - 1, x)));
       if (top == null) return;
       const max = spark ? 2 + Math.floor(random() * 3) : 8 + Math.floor(random() * 13);
       this.particles.push({ x, y: Math.max(0, top - 1), vy: spark ? -1.1 - random() * 0.4 : -0.3 - random() * 0.5,
         drift: (random() - 0.5) * 0.5, life: max, max, spark });
     };
-    if (random() < 0.3) spawn(false);
-    if (random() < 0.12) spawn(false);
-    if (random() < 0.07) spawn(true);
+    if (random() < 0.35) spawn(false);
+    if (random() < 0.15) spawn(false);
+    if (random() < 0.12) spawn(true);
   }
 
   particleCount(): number { return this.particles.length; }
@@ -164,7 +221,7 @@ export class FlameSim {
       const x = Math.round(particle.x);
       const simY = Math.round(particle.y);
       const row = Math.floor(simY / 2);
-      if (row < 0 || row >= rows.length || x < 0 || x >= this.width) continue;
+      if (row < 0 || row >= rows.length || x < 1 || x >= this.width - 1) continue;
       if (this.heat[simY * this.width + x]! > 0 || rows[row]![x] !== " ") continue;
       const fade = particle.life / particle.max;
       const glyph = particle.spark ? (fade > 0.5 ? "✦" : "*") : fade > 0.66 ? "•" : fade > 0.33 ? "∙" : "·";

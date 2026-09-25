@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Container, stripTerminalSequences, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import piJar from "../extensions/index.ts";
 import { renderFooter, type FooterView } from "../src/footer.ts";
-import { HOPEFUL_WELCOME_MESSAGES, hopefulWelcomeMessage, welcomeHit, welcomeLines } from "../src/welcome.ts";
+import { HOPEFUL_WELCOME_MESSAGES, fullwidth, heroMessage, hopefulWelcomeMessage, welcomeHit, welcomeLines } from "../src/welcome.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 
 const plain = { fg: (_color: string, value: string) => value };
@@ -28,7 +28,7 @@ test("pixel flame sits above π; welcome and footer fit terminal widths", () => 
     assert.doesNotMatch(text, /π/); // no second, literal symbol beneath the pixel artwork
     if (width >= 64) assert.match(text, /quota off/);
     if (width >= 40) {
-      assert.match(text, /Welcome to pi-jar/);
+      assert.match(text, /welcome to pi-jar/i);
       assert.match(text, /PROJECT\s+pi-jar · git unavailable/);
       assert.match(text, /\/tasks/);
     }
@@ -66,8 +66,24 @@ test("hopeful welcome copy is varied, bounded, refreshable and injectable per re
   for (const message of HOPEFUL_WELCOME_MESSAGES) {
     assert.match(message, /light|spark|step|path|work|begin|night/i);
     const text = welcomeLines(120, 0, plain.fg, { project: "pi-jar", message }).map(stripTerminalSequences).join(" ");
-    assert.ok(text.includes(message));
+    for (const word of message.split(" ")) assert.ok(text.includes(fullwidth(word)), `${message}: ${word}`);
   }
+});
+
+test("welcome message is a large hero at the top of the card", () => {
+  const message = "Steady hands, warm light, good work ahead.";
+  for (const width of [30, 46, 86]) {
+    const lines = heroMessage(message, width, plain.fg, false);
+    assert.ok(lines.every((line) => visibleWidth(line) === width), `${width} fixed width`);
+    const text = lines.map(stripTerminalSequences).join(" ");
+    const big = width >= 46;
+    for (const word of message.split(" ")) assert.ok(text.includes(big ? fullwidth(word) : word), `${width}: ${word}`);
+    assert.ok(lines.every((line) => line.includes("\x1b[1m")), "bold");
+  }
+  // The hero sits right under the header, above the workspace rows.
+  const rows = welcomeLines(120, 0, plain.fg, { project: "jar", message }).map(stripTerminalSequences);
+  const hero = rows.findIndex((row) => row.includes(fullwidth("Steady")));
+  assert.ok(hero > 0 && hero < rows.findIndex((row) => row.includes("PROJECT")));
 });
 
 test("welcome shows workspace, workflow state, roles and live teammates", () => {
@@ -83,9 +99,9 @@ test("welcome shows workspace, workflow state, roles and live teammates", () => 
     const text = lines.map(stripTerminalSequences).join(" ");
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
     const labels = width >= 120 ? ["pi-jar v1.2.3", "model-x", "role:plan", "quota 76%", "git main · dirty", "Add hello (3 steps)", "Ship · 1/2 tasks",
-      "next: Write docs", "plan→@slow", "assistant working · 2 subagents · Ship feature", "Welcome to pi-jar"]
+      "next: Write docs", "plan→@slow", "assistant working · 2 subagents · Ship feature", "welcome to pi-jar"]
       : width >= 80 ? ["pi-jar v1.2.3", "role:plan", "quota 76%", "git main · dirty", "Add hello (3 steps)", "Ship · 1/2 tasks", "2 subagents"]
-      : ["pi-jar v1.2.3", "git main", "Add hello", "Ship", "Welcome"];
+      : ["pi-jar v1.2.3", "git main", "Add hello", "Ship", "welcome"];
     for (const label of labels) assert.ok(text.includes(label), `${width}: ${label}`);
     assert.match(text, /╭─.*├─.*╰─/);
   }
@@ -133,7 +149,7 @@ test("hub dispatches only installed native managers and never invents unavailabl
   events.get("session_start")?.({}, ctx);
   const rendered = () => welcome()?.render(120).map(stripTerminalSequences).join(" ") ?? "";
   assert.match(rendered(), /PROJECT\s+pi-jar/);
-  assert.match(rendered(), /Welcome to pi-jar/);
+  assert.match(rendered(), /welcome to pi-jar/i);
   assert.match(rendered(), /TEAM.*\/tasks/);
   await handlers.get("jar")?.("hub", ctx);
   assert.deepEqual(selectChoices, ["Tasks (/tasks)"]);

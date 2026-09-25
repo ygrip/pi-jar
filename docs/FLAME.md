@@ -8,11 +8,12 @@ Both are original, dependency-free and rendered as plain terminal text inside Pi
 
 A heat-spreading cellular automaton on a 22 × 24 grid of intensities `0…9`:
 
-1. **Source row.** The bottom row is a torch-shaped heat source: the center seven cells are near-maximum heat (with a slight flicker), the next two on each side are warm, and the edges are cold.
-2. **Spread.** Every frame, each cell's heat rises one row and drifts horizontally by −1, 0 or +1 (straight up is twice as likely). It loses one heat step with probability `0.4`.
-3. **Wind.** Two slow sine waves combine into a gentle bias that occasionally pushes rising heat sideways, so the tip sways instead of jittering.
-4. **Envelope.** A teardrop envelope caps each cell's heat by its distance from the center relative to a half-width that narrows with height. The fire therefore always reads as one torch, never a wall.
-5. **Particles.** At most six live particles. Embers spawn at the top of the hot region and rise at 0.3–0.8 rows/frame with a small drift, living 8–20 frames (`•` → `∙` → `·`, fading down the palette). Sparks are rare (≈7% per frame), fast, bright `✦`/`*` and last 2–4 frames. Particles only draw over empty cells.
+1. **Source row.** The bottom row is a bed of coals: the center eleven cells are near-maximum heat (with a slight flicker), the next two on each side are warm, and the edges are cold.
+2. **Spread.** Every frame, each cell's heat rises one row and drifts horizontally by −1, 0 or +1 (straight up is twice as likely). It loses one heat step with probability `0.22`.
+3. **Tongues.** Five flame tongues (a tall center, two shoulders, two short outer licks) each have a rest height, a base width that tapers toward the tip, and an outward lean. Each one breathes on its own sine wave and sometimes licks 18% higher, so the silhouette keeps breaking into separate protruding spikes.
+4. **Envelope.** A cell's heat is capped by a short solid body at the base plus the union of the tongues. Each tongue's core is also fed a little heat along its spine, so spikes stay lit to their dark-red tips while the spread feathers their edges.
+5. **Wind.** Two slow sine waves combine into a gentle bias that bends the tongue tips and occasionally pushes rising heat sideways.
+6. **Particles.** At most eight live particles, torn off the tongue tips. Embers rise at 0.3–0.8 rows/frame with a small drift, living 8–20 frames (`•` → `∙` → `·`, fading down the palette). Sparks (≈12% per frame) are fast, bright `✦`/`*` and last 2–4 frames. Particles only draw over empty cells and never on the outer columns.
 
 Randomness comes from a seeded PRNG (mulberry32), and the simulation warms up for 28 steps. So `flameFrame(frame, seed)` is a pure function: tests are deterministic, motion-off shows a still-lit frame, and **Refresh** simply picks a new seed.
 

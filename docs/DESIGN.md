@@ -53,7 +53,7 @@ Rules:
 - **Medium (32–71):** a slightly cropped flame and compact `π` stacked above the card.
 - **Narrow (< 32):** cropped flame, compact `π` and a single Settings action.
 
-Card sections, top to bottom: header (version · model · effort · role), workspace (project · git · session), workflow (plan · goal · tasks · roles · team), message, actions. Long values truncate at the right. Actions are bracketed chips in fullscreen and plain keyboard hints in regular mode. A button is never advertised where it cannot be clicked.
+Card sections, top to bottom: header (version · model · effort · role), the **message hero**, workspace (project · git · session), workflow (plan · goal · tasks · roles · team), actions. The hero is the focal point: bold, painted in the flame's gold-to-orange ramp and set in double-width (fullwidth) letters when it fits in three lines, otherwise bold at normal width, with a dim "— welcome to pi-jar —" byline. **Refresh** picks a new message and flame. Long values truncate at the right. Actions are bracketed chips in fullscreen and plain keyboard hints in regular mode. A button is never advertised where it cannot be clicked.
 
 ### Composer
 

@@ -1,5 +1,5 @@
 import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { FLAME_WIDTH, flameFrame } from "./flame.ts";
+import { FLAME_RAMP, FLAME_WIDTH, flameFrame, rgb, supportsTruecolor } from "./flame.ts";
 import { cleanText } from "./status.ts";
 
 export type WelcomeAction = "settings" | "refresh" | "roles" | "plan" | "goal";
@@ -92,6 +92,45 @@ const fixedCell = (line: string, width: number) => {
   return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
 };
 
+/** Word-wrap plain text into lines no wider than `width` columns. */
+function wrap(text: string, width: number, space = " "): string[] {
+  const lines: string[] = [];
+  for (const word of text.split(" ").filter(Boolean)) {
+    const last = lines.length - 1;
+    if (last >= 0 && visibleWidth(lines[last]! + space + word) <= width) lines[last] += space + word;
+    else lines.push(word);
+  }
+  return lines;
+}
+
+/** Double-width (fullwidth) forms of printable ASCII: the closest a terminal gets to larger type. */
+export function fullwidth(text: string): string {
+  return [...text].map((char) => {
+    const code = char.charCodeAt(0);
+    return code > 0x20 && code < 0x7f ? String.fromCharCode(code + 0xfee0) : char;
+  }).join("");
+}
+
+/**
+ * The welcome message as a hero: bold, flame-colored and double-width when it fits in
+ * three lines, otherwise bold at normal width. Returns centered lines of exactly `width`.
+ */
+export function heroMessage(message: string, width: number, fg: Paint, truecolor = supportsTruecolor()): string[] {
+  const text = cleanText(message, 100);
+  const big = wrap(fullwidth(text), width - 2, "  ");
+  const lines = big.length <= 3 && big.every((line) => visibleWidth(line) <= width - 2) ? big : wrap(text, width - 2);
+  return lines.map((line) => {
+    const chars = [...line];
+    // Pale gold at the start cooling to orange, like the flame's core.
+    const painted = chars.map((char, index) => {
+      if (char === " ") return char;
+      const heat = 9 - Math.round((index / Math.max(1, chars.length - 1)) * 3);
+      return truecolor ? rgb(FLAME_RAMP[heat]!, char) : fg("warning", char);
+    }).join("");
+    return center("\x1b[1m" + painted + "\x1b[22m", width);
+  });
+}
+
 /** Pack chips into rows no wider than `width`. */
 function pack(items: readonly string[], width: number, gap = " "): string[] {
   const rows: string[] = [];
@@ -139,6 +178,11 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
     fg("dim", "╭" + "─".repeat(w - 2) + "╮"),
     cell(header),
     divider,
+    cell(""),
+    ...heroMessage(info.message ?? HOPEFUL_WELCOME_MESSAGES[0], inner, fg).map(cell),
+    cell(center(fg("dim", "— welcome to ") + fg("accent", "pi-jar") + fg("dim", " —"), inner)),
+    cell(""),
+    divider,
     cell(label("PROJECT", (info.project || "unavailable") + " · " + git, info.dirty ? "warning" : "muted")),
     cell(label("SESSION", [info.context ?? "ctx ?", quota, info.cost ?? ""].filter(Boolean).join(" · "))),
     divider,
@@ -147,8 +191,6 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
     cell(label("TASKS", tasks, info.tasks ? "accent" : "muted")),
     cell(label("ROLES", info.rolesSummary ?? "all roles follow the current model")),
     ...(team ? [cell(label("TEAM", team, lead?.state === "failed" ? "error" : "muted"))] : []),
-    divider,
-    cell(fg("muted", "Welcome to ") + fg("accent", "pi-jar") + fg("dim", " — " + cleanText(info.message ?? HOPEFUL_WELCOME_MESSAGES[0], 100))),
     divider,
     ...actions.map(cell),
     fg("dim", "╰" + "─".repeat(w - 2) + "╯")
@@ -185,6 +227,7 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
       ...flame.slice(4).map((line) => fit(sliceByColumn(line, start, Math.min(width, FLAME_WIDTH)))),
       ...PI_COMPACT.map((line) => fit(fg("accent", line))),
       fit(fg("accent", "pi-jar")),
+      ...wrap(cleanText(info.message ?? HOPEFUL_WELCOME_MESSAGES[0], 100), width).map((line) => fit("\x1b[1m" + fg("warning", line) + "\x1b[22m")),
       fit(fg(info.settingsClickable === false ? "dim" : "accent", info.settingsClickable === false ? "ctrl+alt+s settings" : "[ ⚙ Settings ]")),
       ""
     ];
