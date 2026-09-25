@@ -39,59 +39,29 @@ export function hopefulWelcomeMessage(random: () => number = Math.random): strin
   return HOPEFUL_WELCOME_MESSAGES[index]!;
 }
 
-// Fire should deform, not translate as one rigid silhouette. Keep the base
-// planted on the torch while progressively increasing motion toward the tip.
-// The outer shell and hot core use different low-frequency waves so the flame
-// appears to fold through itself instead of wagging side to side.
+// Original fixed-width sprite: a small, curved flame with a steady base.
+// Only the tip changes between frames; never shift the torch or its hot core.
+// See docs/FLAME_RESEARCH.md for the third-party asset review.
 const FLAME_WIDTH = 23;
-const FLAME_HEIGHT = 13;
-const FLAME_CENTER = 11;
-const FLAME_RADII = [0, 0, 1, 1, 2, 3, 4, 5, 6, 6, 5, 4, 2] as const;
+const FLAME_TIPS = [
+  ["           ╱", "          ╱╲", "         ╱░╲", "          ╲▒╲", "         ╱▒▓╲"],
+  ["            ╱", "           ╱╲", "          ╱░╲", "          ╲▒╲", "         ╱▒▓╲"],
+  ["           ╱", "          ╱╲", "          ╲░╲", "         ╱▒▒╲", "         ╱▒▓╲"],
+  ["          ╱", "         ╱╲", "         ╲░╲", "          ╲▒╲", "         ╱▒▓╲"]
+] as const;
+const FLAME_BASE = [
+  "        ╱▒▓▓▒╲",
+  "        ╲▒▓▓▓╲",
+  "         ╲▒▓▓▒╲",
+  "        ╱▒▓▓▓▒╲",
+  "       ╱▒▓▓▓▓▒╲",
+  "       ╲▒▓▓▓▒▒╱",
+  "        ╲▒▒▒▒╱",
+  "         ╲▒▒╱"
+] as const;
 
-function organicFlame(frame: number): string[] {
-  return FLAME_RADII.map((radius, y) => {
-    const height = (FLAME_HEIGHT - 1 - y) / (FLAME_HEIGHT - 1);
-    const tipMotion = Math.pow(height, 1.65);
-    const bodyMotion = Math.pow(height, 0.9);
-
-    // Two slow waves create a soft curl. Their influence fades to zero at the
-    // base, which prevents the distracting whole-flame horizontal wobble.
-    const centerOffset =
-      Math.sin(frame * 0.27 + y * 0.43) * 1.15 * bodyMotion
-      + Math.sin(frame * 0.11 + 1.35) * 1.55 * tipMotion;
-    const center = FLAME_CENTER + Math.round(centerOffset);
-
-    // Left/right shoulders breathe independently. This small asymmetry is what
-    // makes the body feel turbulent while preserving a recognizable silhouette.
-    const shoulder = y >= 3 && y <= 10 ? 1 : 0;
-    const leftRadius = Math.max(0, radius + shoulder * Math.round(Math.sin(frame * 0.19 + y * 0.83) * 0.55));
-    const rightRadius = Math.max(0, radius + shoulder * Math.round(Math.sin(frame * 0.17 + y * 0.67 + 2.1) * 0.55));
-    const left = center - leftRadius;
-    const right = center + rightRadius;
-    const row = Array.from({ length: FLAME_WIDTH }, () => " ");
-
-    // The hot core lags the shell slightly, like a smaller flame folding
-    // inside the orange body. It is strongest near the anchored lower half.
-    const coreOffset = Math.sin(frame * 0.23 + y * 0.71 + 0.8) * Math.min(1.2, radius * 0.22) * bodyMotion;
-    const coreCenter = center + Math.round(coreOffset);
-    const coreRadius = y >= 5 ? Math.max(0, Math.floor(radius * (0.28 + 0.10 * Math.sin(frame * 0.13 + y)))) : -1;
-
-    for (let x = left; x <= right; x++) {
-      if (x < 0 || x >= FLAME_WIDTH) continue;
-      const edgeDistance = Math.min(x - left, right - x);
-      const edgeNoise = Math.sin(frame * 0.37 + y * 1.61 + x * 0.29);
-
-      // Occasionally nibble one boundary cell from the upper body. Never break
-      // the lower rows, otherwise the torch looks detached from its flame.
-      if (y < 9 && edgeDistance === 0 && edgeNoise > 0.88) continue;
-
-      if (coreRadius >= 0 && Math.abs(x - coreCenter) <= coreRadius) row[x] = "█";
-      else if (edgeDistance >= 2) row[x] = "▓";
-      else if (edgeDistance === 1) row[x] = "▒";
-      else row[x] = "░";
-    }
-    return row.join("");
-  });
+function flameSprite(frame: number): string[] {
+  return [...FLAME_TIPS[((frame % FLAME_TIPS.length) + FLAME_TIPS.length) % FLAME_TIPS.length]!, ...FLAME_BASE];
 }
 
 const PI_LARGE = [
@@ -116,19 +86,15 @@ const FIRE_RGB = {
   core: "#FFF2A6",
   hot: "#FFD45A",
   orange: "#FF8A1F",
-  edge: "#B83A18",
+  edge: "#E65B27",
   spark: "#FFE16A",
   ember: "#FF991F",
   fading: "#A94320"
 } as const;
 
 const EMBERS = [
-  { x: 5, startY: 9, phase: 0, life: 24, drift: -0.11, sway: 0.55 },
-  { x: 17, startY: 9, phase: 5, life: 26, drift: 0.10, sway: 0.50 },
-  { x: 6, startY: 8, phase: 11, life: 29, drift: -0.08, sway: 0.65 },
-  { x: 16, startY: 8, phase: 16, life: 31, drift: 0.09, sway: 0.60 },
-  { x: 7, startY: 7, phase: 22, life: 34, drift: -0.06, sway: 0.45 },
-  { x: 15, startY: 7, phase: 27, life: 36, drift: 0.06, sway: 0.45 }
+  { x: 6, startY: 8, phase: 0, life: 36, drift: -0.08, sway: 0.4 },
+  { x: 17, startY: 7, phase: 17, life: 40, drift: 0.08, sway: 0.4 }
 ] as const;
 
 const center = (line: string, width: number) => {
@@ -172,14 +138,13 @@ function addEmbers(lines: readonly string[], frame: number): string[] {
 
 function paintFlame(line: string): string {
   return line
-    .replace(/█+/g, (part) => rgb(FIRE_RGB.core, part))
-    .replace(/▓+/g, (part) => rgb(FIRE_RGB.hot, part))
-    .replace(/▒+/g, (part) => rgb(FIRE_RGB.orange, part))
-    .replace(/░+/g, (part) => rgb(FIRE_RGB.edge, part))
+    .replace(/▓+/g, (part) => rgb(FIRE_RGB.core, part))
+    .replace(/▒+/g, (part) => rgb(FIRE_RGB.hot, part))
+    .replace(/░+/g, (part) => rgb(FIRE_RGB.orange, part))
+    .replace(/[╱╲]+/g, (part) => rgb(FIRE_RGB.edge, part))
     .replace(/S+/g, (part) => rgb(FIRE_RGB.spark, "■".repeat(part.length)))
     .replace(/s+/g, (part) => rgb(FIRE_RGB.ember, "▪".repeat(part.length)))
-    .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, "·".repeat(part.length)))
-    .replace(/[●ᴗ─]/g, (part) => rgb("#432319", part));
+    .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, "·".repeat(part.length)));
 }
 
 function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
@@ -253,21 +218,14 @@ export function welcomeSettingsHit(lines: readonly string[], x: number, y: numbe
 export function welcomeLines(width: number, frame: number, fg: Paint, info: WelcomeInfo = {}): string[] {
   if (width <= 0) return [];
   const fit = (line: string) => truncateToWidth(line, width);
-  const flameRows = organicFlame(frame).map((line) => [...line]);
-  // Anchor the expression to the moving body, not the canvas: the face stays
-  // inside the flame as the upper silhouette and hot core curl independently.
-  const blink = Math.floor(frame / 8) % 13 === 12;
-  for (const [y, offsets, glyph] of [[7, [-2, 2], blink ? "─" : "●"], [9, [0], "ᴗ"]] as const) {
-    const row = flameRows[y]!;
-    const left = row.findIndex((cell) => cell !== " ");
-    const right = row.reduce((last, cell, x) => cell === " " ? last : x, -1);
-    const center = Math.round((left + right) / 2);
-    for (const offset of offsets) if (row[center + offset] !== " ") row[center + offset] = glyph;
-  }
-  const flame = addEmbers(flameRows.map((row) => row.join("")), frame).map((line) => paintFlame(line));
-  const compactFlame = flame.slice(2, 10);
+  const rawFlame = addEmbers(flameSprite(frame), frame);
+  const flame = rawFlame.map((line) => paintFlame(line));
+  const compactFlame = rawFlame.slice(2, 10);
   if (width < 32) return [
-    ...compactFlame.map((line) => fit(line)),
+    ...compactFlame.map((line) => {
+      const start = Math.max(0, Math.floor((FLAME_WIDTH - width) / 2));
+      return fit(paintFlame(line.slice(start, start + width)));
+    }),
     ...PI_COMPACT.map((line) => fit(fg("accent", line))),
     fit(fg("accent", "pi-jar · role-assistant")),
     fit(fg("accent", "/jar settings")),
@@ -277,7 +235,7 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
   const art = wide ? [
     ...flame.map((line) => flameArtCell(line)),
     ...PI_LARGE.map((line) => fg("accent", piArtCell(line)))
-  ] : [...compactFlame, ...PI_COMPACT.map((line) => fg("accent", line))];
+  ] : [...compactFlame.map(paintFlame), ...PI_COMPACT.map((line) => fg("accent", line))];
   const details = card(wide ? width - ART_WIDTH - 2 : width, fg, info);
   if (!wide) return [...art.map(fit), ...details.map(fit), ""];
   const topPad = Math.max(0, Math.floor((details.length - art.length) / 2));

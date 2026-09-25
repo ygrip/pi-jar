@@ -39,13 +39,12 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
       const left = (lines: string[]) => lines.map((line) => stripTerminalSequences(line).slice(0, 28).trimEnd());
       assert.notDeepEqual(left(before).slice(0, 13), left(after).slice(0, 13)); // flame and embers breathe
       assert.deepEqual(left(before).slice(13), left(after).slice(13)); // π and spacing stay grounded
-      assert.ok(left(before).slice(0, 13).some((line) => line.includes("████")));
-      assert.match(left(before)[7]!, /●.{3}●/, "eyes sit apart on the moving flame head");
-      assert.match(left(before)[9]!, /ᴗ/, "mouth stays below the eyes");
+      assert.ok(left(before).slice(0, 13).some((line) => line.includes("▓▓▓")), "flame has a bright, compact core");
+      assert.doesNotMatch(left(before).slice(0, 13).join(""), /●|ᴗ|█{4}/, "flame has no face or chunky block silhouette");
       assert.ok(left(before).slice(13, 20).some((line) => line.includes("██")));
       assert.ok(Array.from({ length: 24 }, (_, frame) => welcomeLines(width, frame, plain.fg, info).join(""))
         .some((rendered) => stripTerminalSequences(rendered).includes("▪")), "rising ember particles are visible");
-      assert.ok(before.join("").includes("\x1b[38;2;255;212;90m"), "independently moving hot core stays bright");
+      assert.ok(before.join("").includes("\x1b[38;2;255;242;166m"), "hot core stays bright");
       const centerOf = (line: string) => {
         const start = line.search(/\S/);
         const end = line.length - 1 - [...line].reverse().join("").search(/\S/);
@@ -58,10 +57,11 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
       assert.match(text, /PROJECT.*pi-jar/);
       assert.match(text, /role-assistant/);
     }
-    if (width === 24) {
+    if (width < 32) {
       for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) {
         const flame = welcomeLines(width, frame, plain.fg, info).slice(0, 8);
-        assert.ok(flame.every((row) => visibleWidth(row) === 23), "fixed flame cell footprint");
+        assert.ok(flame.some((row) => stripTerminalSequences(row).includes("▓▓")), "narrow terminals retain the flame's core");
+        if (width === 24) assert.ok(flame.every((row) => visibleWidth(row) === 23), "fixed flame cell footprint");
       }
     }
     const view: FooterView = {
@@ -79,25 +79,25 @@ test("centered layered flame silhouettes animate above π; welcome and footer fi
   }
 });
 
-test("procedural flame keeps its face inside the body and its base planted across frames", () => {
-  const faces: string[] = [];
-  const bases: string[] = [];
-  for (let frame = 0; frame <= 2000; frame++) {
-    const flame = welcomeLines(80, frame, plain.fg).slice(0, 13).map((line) => stripTerminalSequences(line).slice(0, 28));
-    const eyes = flame[7]!;
-    const mouth = flame[9]!;
-    const glyph = Math.floor(frame / 8) % 13 === 12 ? "─" : "●";
-    const left = eyes.indexOf(glyph);
-    const right = eyes.lastIndexOf(glyph);
-    assert.ok(left > 0 && right - left === 4, `frame ${frame}: eyes stay spaced`);
-    assert.ok(eyes[left - 1] !== " " && eyes[right + 1] !== " ", `frame ${frame}: eyes remain inside the silhouette`);
-    assert.ok(mouth.includes("ᴗ"), `frame ${frame}: mouth remains visible`);
-    assert.ok(flame.every((row) => visibleWidth(row) === 28), "flame art has stable row widths");
-    faces.push(eyes);
-    bases.push(flame[12]!);
+test("flame loops with a restrained tip, fixed footprint, and planted base above stationary π", () => {
+  const tips = new Set<string>();
+  const bases = new Set<string>();
+  const pi = new Set<string>();
+  for (let frame = 0; frame < 160; frame++) {
+    const rows = welcomeLines(80, frame, plain.fg).map((line) => stripTerminalSequences(line).slice(0, 28));
+    const flame = rows.slice(0, 13);
+    assert.ok(flame.every((row) => visibleWidth(row) === 28), `frame ${frame}: fixed flame cell`);
+    assert.ok(flame.every((row) => !/[●ᴗ]/.test(row)), "flame stays an illustration rather than a face");
+    tips.add(flame.slice(0, 5).join("\n"));
+    bases.add(flame[12]!);
+    pi.add(rows.slice(13, 20).join("\n"));
   }
-  assert.equal(new Set(bases).size, 1, "the lower flame does not wobble horizontally");
-  assert.ok(new Set(faces).size > 1, "the expression follows body motion");
+  assert.ok(tips.size > 1, "the tip flickers");
+  assert.equal(bases.size, 1, "the base never wobbles");
+  assert.equal(pi.size, 1, "the π never moves");
+  const cycle = (frame: number) => welcomeLines(80, frame, plain.fg).slice(0, 5).map(stripTerminalSequences);
+  assert.deepEqual(cycle(0), cycle(4), "hand-authored tips loop cleanly");
+  assert.notDeepEqual(cycle(0), cycle(1), "adjacent tip frames differ");
 });
 
 test("hopeful welcome copy is varied, bounded and injectable per render", () => {
