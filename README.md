@@ -6,7 +6,7 @@ A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earend
 
 ## See it in action
 
-The README demo is captured from a real pi-jar terminal session and shows the animated torch-style `π`, live workspace state, tasks, roles and composer together. The optimized recording lives at `docs/assets/pi-jar-demo.gif`; capture and media guidelines are documented in [docs/SHOWCASE.md](docs/SHOWCASE.md).
+The showcase is captured from a real pi-jar terminal session: the torch-style `π`, animated flame and embers, live workspace state, tasks, roles and composer are the actual TUI rather than a mockup. Capture and media guidelines live in [docs/SHOWCASE.md](docs/SHOWCASE.md).
 
 ## Highlights
 
