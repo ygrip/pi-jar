@@ -44,10 +44,12 @@ A polished Pi package where the agent's work is visible at a glance, motion comm
 - [x] parallel subagents (`jar_delegate`) on model roles, shown as live teammates
 - [x] composer image chips and prompt history search
 - [x] recent-session gallery on the welcome card and `/jar resume`
+- [x] `implement` role and automatic, manual-choice-respecting role switches
+- [x] advisor: `jar_advisor`, `/advisor`, loop and failure gates
+- [x] `/usage` and `/context` panel; `/jar commit` with the `commit` role
 
 ## Next
 
-- [ ] screenshots/GIF of the welcome, composer and plan view
 - [ ] plan view: inline notes per section fed into **Refine**; section delete with undo
 - [ ] goal mode: optional token or time budget alongside the round budget
 - [ ] roles: per-role fallback chains when a model is unavailable

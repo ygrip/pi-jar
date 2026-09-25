@@ -66,7 +66,7 @@ State (`pi-jar.plan` entries, v2: `enabled`, `steps`, `text`, `path`, `title`) f
 
 - **Round budget:** each automatic continuation is a round (`round n/max`, default 8). A real user message resets it. Reaching the limit pauses the goal.
 - **Task gate:** with no open task, `write`/`edit` are blocked, and so are shell commands that are not on the read-only allowlist during the implement phase. During the audit, edits are blocked but verification commands are allowed.
-- **Auditor role:** the audit round activates the `advisor` role temporarily (if assigned); the previous model and effort are restored when work returns to the implementor or the run settles.
+- **Roles per round:** implement rounds run on the `implement` role and the audit round on `advisor` (each only if assigned). The previous model and effort are restored when the run settles.
 - **Completion:** `jar_goal complete` requires the audit phase, no open tasks, and non-empty evidence. It ends the turn, records the evidence, and Ember shows `(★ᴗ★)`.
 - **Context hygiene:** only the newest goal context and continuation messages are kept in the prompt.
 
@@ -81,7 +81,25 @@ Resolution for a role name:
 3. A `provider/model[:effort]` spec resolves through Pi's model registry; activation fails with a notice if the model is unknown or unauthenticated.
 4. An unassigned role "follows the current model" (activating it only labels the footer).
 
-`activateTemporary(role)` returns a restore function that puts back the previous model, effort and active role — used by plan mode (`plan`) and the goal audit (`advisor`).
+`activateTemporary(role)` returns a restore function that puts back the previous model, effort and active role — used by plan mode (`plan`), approved-plan execution (`implement`), goal rounds (`implement` / `advisor`).
+
+Manual choices win: a model or effort you select yourself (model picker, cycling, `/thinking`) while a temporary role is applied cancels that role's restore, so leaving plan mode or finishing a goal round never overrides it. pi-jar's own switches are not counted as manual.
+
+## Advisor
+
+- Context sent: the newest conversation (≈24k characters; tool results truncated to 1.2k each) plus `git status --short --branch` and `git diff --stat HEAD` (≤4k). No tools run on the advisor's side.
+- `jar_advisor` returns the advice as the tool result. `/advisor [focus]` and the failure gate deliver a visible `pi-jar.advisor` message (steered into a running turn, or queued for the next one when idle).
+- Loop gate: the same tool and input three times within the last eight calls blocks that call and returns the advice as the block reason. Failure gate: three failing tool results in a row. Both share a budget of two consultations per user prompt and are reset by your next message.
+- The advisor model comes from the `advisor` role; unassigned, it is the current model with a fresh context.
+
+## Commit
+
+`/jar commit [note]` reads the staged diff (≤60k characters) and the last eight commit subjects, asks the `commit` role (or the current model) for a message in the same style, and opens it in an editor. Saving commits with `git commit -F`; an empty message cancels. With nothing staged it offers `git add -A`. It never pushes.
+
+## Usage and context panel
+
+- Usage totals come from the assistant messages on the active branch plus pi-jar's side calls (advisor, commit) for this session. Limit bars use the quota lookup that feeds the footer.
+- Context parts are estimated at ~4 characters per token (images ≈1.6k tokens) and scaled to the provider-reported total when known. The autocompact buffer is Pi's compaction reserve (`compaction.reserveTokens`), or 0 when compaction is off. Context files and skills are the ones the last prompt used.
 
 ## Next-prompt suggestions
 

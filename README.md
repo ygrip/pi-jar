@@ -18,7 +18,10 @@ The showcase is captured from a real pi-jar terminal session: the torch-style `�
 | **Composer** | Rounded input that grows with your draft (up to ~60% of the terminal), click-to-place cursor in fullscreen, dim **next-prompt suggestions** you accept with <kbd>Tab</kbd>, and **Ember** — a tiny flame mascot that blinks, cheers, focuses, dozes and reacts. |
 | **Plan mode** | Read-only exploration; the agent must write a structured plan file and submit it. You review it in a split view (headings on the left, section on the right) and approve, compact-and-approve, refine or stop. |
 | **Goal mode** | Set an outcome; the agent must break it into tracked tasks and keeps working until they are done, then an **auditor** pass verifies the goal before it can be marked complete. |
-| **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `advisor`, `task`, `commit`, plus your own) with `@alias` chains, `:effort` suffixes and project overrides; used automatically by plan and goal modes. |
+| **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `implement`, `advisor`, `task`, `commit`, plus your own) with `@alias` chains, `:effort` suffixes and project overrides; switched automatically as you move between plan, execution, goal rounds and audits, and never over a model you picked yourself. |
+| **Advisor** | A second-opinion model: the agent calls `jar_advisor` for risky decisions or when stuck, `/advisor [focus]` asks on demand, and automatic gates consult it when the agent repeats the same tool call or keeps failing. |
+| **Usage & context** | `/usage` shows session cost and tokens per model (advisor and commit calls included) and plan-limit bars with reset times; `/context` draws a grid of what fills the context window, with a per-file, per-skill and per-tool breakdown. |
+| **Commit** | `/jar commit [note]` drafts a message for the staged changes with the `commit` role, lets you edit it, then commits (never pushes). |
 | **Tasks & questions** | A Claude-style `jar_todo` checklist the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
 | **Change review** | Every file the agent edits is remembered as it was; `/diff` (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) shows changed files next to a colored diff, with accept or revert per file or all at once. |
 | **Background shells** | `jar_shell` runs dev servers, watchers and long tests in the background; the agent is woken when a watch pattern matches or the process exits, so it never polls. `/jar shells` tails or kills them. |
@@ -51,6 +54,9 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | `/plan [request]` | Enter plan mode (optionally sending the request). `/plan review` reopens the plan view; `/plan off` exits. |
 | `/goal <outcome>` | Start goal mode. `/goal` edits, `/goal status`, `/goal pause`, `/goal resume`, `/goal clear`. |
 | `/roles` | Role manager. `/roles set ROLE provider/model[:effort]\|@role [--project]`, `/roles clear ROLE`, `/roles <role>` activates, `/roles cycle`, `/roles list`. |
+| `/advisor [focus]` | Ask the advisor for a second opinion on the current work; the answer joins the conversation. |
+| `/usage` · `/context` | Usage (cost, tokens per model, plan limits) and context-window breakdown in one tabbed panel. |
+| `/jar commit [note]` | Draft a commit message for the staged changes with the `commit` role, edit it, and commit. Offers `git add -A` when nothing is staged. |
 | `/jar` · `/jar settings` | Visual and workflow preferences. |
 | `/jar status` | One-line status summary. |
 | `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Human view/editor for the agent's checklist. |
@@ -174,9 +180,37 @@ Roles map a purpose to a model. They live in `~/.pi/agent/pi-jar-roles.json` (Pi
 ```
 
 - Specs are `provider/model[:effort]`, `@role[:effort]` (alias) or `*` (= `@default`). An effort on the referring role wins over the target's. Alias chains are followed up to five levels; cycles are reported.
-- **Built-in roles and where pi-jar uses them:** `default` (applied at session start, approved plans), `plan` (plan mode), `advisor` (goal audit), `smol`/`slow` (cycling), `task`, `commit`. Any other valid name (`a-z`, `0-9`, `-`) is a custom role.
+- **Built-in roles and where pi-jar uses them:**
+  | Role | Used for |
+  | --- | --- |
+  | `default` | applied at session start |
+  | `plan` | plan mode (restored when you leave it) |
+  | `implement` | executing an approved plan and goal implement rounds (falls back to the current model) |
+  | `advisor` | `jar_advisor`, `/advisor`, stuck-work gates and the goal audit |
+  | `task` | `jar_delegate` subagents |
+  | `commit` | `/jar commit` messages |
+  | `smol` / `slow` | cycling with <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> |
+
+  Any other valid name (`a-z`, `0-9`, `-`) is a custom role.
+- **Switching is automatic and scoped.** Entering plan mode applies `plan`; approving applies your chosen role or `implement` for the run; goal rounds alternate `implement` and `advisor`. Each temporary switch restores the previous model afterwards — unless you picked a model or effort yourself in the meantime, which always wins.
 - `/roles` opens a split manager: role list on the left; resolved model, alias chain, effort, scope and usage on the right. Keys: `m` model, `a` alias, `t` effort, `s` move between global/project scope, <kbd>Enter</kbd> activate, `c` clear, `n` new role, `d` delete custom role.
 - Older v1 files are read and upgraded in memory; they are rewritten as v2 only when you change a role.
+
+## Advisor
+
+The advisor is a second model (the `advisor` role; the current model if unassigned) that sees a fresh view of the recent conversation plus `git status` and a diff stat, but cannot run tools.
+
+- **`jar_advisor({ question?, draft? })`** — the agent is told to use it before risky or hard-to-reverse choices, after two failed attempts, and before declaring complex work done; it passes its own candidate as `draft`. Available in plan mode too.
+- **`/advisor [focus]`** — ask on demand; the answer is added to the conversation (visible) for the agent's next turn.
+- **Gates** — when the agent makes the same tool call three times within its last eight calls, the call is blocked and the advisor's review is returned instead; after three failing tool results in a row, the advice is steered into the running turn. At most two automatic consultations per prompt.
+- Settings → Pi toggles the advisor and the gates. Advisor calls are counted in `/usage`. The footer and welcome show it as a working teammate while it thinks.
+
+## Usage and context
+
+`/usage` and `/context` open one tabbed panel (<kbd>Tab</kbd> switches, <kbd>Esc</kbd> closes):
+
+- **Usage** — total cost, duration, prompts and responses, tokens (input, output, cache read/write); a per-model breakdown including advisor and commit calls; and, for Anthropic and OpenAI Codex subscriptions, 5-hour and weekly limit bars with reset times (lookups follow `/jar quota on|off`).
+- **Context** — a 10×10 grid (each cell ≈ 1% of the window) beside a legend: system prompt, tools, context files, skills, compaction summary, user and assistant messages, tool results, extension messages, free space and the autocompact buffer. Parts are estimated at ~4 characters per token and scaled to the provider-reported total when one is known; context files, skills and tools are listed individually below.
 
 ## Tasks, questions and history
 
@@ -194,7 +228,7 @@ Roles map a purpose to a model. They live in `~/.pi/agent/pi-jar-roles.json` (Pi
 
 - **Appearance** — accent, motion, rounded composer, Ember mascot, next-prompt suggestions, pi-jar UI.
 - **Footer** — field visibility.
-- **Pi** — mouse clicks (Pi fullscreen mode), copy on select, goal auto rounds.
+- **Pi** — mouse clicks (Pi fullscreen mode), copy on select, goal auto rounds, advisor, advisor gates.
 
 pi-jar preferences are saved in `pi-jar-settings.json` in Pi's agent directory; the Pi tab writes Pi's own settings.
 
@@ -216,6 +250,10 @@ pi-jar/
 │   ├── goal*.ts          goal state and the implement → audit loop
 │   ├── model-roles.ts    role config, resolution, activation
 │   ├── roles-ui.ts       role manager
+│   ├── advisor.ts        jar_advisor, /advisor and stuck-work gates
+│   ├── side-model.ts     one-shot role model calls and their usage
+│   ├── commit.ts         /jar commit
+│   ├── usage-view.ts     /usage; context-view.ts is /context; panel.ts frames both
 │   ├── split-view.ts     shared two-pane frame
 │   ├── changes.ts        change tracker and line diff; diff-view.ts is /diff
 │   ├── shells.ts         background shells, jar_shell and /jar shells
