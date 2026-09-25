@@ -34,7 +34,8 @@ export function collectStatuses(statuses: ReadonlyMap<string, string>, now: numb
     if (rawKey.startsWith("pi-jar.quota.")) continue;
     if (!rawKey.startsWith(ROLE_PREFIX)) {
       const value = cleanText(rawValue);
-      if (value) extras.push(`${key}: ${value}`);
+      // pi-jar's own indicators (such as `role:default`) are already self-describing.
+      if (value) extras.push(rawKey.startsWith("pi-jar.") ? value : `${key}: ${value}`);
       continue;
     }
     const id = rawKey.slice(ROLE_PREFIX.length);

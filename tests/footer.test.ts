@@ -140,6 +140,7 @@ test("status contract rejects stale, malformed and unsafe input without inventin
   assert.ok(result.extras.includes("petruk: unavailable"));
   assert.ok(result.extras.includes("bagong: unavailable"));
   assert.ok(result.extras.includes("advisor: consulting now"));
+  assert.deepEqual(collectStatuses(new Map([["pi-jar.model-role", "role:default"]]), 0).extras, ["role:default"], "pi-jar's own keys are not shown");
   const expiredDone = new Map([["pi-jar.role.gareng", JSON.stringify({ name: "Gareng", state: "done", expiresAt: now - 1 })]]);
   assert.deepEqual(collectStatuses(expiredDone, now).roles, []);
   assert.deepEqual(collectStatuses(expiredDone, now).extras, ["gareng: unavailable"]);
