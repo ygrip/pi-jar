@@ -1,0 +1,21 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "68103bf44cedee882e80f43378d898f982b8c157",
+  "prompts": {
+    "13e973c37a139510": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c38be8cc-b595-4afd-b832-7229d909e32a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 147,
+      "total_deletions": 53,
+      "accepted_lines": 143,
+      "overriden_lines": 0
+    }
+  }
+}
