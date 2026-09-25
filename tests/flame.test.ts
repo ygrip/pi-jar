@@ -40,18 +40,23 @@ test("flame reads as a torch: hot base, empty edges, embers above", () => {
   assert.ok(flameFrame(0, 1, plain, true).join("").includes("\x1b[38;2;255;243;196m"), "pale-gold core color");
 });
 
-test("flame breaks into several protruding tongues that reach the top", () => {
+test("flame is one continuous body with a rounded base and a moving tip", () => {
   const sim = new FlameSim(7);
-  let forked = 0, tall = 0;
+  const tips = new Set<string>();
+  let tall = 0;
   for (let frame = 0; frame < 60; frame++) {
     sim.step();
     const rows = sim.render(plain, false).map(stripTerminalSequences).map((row) => row.replace(/[•∙·✦*]/g, " "));
-    // Separate lit runs in the upper half mean distinct spikes, not one smooth teardrop.
-    if (rows.slice(2, 6).some((row) => (row.trim().match(/[░▒▓█]+/g) ?? []).length >= 3)) forked++;
-    if (/[░▒▓█]/.test(rows.slice(0, 2).join(""))) tall++;
+    const lit = rows.filter((row) => /[░▒▓█]/.test(row));
+    // No gaps inside the body: every lit row below the tip is a single run.
+    assert.ok(lit.slice(2).every((row) => (row.trim().match(/[░▒▓█]+/g) ?? []).length === 1), `frame ${frame}: continuous body`);
+    const span = (row: string) => row.trimEnd().length - row.search(/\S/);
+    assert.ok(span(rows.at(-1)!) < span(rows.at(-4)!), `frame ${frame}: rounded, narrower base`);
+    tips.add(lit.slice(0, 3).join("\n"));
+    if (/[░▒▓█]/.test(rows.slice(0, 4).join(""))) tall++;
   }
-  assert.ok(forked > 30, `forked in ${forked}/60 frames`);
-  assert.ok(tall > 20, `reached the top in ${tall}/60 frames`);
+  assert.ok(tips.size > 20, "the tip keeps changing shape");
+  assert.ok(tall > 30, `reaches the upper rows in ${tall}/60 frames`);
 });
 
 test("flame is centered on its middle column and narrower at the base than the belly", () => {

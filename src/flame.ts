@@ -1,6 +1,7 @@
 /**
- * Pixel flame: a small heat-spreading fire automaton shaped by several flickering tongues,
- * drawn with half blocks (two simulated rows per terminal row) plus rising embers and sparks.
+ * Pixel flame: one continuous flame with a rounded base that tapers into a softly wavering
+ * tip, animated by smooth value noise and a gentle sway, drawn with half blocks (two simulated
+ * rows per terminal row) plus wisps, embers and sparks.
  * Every frame is a pure function of (seed, frame) so tests and motion-off stay stable.
  */
 
@@ -12,25 +13,10 @@ export const FLAME_ROWS = SIM_ROWS / 2;
 const MAX_HEAT = 9;
 const WARMUP = 28;
 export const MAX_PARTICLES = 8;
-/** Chance a rising cell loses one heat step; tuned so the tallest tongue reaches the top. */
-const COOLING = 0.22;
-
-/**
- * Flame tongues: offset from center, rest height (fraction of the grid), base half width,
- * flicker phase/speed and outward lean. Each flickers on its own, so the silhouette
- * breaks into several licking spikes instead of one smooth teardrop.
- */
-const TONGUES = [
-  { offset: 0, height: 1, width: 2.1, phase: 0, speed: 0.23, lean: 0 },
-  { offset: -3.4, height: 0.84, width: 1.5, phase: 1.7, speed: 0.31, lean: -1 },
-  { offset: 3.4, height: 0.84, width: 1.5, phase: 3.1, speed: 0.27, lean: 1 },
-  { offset: -5.6, height: 0.6, width: 1.1, phase: 4.4, speed: 0.37, lean: -1.2 },
-  { offset: 5.6, height: 0.6, width: 1.1, phase: 0.9, speed: 0.34, lean: 1.2 }
-] as const;
-/** Fraction of the grid covered by the solid body that joins the tongues. */
-const BODY = 0.2;
-/** Tongue roots start this fraction of their offset from center, so the base is narrower than the middle. */
-const ROOT = 0.35;
+/** Where the rounded base is widest (fraction of the flame's height) and its half width. */
+const BELLY = 0.3;
+const BELLY_HALF_WIDTH = 5.6;
+const MAX_WISPS = 2;
 
 /** Heat ramp from deep ember red to a pale-gold core. Index 0 is transparent. */
 export const FLAME_RAMP = [
@@ -87,17 +73,38 @@ export function supportsTruecolor(env: NodeJS.ProcessEnv = process.env): boolean
   return value === "truecolor" || value === "24bit" || /-direct$/.test(env.TERM ?? "");
 }
 
+/** Smooth 2D value noise in [0, 1) from a seeded integer lattice. */
+function valueNoise(seed: number): (x: number, y: number) => number {
+  const lattice = (ix: number, iy: number) => {
+    let h = Math.imul(ix, 374761393) ^ Math.imul(iy, 668265263) ^ Math.imul(seed, 982451653);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  const smooth = (t: number) => t * t * (3 - 2 * t);
+  return (x, y) => {
+    const ix = Math.floor(x), iy = Math.floor(y);
+    const fx = smooth(x - ix), fy = smooth(y - iy);
+    const top = lattice(ix, iy) + (lattice(ix + 1, iy) - lattice(ix, iy)) * fx;
+    const bottom = lattice(ix, iy + 1) + (lattice(ix + 1, iy + 1) - lattice(ix, iy + 1)) * fx;
+    return top + (bottom - top) * fy;
+  };
+}
+
+interface Wisp { x: number; y: number; vy: number; life: number; max: number }
+
 export class FlameSim {
   readonly width: number;
   readonly rows: number;
   frame = 0;
   private heat: number[];
   private particles: Particle[] = [];
+  private wisps: Wisp[] = [];
   private readonly random: () => number;
+  private readonly noise: (x: number, y: number) => number;
   private readonly center: number;
-  /** Live reach of each tongue this frame (fraction of the grid). */
-  private reach: number[] = TONGUES.map((tongue) => tongue.height);
-  private wind = 0;
+  /** Current flame height (fraction of the grid) and horizontal lean of the tip. */
+  private height = 0.9;
+  private sway = 0;
 
   constructor(seed = 1, width = FLAME_WIDTH, rows = SIM_ROWS) {
     this.width = width;
@@ -105,92 +112,78 @@ export class FlameSim {
     this.center = (width - 1) / 2;
     this.heat = new Array(width * rows).fill(0);
     this.random = prng(seed);
+    this.noise = valueNoise(seed);
     for (let index = 0; index < WARMUP; index++) this.step();
     this.frame = 0;
   }
 
-  /** Center column of tongue `index` at height fraction `along` of its reach. */
-  private tongueX(index: number, along: number): number {
-    const tongue = TONGUES[index]!;
-    // Roots gather near the center and fan out to full offset by mid-height: a narrow base, a full belly.
-    const spread = ROOT + (1 - ROOT) * Math.min(1, along / 0.5);
-    return this.center + tongue.offset * spread + (tongue.lean + this.wind * 1.4) * along * along;
+  /**
+   * Half width at height fraction `h` of the flame: a circular bulb below the belly, then a
+   * smooth taper to the tip. The base is rounded, not flat, and narrower than the belly.
+   */
+  private profile(h: number): number {
+    if (h < BELLY) {
+      const k = (BELLY - h) / (BELLY + 0.03);
+      return BELLY_HALF_WIDTH * Math.sqrt(Math.max(0, 1 - k * k));
+    }
+    return BELLY_HALF_WIDTH * Math.pow(Math.max(0, 1 - (h - BELLY) / (1 - BELLY)), 1.25);
   }
 
-  /** The hottest a cell may be: a solid body at the base, then the union of the tongues. */
-  private envelope(x: number, y: number): number {
-    if (x <= 0 || x >= this.width - 1) return 0;
-    const v = (this.rows - 1 - y) / (this.rows - 1);
-    let cap = 0;
-    if (v < BODY) {
-      // The body swells from a narrow base toward the middle of the flame.
-      const distance = Math.abs(x - this.center) / (3.4 + v * 11);
-      if (distance < 1) cap = MAX_HEAT * Math.min(1, 1.3 - distance * 0.6);
-    }
-    for (let index = 0; index < TONGUES.length; index++) {
-      const reach = this.reach[index]!;
-      if (v > reach) continue;
-      const along = v / reach;
-      const half = TONGUES[index]!.width * Math.pow(1 - along, 0.7) + 0.35;
-      const distance = Math.abs(x - this.tongueX(index, along)) / half;
-      if (distance < 1) cap = Math.max(cap, MAX_HEAT * Math.min(1, 1.25 - distance * 0.5));
-    }
-    return Math.round(cap);
-  }
-
-  /** Each tongue breathes on its own sine and sometimes licks upward. */
-  private flicker(): void {
+  /** Center column at height fraction `h`: the tip sways and wanders more than the base. */
+  private axis(h: number): number {
     const t = this.frame;
-    this.wind = Math.sin(t * 0.13) * 0.6 + Math.sin(t * 0.041 + 1.3) * 0.4;
-    this.reach = TONGUES.map((tongue, index) => {
-      const breath = 0.88 + 0.16 * Math.sin(t * tongue.speed + tongue.phase);
-      const lick = this.random() < 0.14 ? 0.18 : 0;
-      const previous = this.reach[index] ?? tongue.height;
-      return Math.min(1, Math.max(0.2, previous * 0.45 + tongue.height * (breath + lick) * 0.55));
-    });
+    return this.center + this.sway * h * h + (this.noise(h * 1.6, t * 0.06 + 11) - 0.5) * 1.6 * h;
   }
 
   step(): void {
     const { width, rows, random } = this;
+    const t = this.frame;
+    // Slow, layered motion: breathing height and a sway that eases side to side.
+    this.height = 0.84 + 0.1 * this.noise(t * 0.05, 3.1) + 0.05 * Math.sin(t * 0.21);
+    this.sway = 1.4 * Math.sin(t * 0.07) + 0.6 * (this.noise(t * 0.09, 7.3) - 0.5) * 2;
     const heat = this.heat;
-    const base = (rows - 1) * width;
-    this.flicker();
-    const wind = this.wind;
-    // A narrow, flickering bed of coals: hot core, cooler shoulders, nothing at the edges.
-    for (let x = 0; x < width; x++) {
-      const distance = Math.abs(x - this.center);
-      heat[base + x] = distance <= 2 ? MAX_HEAT - (random() < 0.18 ? 1 : 0)
-        : distance <= 3 ? MAX_HEAT - 2 - Math.floor(random() * 2) : 0;
-    }
-    for (let y = 1; y < rows; y++) {
-      // Later writes win where spreads overlap; alternating the scan direction keeps that from
-      // pulling the fire toward one side.
-      const reverse = (y + this.frame) % 2 === 1;
-      for (let step = 0; step < width; step++) {
-        const x = reverse ? width - 1 - step : step;
-        const source = heat[y * width + x]!;
-        const roll = random();
-        const spread = roll < 0.25 ? 0 : roll < 0.75 ? 1 : 2;
-        let target = x - spread + 1;
-        if (random() < Math.abs(wind) * 0.3) target += Math.sign(wind);
-        if (target < 0 || target >= width) continue;
-        const cooled = source - (random() < COOLING ? 1 : 0);
-        heat[(y - 1) * width + target] = Math.max(0, Math.min(this.envelope(target, y - 1), cooled));
+    for (let y = 0; y < rows; y++) {
+      const v = (rows - 1 - y) / (rows - 1);
+      const h = v / this.height;
+      const axis = this.axis(Math.min(1, h));
+      // Edges ripple upward; the ripple grows toward the tip so the top licks while the base stays calm.
+      const ripple = 1 + (this.noise(h * 3.2 - t * 0.22, 5.5) - 0.5) * (0.08 + 0.85 * h);
+      const half = h > 1 ? 0 : this.profile(h) * ripple;
+      for (let x = 0; x < width; x++) {
+        let value = 0;
+        if (half > 0.2 && x > 0 && x < width - 1) {
+          const d = Math.abs(x - axis) / half;
+          if (d < 1) {
+            // Hot, pale core low in the flame, cooling to red at the rim and the tip.
+            const core = Math.min(1, 1.3 - 0.95 * h);
+            const texture = 0.88 + 0.24 * this.noise(x * 0.8, y * 0.55 - t * 0.35);
+            value = MAX_HEAT * (1 - Math.pow(d, 1.8)) * core * texture;
+          }
+        }
+        heat[y * width + x] = Math.max(0, Math.min(MAX_HEAT, Math.round(value)));
       }
     }
-    // Fuel each tongue's core so its spike stays lit to the tip; the spread feathers it.
-    for (let index = 0; index < TONGUES.length; index++) {
-      const top = Math.round((rows - 1) * (1 - this.reach[index]!));
-      for (let y = rows - 2; y > top; y--) {
-        if (random() > 0.7) continue;
-        const along = (rows - 1 - y) / ((rows - 1) * this.reach[index]!);
-        const x = Math.round(this.tongueX(index, along));
-        const at = y * width + x;
-        heat[at] = Math.max(heat[at]!, Math.min(this.envelope(x, y), Math.round(2 + (MAX_HEAT - 2) * (1 - along))));
-      }
-    }
+    this.moveWisps();
     this.moveParticles();
     this.frame++;
+  }
+
+  /** Small pieces of flame that break off the tip, rise and fade. */
+  private moveWisps(): void {
+    const { width, rows, random, heat } = this;
+    this.wisps = this.wisps.map((wisp) => ({ ...wisp, y: wisp.y + wisp.vy, x: wisp.x + this.sway * 0.05, life: wisp.life - 1 }))
+      .filter((wisp) => wisp.life > 0 && wisp.y >= 0);
+    if (this.wisps.length < MAX_WISPS && random() < 0.09) {
+      const tip = Math.round((rows - 1) * (1 - this.height));
+      const max = 4 + Math.floor(random() * 4);
+      this.wisps.push({ x: this.axis(1), y: Math.max(0, tip - 1), vy: -0.6 - random() * 0.4, life: max, max });
+    }
+    for (const wisp of this.wisps) {
+      const x = Math.round(wisp.x), y = Math.round(wisp.y);
+      if (x < 1 || x >= width - 1 || y < 0 || y >= rows) continue;
+      const value = Math.round(2 + 3 * (wisp.life / wisp.max));
+      heat[y * width + x] = Math.max(heat[y * width + x]!, value);
+    }
   }
 
   private topOf(x: number): number | undefined {
@@ -205,18 +198,17 @@ export class FlameSim {
       .filter((particle) => particle.life > 0 && particle.y >= 0 && particle.x >= 1 && particle.x < this.width - 1.5);
     const spawn = (spark: boolean) => {
       if (this.particles.length >= MAX_PARTICLES) return;
-      // Particles tear off the tongue tips.
-      const index = Math.floor(random() * TONGUES.length);
-      const x = Math.round(this.tongueX(index, 0.9) + (random() - 0.5) * 2);
+      // Embers lift off the upper flame, near its swaying axis.
+      const x = Math.round(this.axis(0.8) + (random() - 0.5) * 5);
       const top = this.topOf(Math.max(0, Math.min(this.width - 1, x)));
       if (top == null) return;
       const max = spark ? 2 + Math.floor(random() * 3) : 8 + Math.floor(random() * 13);
       this.particles.push({ x, y: Math.max(0, top - 1), vy: spark ? -1.1 - random() * 0.4 : -0.3 - random() * 0.5,
         drift: (random() - 0.5) * 0.5, life: max, max, spark });
     };
-    if (random() < 0.35) spawn(false);
-    if (random() < 0.15) spawn(false);
-    if (random() < 0.12) spawn(true);
+    if (random() < 0.3) spawn(false);
+    if (random() < 0.12) spawn(false);
+    if (random() < 0.08) spawn(true);
   }
 
   particleCount(): number { return this.particles.length; }

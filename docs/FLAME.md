@@ -6,14 +6,13 @@ Both are original, dependency-free and rendered as plain terminal text inside Pi
 
 ### Simulation
 
-A heat-spreading cellular automaton on a 21 × 24 grid of intensities `0…9`. The width is odd so the fire has a true center column, which also lines up with the `π` beneath it.
+One continuous flame on a 21 × 24 grid of intensities `0…9`. The width is odd so the flame has a true center column, which also lines up with the `π` beneath it.
 
-1. **Source row.** The bottom row is a narrow bed of coals: the center five cells are near-maximum heat (with a slight flicker), one more on each side is warm, and the rest is cold.
-2. **Spread.** Every frame, each cell's heat rises one row and drifts horizontally by −1, 0 or +1 (straight up is twice as likely). It loses one heat step with probability `0.22`. The scan direction alternates per row and frame, because where spreads overlap the last write wins; a fixed direction would pull the fire toward one side.
-3. **Tongues.** Five flame tongues (a tall center, two shoulders, two short outer licks) each have a rest height, a base width that tapers toward the tip, and an outward lean. Their roots start close to the center and fan out to full spacing by mid-height, so the flame is narrow at the base and fullest in its belly. Each one breathes on its own sine wave and sometimes licks 18% higher, so the silhouette keeps breaking into separate protruding spikes.
-4. **Envelope.** A cell's heat is capped by a short body that swells from the base upward, plus the union of the tongues. Each tongue's core is also fed a little heat along its spine, so spikes stay lit to their dark-red tips while the spread feathers their edges.
-5. **Wind.** Two slow sine waves combine into a gentle bias that bends the tongue tips and occasionally pushes rising heat sideways.
-6. **Particles.** At most eight live particles, torn off the tongue tips. Embers rise at 0.3–0.8 rows/frame with a small drift, living 8–20 frames (`•` → `∙` → `·`, fading down the palette). Sparks (≈12% per frame) are fast, bright `✦`/`*` and last 2–4 frames. Particles only draw over empty cells and never on the outer columns.
+1. **Profile.** The half width at a height `h` (0 = base, 1 = tip) is a circular bulb below the belly (`h < 0.3`, up to 5.6 columns) and a smooth taper above it. The base is rounded and narrower than the belly, never a flat bar.
+2. **Motion.** Everything moves through smooth, seeded value noise rather than per-cell randomness: the flame's height breathes, the axis sways and wanders (more at the tip than at the base), and the edges ripple upward — barely at the base, strongly near the tip, so the top licks while the bottom stays calm.
+3. **Heat.** Each cell's heat falls off from the axis toward the rim (`1 − d^1.8`) and cools with height, so the core low in the flame is pale gold and the rim and tip are orange-red. A slow noise texture keeps the interior shimmering.
+4. **Wisps.** Occasionally a small piece breaks off the tip, rises and fades (at most two at a time).
+5. **Particles.** At most eight live particles lift off the upper flame near its axis. Embers rise at 0.3–0.8 rows/frame with a small drift, living 8–20 frames (`•` → `∙` → `·`, fading down the palette). Sparks (≈8% per frame) are fast, bright `✦`/`*` and last 2–4 frames. Particles only draw over empty cells and never on the outer columns.
 
 Randomness comes from a seeded PRNG (mulberry32), and the simulation warms up for 28 steps. So `flameFrame(frame, seed)` is a pure function: tests are deterministic, motion-off shows a still-lit frame, and **Refresh** simply picks a new seed.
 

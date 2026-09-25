@@ -14,7 +14,7 @@ The showcase is captured from a real pi-jar terminal session: the torch-style `�
 
 | Area | What you get |
 | --- | --- |
-| **Welcome** | A fierce pixel flame with several licking tongues, embers and sparks over a large `π`; a large, flame-colored welcome message up top; a live card with project, git, session, plan, goal, tasks and roles; clickable actions (fullscreen) or keyboard hints (regular mode). |
+| **Welcome** | A natural pixel flame (rounded base, swaying tip, wisps, embers and sparks) over a large `π`; a large, flame-colored welcome message up top; a live card with project, git, session, plan, goal, tasks and roles; clickable actions (fullscreen) or keyboard hints (regular mode). |
 | **Composer** | Rounded input that grows with your draft (up to ~60% of the terminal), click-to-place cursor in fullscreen, dim **next-prompt suggestions** you accept with <kbd>Tab</kbd>, and **Ember** — a tiny flame mascot that blinks, cheers, focuses, dozes and reacts. |
 | **Plan mode** | Read-only exploration; the agent must write a structured plan file and submit it. You review it in a split view (headings on the left, section on the right) and approve, compact-and-approve, refine or stop. |
 | **Goal mode** | Set an outcome; the agent must break it into tracked tasks and keeps working until they are done, then an **auditor** pass verifies the goal before it can be marked complete. |
@@ -81,7 +81,7 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 
 The welcome stays until your first prompt, then dissolves (or hides immediately with motion off).
 
-- **Flame** — a small heat-spreading fire simulation shaped by five independently flickering tongues, so it breaks into several protruding spikes, drawn with half-block "pixels" in a ten-step ember→gold palette. Embers and sparks tear off the tips, and a gentle wind bends them. Every frame is deterministic per seed, so motion-off shows a frozen, still-lit flame. Terminals without 24-bit color get shaded blocks in theme colors. See [docs/FLAME.md](docs/FLAME.md).
+- **Flame** — one continuous flame with a rounded base and a tip that sways and licks, animated with smooth noise and drawn with half-block "pixels" in a ten-step ember→gold palette. Wisps break off the tip; embers and sparks rise from it. Every frame is deterministic per seed, so motion-off shows a frozen, still-lit flame. Terminals without 24-bit color get shaded blocks in theme colors. See [docs/FLAME.md](docs/FLAME.md).
 - **Card** — `pi-jar` version, model, effort and active role; a large hopeful message; project + git branch/dirty; context, quota and cost; plan state; goal progress; open tasks with the next one; configured roles; live teammates (other extensions and `jar_delegate` subagents); and **RECENT** — the last three sessions with their goal and plan. Click a recent row (or run `/jar resume N`) to continue it.
 - **Actions** — `[ ⚙ Settings ]  [ ↻ Refresh ]  [ ◆ Roles ]  [ ▤ Plan ]  [ ◎ Goal ]` in fullscreen (act on press). In regular mode the same row shows `ctrl+alt+s settings · ctrl+alt+r refresh · /roles · /plan · /goal`.
 
