@@ -1,0 +1,45 @@
+tests/delegate.test.ts
+  13e973c37a139510 1-80
+src/attachments.ts
+  13e973c37a139510 1-79
+src/prompt-search.ts
+  13e973c37a139510 1-83
+src/delegate.ts
+  13e973c37a139510 1-208
+tests/changes.test.ts
+  13e973c37a139510 1-18,20-110
+src/diff-view.ts
+  13e973c37a139510 2-7,12-21,23-130,150
+tests/composer-extras.test.ts
+  13e973c37a139510 1-76
+tests/shells.test.ts
+  13e973c37a139510 1-78
+src/session-gallery.ts
+  13e973c37a139510 1-13,15-52
+src/changes.ts
+  13e973c37a139510 1-46,48-106,110-146
+tests/session-gallery.test.ts
+  13e973c37a139510 1-40,42-49
+src/shells.ts
+  13e973c37a139510 1-86,88-212,214-265,267-311
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "1419a602ba2184c53b1753772b6ee04ffd7ce24d",
+  "prompts": {
+    "13e973c37a139510": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c38be8cc-b595-4afd-b832-7229d909e32a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 1399,
+      "total_deletions": 0,
+      "accepted_lines": 1387,
+      "overriden_lines": 9
+    }
+  }
+}
