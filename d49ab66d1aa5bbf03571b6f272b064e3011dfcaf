@@ -1,0 +1,41 @@
+src/commit.ts
+  13e973c37a139510 1-61
+tests/advisor.test.ts
+  13e973c37a139510 1-89
+src/info-panels.ts
+  13e973c37a139510 2-27,32-48,54,56-75
+tests/commit.test.ts
+  13e973c37a139510 1-54
+src/advisor.ts
+  13e973c37a139510 1-113,115-130,132-194
+src/panel.ts
+  13e973c37a139510 1-44,47,51-90
+tests/info-panels.test.ts
+  13e973c37a139510 1-70,72-92
+src/side-model.ts
+  13e973c37a139510 1-48
+src/context-view.ts
+  13e973c37a139510 1-73,75-84,89-103,106-141
+src/usage-view.ts
+  13e973c37a139510 1-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "d49ab66d1aa5bbf03571b6f272b064e3011dfcaf",
+  "prompts": {
+    "13e973c37a139510": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c38be8cc-b595-4afd-b832-7229d909e32a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 934,
+      "total_deletions": 0,
+      "accepted_lines": 916,
+      "overriden_lines": 12
+    }
+  }
+}
