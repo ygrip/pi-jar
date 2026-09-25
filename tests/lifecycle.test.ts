@@ -16,7 +16,7 @@ after(() => {
   rmSync(testAgentDir, { recursive: true, force: true });
 });
 
-test("quota starts enabled without contacting unsupported providers and can be disabled", async () => {
+test("quota waits for startup to settle, skips unsupported providers and can be toggled", async () => {
   const events = new Map<string, Function>();
   let footer: { render(width: number): string[] } | undefined;
   let authCalls = 0;
@@ -37,6 +37,10 @@ test("quota starts enabled without contacting unsupported providers and can be d
     registerCommand(_name: string, options: { handler: Function }) { command = options.handler; }
   } as never);
   events.get("session_start")?.({}, ctx);
+  footer?.render(80);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(authCalls, 0, "no network lookup during startup");
+  await command?.("quota on", ctx);
   footer?.render(80);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(authCalls, 1);

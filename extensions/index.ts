@@ -58,6 +58,9 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeFrame = 0;
   let welcomeDismiss = 0;
   let welcomeTui: TUI | undefined;
+  /** Background work (quota, session files, git) waits this long after startup. */
+  const STARTUP_GRACE_MS = 1500;
+  let quotaDisabledByUser = false;
   let welcomeGit: AbortController | undefined;
   let welcomeBranch = (): string | null => null;
   let refreshWelcome: (() => void) | undefined;
@@ -258,18 +261,24 @@ export default function piJar(pi: ExtensionAPI): void {
         });
       };
       welcomeRecent = [];
-      // Session gallery loads in the background and never delays the first paint.
-      void loadRecent(ctx).then((recent) => {
-        if (git.signal.aborted || welcomeGit !== git || welcomeDismiss) return;
-        welcomeRecent = recent;
-        (info as { recent?: unknown }).recent = recent.map((session) => ({ title: session.title, age: ago(session.modified),
-          ...(session.goal ? { goal: session.goal } : {}), ...(session.plan ? { plan: session.plan } : {}) }));
-        welcomeTui?.requestRender();
-      }).catch((error) => console.error("pi-jar: recent sessions unavailable", error));
-      if (ctx.cwd && existsSync(ctx.cwd)) {
-        if (!branch) sample(["branch", "--show-current"], (output) => { info.branch = output.trim() || undefined; });
-        sample(["status", "--porcelain"], (output) => { info.dirty = !!output.trim(); });
-      }
+      // Background reads (session files, git) wait until startup settles so they never compete
+      // with Pi loading other extensions; the card fills in when they finish.
+      const background = setTimeout(() => {
+        if (git.signal.aborted || welcomeGit !== git) return;
+        void loadRecent(ctx).then((recent) => {
+          if (git.signal.aborted || welcomeGit !== git || welcomeDismiss) return;
+          welcomeRecent = recent;
+          (info as { recent?: unknown }).recent = recent.map((session) => ({ title: session.title, age: ago(session.modified),
+            ...(session.goal ? { goal: session.goal } : {}), ...(session.plan ? { plan: session.plan } : {}) }));
+          welcomeTui?.requestRender();
+        }).catch((error) => console.error("pi-jar: recent sessions unavailable", error));
+        if (ctx.cwd && existsSync(ctx.cwd)) {
+          if (!branch) sample(["branch", "--show-current"], (output) => { info.branch = output.trim() || undefined; });
+          sample(["status", "--porcelain"], (output) => { info.dirty = !!output.trim(); });
+        }
+      }, STARTUP_GRACE_MS);
+      background.unref?.();
+      git.signal.addEventListener("abort", () => clearTimeout(background), { once: true });
       refreshWelcome = () => {
         info.message = hopefulWelcomeMessage(Math.random, info.message);
         info.flameSeed = 1 + Math.floor(Math.random() * 1000);
@@ -495,7 +504,12 @@ export default function piJar(pi: ExtensionAPI): void {
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
       () => footerTui?.requestRender()
     );
-    quotaCache.enabled = true;
+    // Hold the network lookup until startup settles; the footer shows it once it arrives.
+    quotaCache.enabled = false;
+    const cache = quotaCache;
+    const enableQuota = setTimeout(() => { if (quotaCache === cache && !quotaDisabledByUser) { cache.enabled = true; footerTui?.requestRender(); } }, STARTUP_GRACE_MS);
+    enableQuota.unref?.();
+    quotaDisabledByUser = false;
     updateCost(ctx);
     installUi(ctx);
     composer.setMascot(visualSettings.mascot);
@@ -736,8 +750,8 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "animations off") applyVisualSettings({ ...visualSettings, animations: false }, ctx);
       else if (command === "ui on") applyVisualSettings({ ...visualSettings, ui: true }, ctx);
       else if (command === "ui off") applyVisualSettings({ ...visualSettings, ui: false }, ctx);
-      else if (command === "quota on" && quotaCache) quotaCache.enabled = true;
-      else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaCache.stop(); }
+      else if (command === "quota on" && quotaCache) { quotaCache.enabled = true; quotaDisabledByUser = false; }
+      else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaDisabledByUser = true; quotaCache.stop(); }
       else {
         ctx.ui.notify("Usage: /jar [status|settings|sessions [search]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
