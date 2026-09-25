@@ -6,6 +6,8 @@ pi-jar should feel technical, calm and readable, warm enough not to look like an
 
 Rule of thumb: **state first, useful telemetry second, decoration last.** Every animation carries meaning, and everything still works with motion off.
 
+The public README demo is intentionally a real terminal capture rather than a mockup. It should show the flame, workspace card and composer at a readable scale without presenting decorative states that users cannot actually reach. See [SHOWCASE.md](SHOWCASE.md) for capture rules.
+
 ## Palette
 
 | Purpose | Color |

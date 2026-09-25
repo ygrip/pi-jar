@@ -1,8 +1,12 @@
 # pi-jar
 
-A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earendil-works/pi): a pixel-fire welcome, an expressive composer, first-class **plan**, **goal** and **role** workflows, and a calm, responsive footer.
+A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earendil-works/pi). pi-jar turns the terminal into a more expressive agent workspace with a living pixel-fire welcome, an adaptive composer, first-class **plan**, **goal** and **role** workflows, tracked tasks, reviewable changes, background shells and parallel subagents.
 
 > Works with the current `@earendil-works/*` Pi API. Pi's core packages are peer dependencies (`"*"`), so pi-jar always runs against the Pi you have installed; it is tested against the latest release (0.87.x).
+
+## See it in action
+
+The README demo is captured from a real pi-jar terminal session and shows the animated torch-style `π`, live workspace state, tasks, roles and composer together. The optimized recording lives at `docs/assets/pi-jar-demo.gif`; capture and media guidelines are documented in [docs/SHOWCASE.md](docs/SHOWCASE.md).
 
 ## Highlights
 
@@ -225,6 +229,7 @@ pi-jar/
 
 ## Documentation
 
+- [docs/SHOWCASE.md](docs/SHOWCASE.md) — README demo capture and media guidelines.
 - [docs/WORKFLOWS.md](docs/WORKFLOWS.md) — plan, goal, roles and suggestions in depth.
 - [docs/DESIGN.md](docs/DESIGN.md) — palette, motion, layout and accessibility.
 - [docs/FLAME.md](docs/FLAME.md) — how the flame and mascot are drawn.

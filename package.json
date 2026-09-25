@@ -1,7 +1,7 @@
 {
   "name": "pi-jar",
   "version": "0.1.0",
-  "description": "Warm, role-aware TUI and workflow extension for Pi: pixel-fire welcome, expressive composer, plan and goal modes, and model roles.",
+  "description": "A warm, role-aware Pi terminal workspace with animated UI, plan and goal workflows, tasks, change review, model roles, background shells and subagents.",
   "type": "module",
   "license": "MIT",
   "repository": {
