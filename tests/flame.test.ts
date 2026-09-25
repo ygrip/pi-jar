@@ -54,6 +54,29 @@ test("flame breaks into several protruding tongues that reach the top", () => {
   assert.ok(tall > 20, `reached the top in ${tall}/60 frames`);
 });
 
+test("flame is centered on its middle column and narrower at the base than the belly", () => {
+  for (const seed of [1, 7, 42]) {
+    const sim = new FlameSim(seed);
+    let sum = 0, weight = 0;
+    const span = new Array(FLAME_ROWS).fill(0);
+    for (let frame = 0; frame < 300; frame++) {
+      sim.step();
+      sim.render(plain, false).map(stripTerminalSequences).forEach((row, index) => {
+        const fire = row.replace(/[•∙·✦*]/g, " ");
+        const start = fire.search(/\S/);
+        if (start < 0) return;
+        span[index] += fire.trimEnd().length - start;
+        for (let x = start; x < fire.length; x++) if (fire[x] !== " ") { sum += x; weight++; }
+      });
+    }
+    const centroid = sum / weight;
+    assert.ok(Math.abs(centroid - (FLAME_WIDTH - 1) / 2) < 0.15, `seed ${seed}: centroid ${centroid.toFixed(2)}`);
+    const belly = Math.max(...span);
+    assert.ok(span.at(-1)! < belly * 0.7, `seed ${seed}: base ${span.at(-1)} vs belly ${belly}`);
+  }
+  assert.equal(FLAME_WIDTH % 2, 1, "odd width keeps a true center column");
+});
+
 test("prng and truecolor detection are stable", () => {
   const a = prng(42), b = prng(42);
   for (let index = 0; index < 5; index++) assert.equal(a(), b());

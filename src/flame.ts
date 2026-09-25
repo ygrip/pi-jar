@@ -4,7 +4,8 @@
  * Every frame is a pure function of (seed, frame) so tests and motion-off stay stable.
  */
 
-export const FLAME_WIDTH = 22;
+/** Odd, so the flame is centered on a whole column (and on the π beneath it). */
+export const FLAME_WIDTH = 21;
 /** Simulated rows; rendered as FLAME_ROWS terminal rows. */
 const SIM_ROWS = 24;
 export const FLAME_ROWS = SIM_ROWS / 2;
@@ -21,13 +22,15 @@ const COOLING = 0.22;
  */
 const TONGUES = [
   { offset: 0, height: 1, width: 2.1, phase: 0, speed: 0.23, lean: 0 },
-  { offset: -3.2, height: 0.82, width: 1.5, phase: 1.7, speed: 0.31, lean: -1.4 },
-  { offset: 3.2, height: 0.86, width: 1.5, phase: 3.1, speed: 0.27, lean: 1.4 },
-  { offset: -6, height: 0.6, width: 1.1, phase: 4.4, speed: 0.37, lean: -1.7 },
-  { offset: 6, height: 0.64, width: 1.1, phase: 0.9, speed: 0.34, lean: 1.7 }
+  { offset: -3.4, height: 0.84, width: 1.5, phase: 1.7, speed: 0.31, lean: -1 },
+  { offset: 3.4, height: 0.84, width: 1.5, phase: 3.1, speed: 0.27, lean: 1 },
+  { offset: -5.6, height: 0.6, width: 1.1, phase: 4.4, speed: 0.37, lean: -1.2 },
+  { offset: 5.6, height: 0.6, width: 1.1, phase: 0.9, speed: 0.34, lean: 1.2 }
 ] as const;
 /** Fraction of the grid covered by the solid body that joins the tongues. */
-const BODY = 0.17;
+const BODY = 0.2;
+/** Tongue roots start this fraction of their offset from center, so the base is narrower than the middle. */
+const ROOT = 0.35;
 
 /** Heat ramp from deep ember red to a pale-gold core. Index 0 is transparent. */
 export const FLAME_RAMP = [
@@ -109,7 +112,9 @@ export class FlameSim {
   /** Center column of tongue `index` at height fraction `along` of its reach. */
   private tongueX(index: number, along: number): number {
     const tongue = TONGUES[index]!;
-    return this.center + tongue.offset * (1 - 0.25 * along) + (tongue.lean + this.wind * 1.4) * along * along;
+    // Roots gather near the center and fan out to full offset by mid-height: a narrow base, a full belly.
+    const spread = ROOT + (1 - ROOT) * Math.min(1, along / 0.5);
+    return this.center + tongue.offset * spread + (tongue.lean + this.wind * 1.4) * along * along;
   }
 
   /** The hottest a cell may be: a solid body at the base, then the union of the tongues. */
@@ -118,7 +123,8 @@ export class FlameSim {
     const v = (this.rows - 1 - y) / (this.rows - 1);
     let cap = 0;
     if (v < BODY) {
-      const distance = Math.abs(x - this.center) / (7.8 - v * 9);
+      // The body swells from a narrow base toward the middle of the flame.
+      const distance = Math.abs(x - this.center) / (3.4 + v * 11);
       if (distance < 1) cap = MAX_HEAT * Math.min(1, 1.3 - distance * 0.6);
     }
     for (let index = 0; index < TONGUES.length; index++) {
@@ -150,14 +156,18 @@ export class FlameSim {
     const base = (rows - 1) * width;
     this.flicker();
     const wind = this.wind;
-    // A flickering bed of coals: hot across the body, cooler shoulders, nothing at the edges.
+    // A narrow, flickering bed of coals: hot core, cooler shoulders, nothing at the edges.
     for (let x = 0; x < width; x++) {
       const distance = Math.abs(x - this.center);
-      heat[base + x] = distance <= 5 ? MAX_HEAT - (random() < 0.18 ? 1 : 0)
-        : distance <= 7 ? MAX_HEAT - 2 - Math.floor(random() * 2) : 0;
+      heat[base + x] = distance <= 2 ? MAX_HEAT - (random() < 0.18 ? 1 : 0)
+        : distance <= 3 ? MAX_HEAT - 2 - Math.floor(random() * 2) : 0;
     }
     for (let y = 1; y < rows; y++) {
-      for (let x = 0; x < width; x++) {
+      // Later writes win where spreads overlap; alternating the scan direction keeps that from
+      // pulling the fire toward one side.
+      const reverse = (y + this.frame) % 2 === 1;
+      for (let step = 0; step < width; step++) {
+        const x = reverse ? width - 1 - step : step;
         const source = heat[y * width + x]!;
         const roll = random();
         const spread = roll < 0.25 ? 0 : roll < 0.75 ? 1 : 2;
