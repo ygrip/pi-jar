@@ -13,7 +13,11 @@ A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earend
 | **Plan mode** | Read-only exploration; the agent must write a structured plan file and submit it. You review it in a split view (headings on the left, section on the right) and approve, compact-and-approve, refine or stop. |
 | **Goal mode** | Set an outcome; the agent must break it into tracked tasks and keeps working until they are done, then an **auditor** pass verifies the goal before it can be marked complete. |
 | **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `advisor`, `task`, `commit`, plus your own) with `@alias` chains, `:effort` suffixes and project overrides; used automatically by plan and goal modes. |
-| **Tasks & questions** | Branch-aware `jar_todo` checklist the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
+| **Tasks & questions** | A Claude-style `jar_todo` checklist the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
+| **Change review** | Every file the agent edits is remembered as it was; `/diff` (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) shows changed files next to a colored diff, with accept or revert per file or all at once. |
+| **Background shells** | `jar_shell` runs dev servers, watchers and long tests in the background; the agent is woken when a watch pattern matches or the process exits, so it never polls. `/jar shells` tails or kills them. |
+| **Subagents** | `jar_delegate` fans out up to four read-only (or opt-in editing) subagents in parallel on your model roles; they show up live as teammates on the welcome card and footer. |
+| **Sessions & history** | Recent sessions (with their goal and plan) on the welcome card, one click from resuming; <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> searches earlier prompts; pasted images show as chips under the composer. |
 | **Footer & themes** | Responsive footer (model, effort, session, cwd, context, RAM, cost, quota, goal, roles, branch) and seven dark themes. |
 
 ## Install
@@ -45,6 +49,9 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | `/jar status` | One-line status summary. |
 | `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Human view/editor for the agent's checklist. |
 | `/jar history` | Read-only conversation timeline for the active branch. |
+| `/diff` | Review, accept or revert the files the agent changed. |
+| `/jar shells` | Background shells: live output, kill. |
+| `/jar resume [N]` | Resume recent session `N` from the welcome list, or pick one. |
 | `/jar sessions [query]` · `/jar name <title>` | Search/switch sessions; name the current one. |
 | `/jar welcome` | Replay the welcome screen. |
 | `/jar ask [question]` | Answer a question in a dialog and insert the answer into the editor. |
@@ -60,6 +67,8 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd> | Refresh the welcome (new message and flame), or show it again |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> | Toggle plan mode |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> | Cycle model roles (`cycleOrder`) |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> | Review agent changes (`/diff`) |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> | Search earlier prompts into the composer |
 | <kbd>Tab</kbd> / <kbd>→</kbd> in an empty composer | Accept the dim suggestion into the input (it is not sent) |
 
 ## Welcome screen
@@ -67,13 +76,15 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 The welcome stays until your first prompt, then dissolves (or hides immediately with motion off).
 
 - **Flame** — a small heat-spreading fire simulation shaped by five independently flickering tongues, so it breaks into several protruding spikes, drawn with half-block "pixels" in a ten-step ember→gold palette. Embers and sparks tear off the tips, and a gentle wind bends them. Every frame is deterministic per seed, so motion-off shows a frozen, still-lit flame. Terminals without 24-bit color get shaded blocks in theme colors. See [docs/FLAME.md](docs/FLAME.md).
-- **Card** — `pi-jar` version, model, effort and active role; project + git branch/dirty; context, quota and cost; plan state; goal progress; open tasks with the next one; configured roles; live teammates published by other extensions; a hopeful message.
+- **Card** — `pi-jar` version, model, effort and active role; a large hopeful message; project + git branch/dirty; context, quota and cost; plan state; goal progress; open tasks with the next one; configured roles; live teammates (other extensions and `jar_delegate` subagents); and **RECENT** — the last three sessions with their goal and plan. Click a recent row (or run `/jar resume N`) to continue it.
 - **Actions** — `[ ⚙ Settings ]  [ ↻ Refresh ]  [ ◆ Roles ]  [ ▤ Plan ]  [ ◎ Goal ]` in fullscreen (act on press). In regular mode the same row shows `ctrl+alt+s settings · ctrl+alt+r refresh · /roles · /plan · /goal`.
 
 ## Composer
 
 - **Grows with your draft**: the input expands to about 60% of the terminal before it scrolls (overflow shows `↑/↓ N more` in the border).
-- **Click to place the cursor** (fullscreen), including multi-line drafts. Autocomplete menus render below the frame.
+- **Click to place the cursor** (fullscreen), including multi-line drafts. Autocomplete menus (including Pi's `@file` fuzzy search) render below the frame.
+- **Image chips**: images you paste (<kbd>Ctrl</kbd>+<kbd>V</kbd>) or reference by path appear under the frame as `▣ pasted png · 1280×720 · 240 KB`.
+- **Prompt history search**: <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> fuzzy-searches every prompt in this session and the opening prompts of recent ones; <kbd>Enter</kbd> puts the pick in the composer to edit. <kbd>↑</kbd>/<kbd>↓</kbd> still walks Pi's history.
 - **Next-prompt suggestions**: when the agent finishes a request it proposes one likely next prompt (`jar_suggest`). It appears as dim ghost text in the empty input; <kbd>Tab</kbd> (or <kbd>→</kbd>, or a click on it) fills it in so you can edit and press <kbd>Enter</kbd>. Typing, sending, or a new run clears it. Toggle in settings.
 - **Ember the mascot** perches on the top-left of the input — the face sits in the border, the flickering tips just above:
 
@@ -165,6 +176,9 @@ Roles map a purpose to a model. They live in `~/.pi/agent/pi-jar-roles.json` (Pi
 
 - **`jar_todo`** — a Claude-style task list the agent keeps for any multi-step request. It writes the full list at once; each task is `pending`, `in_progress` (exactly one at a time) or `completed`, with an `activeForm` ("Running tests") that replaces the working spinner text while it runs. The live checklist above the composer shows `✔` struck-through done tasks, a bold `◼` current task and `☐` pending ones; a finished list stays until your next prompt. `/jar tasks` is your view/editor: `a` add, <kbd>Space</kbd>/<kbd>Enter</kbd> check, `e` edit, `d` delete, `f` filter.
 - **`jar_ask`** — structured questions: numbered options with descriptions, single or multi-select, *Type your own answer* (multi-line, paste-friendly) and *Chat about this* to discuss before choosing.
+- **`/diff`** — review what the agent changed since its first edit to each file: files with `+/−` counts on the left, a numbered, colored diff on the right. `a` accept (keep, stop tracking), `r` then `y` revert (restore the original, or remove a file it created), `A`/`R` for all. The footer shows `± N files · /diff` while anything is unreviewed. Only `edit`/`write` changes inside the project are tracked; shell-made changes are not.
+- **`jar_shell`** — `start` (with optional `name`, `watch` regex and `notify`), `list`, `output`, `kill`. Output is ANSI-stripped and bounded (2000 lines). When a watch matches or the process ends, a visible message wakes the agent (queued if it is busy). The footer shows `⚙ N shells`; `/jar shells` opens a live view (`x` kill, `f` follow). All shells stop when the session ends.
+- **`jar_delegate`** — up to four subagents run in parallel as separate one-shot Pi processes with a fresh context, on a role (default `task`, then `default`, then the current model). They are read-only (`read`, `grep`, `find`, `ls`) unless `write: true`; subagents cannot delegate further; aborting the turn stops them. Each shows as a working teammate until it finishes, and the tool result lists every report.
 - **`/jar history`** — separate, read-only timeline of the active branch (paging, search, expandable details). Pi's native transcript is untouched.
 - Pi's built-in read/shell/edit/write tool cards render compactly; the full output or diff stays one click or <kbd>Ctrl</kbd>+<kbd>O</kbd> away.
 
@@ -197,6 +211,11 @@ pi-jar/
 │   ├── model-roles.ts    role config, resolution, activation
 │   ├── roles-ui.ts       role manager
 │   ├── split-view.ts     shared two-pane frame
+│   ├── changes.ts        change tracker and line diff; diff-view.ts is /diff
+│   ├── shells.ts         background shells, jar_shell and /jar shells
+│   ├── delegate.ts       jar_delegate subagents
+│   ├── attachments.ts    image chips; prompt-search.ts is prompt history
+│   ├── session-gallery.ts recent sessions for the welcome
 │   ├── welcome.ts        welcome layout and hit-testing
 │   └── …                 footer, tasks, questions, history, settings, quota
 ├── themes/               native Pi themes

@@ -89,3 +89,35 @@ Resolution for a role name:
 - Its prompt guidelines ask the agent to call it once, last, when a request is finished; the result ends the turn, so it costs no extra model round.
 - If a completed turn did not suggest, a single hidden reminder asks for one (never while plan or goal automation owns the next step, and never after an interrupt).
 - The suggestion is sanitized to one line (≤ 160 characters) and kept in memory only. It is cleared by your next prompt, a new run, typing, or branch navigation.
+
+## Change review
+
+- A `tool_call` hook records a file's content right before the agent's **first** `edit` or `write` to it (project files only, up to 200 files, 1 MB each, text only). Later edits keep that baseline, so the review always shows everything since the agent started on the file.
+- `/diff` (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) compares the baseline with the file on disk using a line diff with 3 lines of context. Files that are back to their baseline drop out.
+- **Accept** forgets the baseline. **Revert** writes the baseline back (or removes a file the agent created) after a second key press to confirm. Errors are reported and the file stays listed.
+- Baselines live in memory for the session; changes made through `bash` or by you are not tracked.
+
+## Background shells
+
+```text
+jar_shell start {command, watch: "ready|error"}  →  s1 running
+      ↓ output (ANSI stripped, last 2000 lines)
+watch matches  or  process exits  →  pi-jar.shell message  →  agent wakes (or it is queued)
+```
+
+- Each shell runs `/bin/sh -c` in its own process group; `kill` sends SIGTERM to the group, then SIGKILL after 3 s. At most 8 run at once; the 20 most recent are kept.
+- A watch fires once per shell. With `notify: false` nothing wakes the agent; it can still read `output`.
+- In goal mode, starting a shell with a non-read-only command counts as a change and needs an open task, like `bash`.
+
+## Subagents
+
+- `jar_delegate` takes 1–4 tasks. Each runs `pi --mode json -p --no-session --model <role model> [--thinking <effort>] [--tools read,grep,find,ls] "<task>"` in the project directory, with `PI_JAR_CHILD=1`.
+- The model comes from the task's role (default `task`), falling back to `default` and then the current model.
+- Progress (tools used, turns, cost) streams into the tool card; each running subagent is published as a teammate for the welcome TEAM row and footer, and cleared when it ends.
+- Subagents time out after 20 minutes and stop when the turn is aborted. The result lists every report with its role, model and outcome. In goal mode, `write: true` needs an open task.
+
+## Sessions and prompt history
+
+- The welcome loads the three most recent sessions for the project (excluding the current one and empty ones) in the background, reading each file (up to 8 MB) for its latest pi-jar goal and plan title.
+- Clicking a recent row stages `/jar resume N` in the composer (switching sessions needs a command); `/jar resume` alone opens the searchable picker.
+- <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> collects every user prompt in the current session file (all branches, newest first) plus the opening prompt of up to 50 recent sessions, deduplicated, and fuzzy-filters as you type.

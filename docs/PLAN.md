@@ -39,6 +39,11 @@ A polished Pi package where the agent's work is visible at a glance, motion comm
 - [x] `jar_ask` structured questions
 - [x] `/jar history` read-only timeline
 - [x] publisher-driven teammate roles and quota windows
+- [x] change review (`/diff`): per-file baselines, split diff view, accept/revert
+- [x] background shells (`jar_shell`) with watch patterns that wake the agent
+- [x] parallel subagents (`jar_delegate`) on model roles, shown as live teammates
+- [x] composer image chips and prompt history search
+- [x] recent-session gallery on the welcome card and `/jar resume`
 
 ## Next
 

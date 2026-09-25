@@ -59,7 +59,7 @@ Card sections, top to bottom: header (version · model · effort · role), the *
 
 The Ember tip row sits above a rounded frame. The top border carries the face, the session title and the `↑ N more` overflow label; the bottom border carries `↓ N more` and dim key hints (hidden below 60 columns). Autocomplete menus render below the frame, aligned with the text. Ghost suggestions are dim and followed by `⇥ tab`.
 
-### Split views (plan view, roles)
+### Split views (plan view, roles, changes, shells)
 
 A shared frame (`src/split-view.ts`): title bar with a clickable `×`, a sidebar of `clamp(round(w × 0.26), 18, 32)` columns, a `│` divider, a body pane, a divider row, footer rows, and a closing border. Below 64 columns the sidebar collapses into a header pager.
 

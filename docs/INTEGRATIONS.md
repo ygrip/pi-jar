@@ -61,6 +61,10 @@ Hidden context messages (`pi-jar.plan-context`, `pi-jar.plan-reminder`, `pi-jar.
 | `jar_plan_submit` | submit a plan file for review (plan mode only) |
 | `jar_goal` | `get`, `complete` (with evidence, audit phase only), `block` |
 | `jar_suggest` | one next-prompt suggestion shown as composer ghost text |
+| `jar_shell` | background shells: `start` (`command`, `name`, `watch`, `notify`), `list`, `output`, `kill` |
+| `jar_delegate` | up to four parallel subagents (`tasks: [{task, name?, role?}]`, `write?`) |
+
+`jar_shell` events arrive as a visible `pi-jar.shell` custom message that triggers (or queues) an agent turn. `jar_delegate` runs child processes with `PI_JAR_CHILD=1`, which keeps pi-jar in the child from registering `jar_delegate` again, and publishes each running subagent through the role contract above as `pi-jar.role.delegate-<batch>-<n>`.
 
 ## Working signals and other managers
 
