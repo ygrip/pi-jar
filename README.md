@@ -1,173 +1,217 @@
 # pi-jar
 
-A role-aware, animated theme and TUI extension for [Pi](https://github.com/earendil-works/pi), inspired by the visual language of Setara and the multi-agent character of Punakawan.
+A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earendil-works/pi): a pixel-fire welcome, an expressive composer, first-class **plan**, **goal** and **role** workflows, and a calm, responsive footer.
 
-> **Status:** themed footer, first-class workflows and public-status adapter for `@earendil-works/*` Pi 0.85.1. Team Mode, Advisor Flow and SoL-Pi do not yet publish a pi-jar role contract here.
+> Works with the current `@earendil-works/*` Pi API. Pi's core packages are peer dependencies (`"*"`), so pi-jar always runs against the Pi you have installed; it is tested against the latest release (0.87.x).
 
-## What pi-jar is
+## Highlights
 
-pi-jar is not just a color theme. It is a Pi package that combines:
-
-- a Setara teal × Punakawan navy dark theme with six optional Punakawan-inspired accent presets;
-- observed Pi working states with steady, theme-colored wording and animated icons (static when motion is off);
-- publisher-driven teammate names and labels (including Gareng, Petruk or Bagong if a publisher uses them);
-- a responsive, softly rounded footer for model, colorized live thinking effort, session name, CWD, context percentage, process RAM (RSS), session cost, quota, branch and extension statuses; configure fields through `/jar settings` or `/jar footer`;
-- a welcome that remains until the first interactive prompt, then dissolves away (or hides immediately with motion off), with a taller torch-shaped `π`, a restrained, hand-drawn four-frame yellow/orange flame with a planted base and sparse rising embers, randomized hopeful copy, and a fullscreen Settings action (use `/jar settings` in regular mode);
-- a first-party, branch-aware native task tool that the agent is instructed to maintain automatically for multi-step work, plus a human-friendly `/jar tasks` view;
-- first-class `/plan` mode with real read-only tool gating, a dedicated plan review TUI, and explicit **implement now**, **compact then implement**, or **stop** actions;
-- a first-class `jar_ask` model tool for described numbered choices, multi-select checkboxes, custom pasted/multiline answers, and a **Chat about this** escape hatch;
-- a branch-aware `/goal` that stays visible in the footer and is injected into the agent context so `jar_todo` follows the active outcome automatically;
-- configurable `/roles` model assignments (`default`, `smol`, `slow`, `plan`, `commit`, `task`, `advisor`) with provider/model and optional thinking effort; the `plan` role is applied automatically while `/plan` is active;
-- a rounded composer with a tiny ember-faced pet whose flame and expression react to activity, plus a human session title; when Pi has no title, pi-jar derives a stable readable alias instead of exposing the raw thread id;
-- a centralized full-screen visual settings view with keyboard controls and clickable controls when Pi receives mouse events;
-- compact-by-default rendering for Pi's default read/shell/edit/write tools, with the real output or diff still available through click or Pi's native Ctrl+O;
-- a separate read-only `/jar history` conversation timeline for the active session branch.
-
-The design rule is simple: **role visibility first, useful telemetry second, decoration last.**
+| Area | What you get |
+| --- | --- |
+| **Welcome** | Animated pixel flame with randomized embers and sparks over a large `π`; a live card with project, git, session, plan, goal, tasks and roles; clickable actions (fullscreen) or keyboard hints (regular mode). |
+| **Composer** | Rounded input that grows with your draft (up to ~60% of the terminal), click-to-place cursor in fullscreen, dim **next-prompt suggestions** you accept with <kbd>Tab</kbd>, and **Ember** — a tiny flame mascot that blinks, cheers, focuses, dozes and reacts. |
+| **Plan mode** | Read-only exploration; the agent must write a structured plan file and submit it. You review it in a split view (headings on the left, section on the right) and approve, compact-and-approve, refine or stop. |
+| **Goal mode** | Set an outcome; the agent must break it into tracked tasks and keeps working until they are done, then an **auditor** pass verifies the goal before it can be marked complete. |
+| **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `advisor`, `task`, `commit`, plus your own) with `@alias` chains, `:effort` suffixes and project overrides; used automatically by plan and goal modes. |
+| **Tasks & questions** | Branch-aware `jar_todo` checklist the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
+| **Footer & themes** | Responsive footer (model, effort, session, cwd, context, RAM, cost, quota, goal, roles, branch) and seven dark themes. |
 
 ## Install
-
-Install directly from GitHub:
 
 ```bash
 pi install git:github.com/ygrip/pi-jar
 ```
 
-Then select the theme from Pi settings:
+Restart Pi, then pick a theme with `/settings`: `pi-jar-dark`, or `pi-jar-dark-<accent>` (`gray`, `pink`, `teal`, `azure`, `violet`, `amber`). For the closest match set your terminal background to `#0B1018` (Pi themes cannot change the terminal's own background).
 
-```text
-/settings
+Loading only `--extension ./extensions/index.ts` does not register the bundled themes; install the package or also pass `--theme ./themes`. Do not load pi-jar twice.
+
+### Mouse, clicks and copy-on-select
+
+Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode the terminal owns scrollback and selection, so pi-jar shows keyboard shortcuts instead of buttons.
+
+- Turn it on in **`/jar settings` → Pi → Mouse clicks** (writes Pi's `tuiMode`; restart Pi), or start with `pi --tui-mode fullscreen`.
+- In fullscreen, selecting text copies it automatically (**Pi → Copy on select**, on by default). pi-jar's own views never capture drags, so selection works over the welcome, composer, plan view and dialogs.
+- In regular mode, use your terminal's own copy-on-select option if it has one.
+
+## Commands and shortcuts
+
+| Command | Purpose |
+| --- | --- |
+| `/plan [request]` | Enter plan mode (optionally sending the request). `/plan review` reopens the plan view; `/plan off` exits. |
+| `/goal <outcome>` | Start goal mode. `/goal` edits, `/goal status`, `/goal pause`, `/goal resume`, `/goal clear`. |
+| `/roles` | Role manager. `/roles set ROLE provider/model[:effort]\|@role [--project]`, `/roles clear ROLE`, `/roles <role>` activates, `/roles cycle`, `/roles list`. |
+| `/jar` · `/jar settings` | Visual and workflow preferences. |
+| `/jar status` | One-line status summary. |
+| `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Human view/editor for the agent's checklist. |
+| `/jar history` | Read-only conversation timeline for the active branch. |
+| `/jar sessions [query]` · `/jar name <title>` | Search/switch sessions; name the current one. |
+| `/jar welcome` | Replay the welcome screen. |
+| `/jar ask [question]` | Answer a question in a dialog and insert the answer into the editor. |
+| `/jar accent [preset]` · `/jar footer` | Switch a loaded accent theme; toggle footer fields. |
+| `/jar composer on\|off` · `/jar animations on\|off` · `/jar ui on\|off` | Toggle the composer, motion, or all pi-jar UI. |
+| `/jar quota on\|off` | Session-only, read-only quota lookups for supported OAuth providers. |
+| `/jar hub` | Open an installed task or subagent manager command. |
+| `/jar demo` · `/jar reset` | Labeled sample roles in the footer / back to live data. |
+
+| Shortcut | Action |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> | Open pi-jar settings |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd> | Refresh the welcome (new message and flame), or show it again |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> | Toggle plan mode |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> | Cycle model roles (`cycleOrder`) |
+| <kbd>Tab</kbd> / <kbd>→</kbd> in an empty composer | Accept the dim suggestion into the input (it is not sent) |
+
+## Welcome screen
+
+The welcome stays until your first prompt, then dissolves (or hides immediately with motion off).
+
+- **Flame** — a small heat-spreading fire simulation shaped into a torch, drawn with half-block "pixels" in a ten-step ember→gold palette. Embers rise and fade, rare sparks flash, and a gentle wind sways the tip. Every frame is deterministic per seed, so motion-off shows a frozen, still-lit flame. Terminals without 24-bit color get shaded blocks in theme colors. See [docs/FLAME.md](docs/FLAME.md).
+- **Card** — `pi-jar` version, model, effort and active role; project + git branch/dirty; context, quota and cost; plan state; goal progress; open tasks with the next one; configured roles; live teammates published by other extensions; a hopeful message.
+- **Actions** — `[ ⚙ Settings ]  [ ↻ Refresh ]  [ ◆ Roles ]  [ ▤ Plan ]  [ ◎ Goal ]` in fullscreen (act on press). In regular mode the same row shows `ctrl+alt+s settings · ctrl+alt+r refresh · /roles · /plan · /goal`.
+
+## Composer
+
+- **Grows with your draft**: the input expands to about 60% of the terminal before it scrolls (overflow shows `↑/↓ N more` in the border).
+- **Click to place the cursor** (fullscreen), including multi-line drafts. Autocomplete menus render below the frame.
+- **Next-prompt suggestions**: when the agent finishes a request it proposes one likely next prompt (`jar_suggest`). It appears as dim ghost text in the empty input; <kbd>Tab</kbd> (or <kbd>→</kbd>, or a click on it) fills it in so you can edit and press <kbd>Enter</kbd>. Typing, sending, or a new run clears it. Toggle in settings.
+- **Ember the mascot** perches on the top-left of the input — the face sits in the border, the flickering tips just above:
+
+  | Mood | Face | When |
+  | --- | --- | --- |
+  | idle / blink | `(•ᴗ•)` `(-ᴗ-)` | waiting for you; blinks every few seconds |
+  | happy / thinking | `(^ᴗ^)` `(°ᴗ°)` | the agent is generating |
+  | focused | `(>ᴗ<)` | a tool is running (sparks fly) |
+  | curious | `(•o•)` | a question or dialog is open |
+  | sleepy | `(-ω-)` | idle for two minutes (`z` rises) |
+  | oops | `(×_×)` | a run failed |
+  | proud | `(★ᴗ★)` | a goal was completed |
+  | poked | `(^o^)` | you clicked it |
+
+  The title also shows Pi's session name (or a stable readable alias like `silver-lantern`). Toggle the mascot in settings; `/jar composer off` restores Pi's editor with your draft intact.
+
+## Plan mode
+
+`/plan` switches Pi into read-only planning:
+
+1. **Tools are gated.** Only known read-only tools stay active; `bash` is limited to an inspection allowlist; a second guard blocks unsafe calls even if another extension exposes them. `write`/`edit` are allowed **only** for markdown files in the plan directory (`$TMPDIR/pi-jar/plans/<session>/`, resolved through symlinks).
+2. **The `plan` role is applied** if assigned, and restored afterwards. An active goal loop pauses.
+3. **The agent writes a plan file** such as `<slug>-plan.md` and must end its turn with `jar_plan_submit`. The file is validated; an incomplete plan is sent back with the missing parts. If the agent ends a turn without submitting, pi-jar reminds it (at most twice per prompt) instead of accepting a chat-only plan.
+
+Required structure:
+
+```markdown
+# <Plan title>
+
+## Context
+Why, the literal request, and the intended end state.
+
+## Approach
+1. Ordered steps grouped by behavior, naming exact files, symbols, reused helpers and error handling.
+
+## Critical files
+- `path/to/file.ts` — symbol — why it changes
+
+## Verification
+- Exact commands and at least one concrete check of new behavior.
+
+## Assumptions
+- Decisions the user could override, each with a fallback.
 ```
 
-Choose `pi-jar-dark` (Setara teal), or a `pi-jar-dark-<accent>` theme (`gray`, `pink`, `teal`, `azure`, `violet`, `amber`). For the closest dark-surface match, set your terminal background to `#0B1018`—Pi themes cannot change the terminal emulator background. If you load only `extensions/index.ts` using `--extension`, Pi does **not** discover the adjacent `themes/` directory: install the package with `pi install /absolute/path/to/pi-jar` and restart Pi, or start Pi with both `--extension /absolute/path/to/pi-jar/extensions/index.ts --theme /absolute/path/to/pi-jar/themes`. Do not load the extension twice (via both package and `--extension`).
+4. **Plan view** — a full-screen split view: headings on the left (the lone `#` title becomes the header, `###` steps are indented), the selected section rendered as markdown on the right, actions below.
+   - Keys: <kbd>Tab</kbd> cycles focus (headings → body → actions), <kbd>↑↓</kbd>/<kbd>j k</kbd> move or scroll, <kbd>g</kbd>/<kbd>G</kbd>, <kbd>PgUp</kbd>/<kbd>PgDn</kbd>, <kbd>1–4</kbd> pick an action, <kbd>e</kbd> edits the plan (saved back to the file), <kbd>r</kbd> cycles the **continue with** role, <kbd>Esc</kbd> stops. Fullscreen: click headings and actions, wheel scrolls the pane under the pointer.
+   - Actions: **Approve & execute**, **Approve, compact & execute** (compaction keeps the plan), **Refine** (send feedback, stay in plan mode), **Stop**.
+5. **Execution** seeds `jar_todo` from the Approach steps, restores tools and model, optionally switches to the chosen role, and sends the full plan inline (`<plan path="…">…</plan>`) with instructions to work step by step and verify each step.
 
-The extension is loaded by the package automatically. Use:
+Plan state is stored in the session branch, so reloading or navigating the tree restores it. Narrow terminals collapse the headings into a `‹ n/m heading ›` pager.
 
-```text
-/jar
-/jar settings
-/jar status
-/jar history
-/jar hub
-/jar tasks
-/jar tasks add Ship the UI
-/plan
-/plan Audit this repository before changing it
-/goal Ship the first-class workflow UX
-/roles
-/roles plan
-/jar ask What should we name this?
-/jar composer on
-/jar composer off
-/jar accent violet
-/jar accent default
-/jar quota on
-/jar demo
-/jar reset
+## Goal mode
+
+`/goal Ship the export command` starts an implement → audit loop:
+
+- **Tasks first.** While a goal is active and no task is open, `write`/`edit` and non-read-only shell commands are blocked with "create jar_todo tasks for the goal first". The agent sees the goal and its current checklist at the start of every run.
+- **Implementor.** When a turn ends normally with open tasks (or none yet), pi-jar continues automatically with a hidden continuation listing the goal and open tasks.
+- **Auditor.** When every task is done, the next round switches to the `advisor` role (if assigned) and asks for an independent audit against the repository: run the checks, look for missed requirements. The auditor either adds tasks for gaps (edits stay blocked during the audit), which sends work back to the implementor, or calls `jar_goal complete` with concrete evidence. Completion is refused outside the audit, while tasks are open, or without evidence.
+- **Guard rails.** The loop pauses when you interrupt (<kbd>Esc</kbd>), a run fails, plan mode starts, the agent calls `jar_goal block` (it needs you), or the round budget runs out (default 8 automatic rounds per user message; settings → Pi → Goal auto rounds). A new message from you resets the budget. `/goal resume` continues.
+- The footer and welcome show progress: `◎ goal · Ship · 3/5 tasks · round 2/8 · auditing`.
+
+## Model roles
+
+Roles map a purpose to a model. They live in `~/.pi/agent/pi-jar-roles.json` (Pi's agent directory), with optional per-project overrides in `<project>/.pi/pi-jar-roles.json`:
+
+```json
+{
+  "version": 2,
+  "roles": {
+    "default": "anthropic/claude-sonnet-5",
+    "slow": "anthropic/claude-opus-5-5:high",
+    "plan": "@slow",
+    "advisor": "@slow:xhigh",
+    "smol": "anthropic/claude-haiku-4-5-20251001",
+    "review": "openai/gpt-5:medium"
+  },
+  "cycleOrder": ["smol", "default", "slow"],
+  "tags": { "review": { "name": "Reviewer" } }
+}
 ```
 
-`/jar` and `/jar settings` open visual preferences in interactive mode; `/jar status` prints the status summary. `/jar sessions [query]` opens a searchable in-session picker for this project; `/jar name <title>` gives the current session a memorable name. Pi's startup `--resume` picker runs before extensions load and is unchanged. Click `[ ⚙ Settings ↗ ]` on the welcome in fullscreen mode; in regular mode use `/jar settings` so the terminal retains native scrollback and text selection. In the pane, Tab switches Appearance/Footer, arrows move, Enter/Space or click changes a value, and Esc closes. Visual preferences (accent, motion, composer, UI and footer fields) are saved in `~/.pi/agent/pi-jar-settings.json` (or Pi's configured agent directory). Existing `pi-jar-footer.json` choices are imported when the new file is absent; that legacy file remains unchanged afterward. Later edits by a downgraded version will not sync back. Quota requests are enabled by default for supported OAuth providers and remain session-only; `/jar quota off` disables them for the session.
+- Specs are `provider/model[:effort]`, `@role[:effort]` (alias) or `*` (= `@default`). An effort on the referring role wins over the target's. Alias chains are followed up to five levels; cycles are reported.
+- **Built-in roles and where pi-jar uses them:** `default` (applied at session start, approved plans), `plan` (plan mode), `advisor` (goal audit), `smol`/`slow` (cycling), `task`, `commit`. Any other valid name (`a-z`, `0-9`, `-`) is a custom role.
+- `/roles` opens a split manager: role list on the left; resolved model, alias chain, effort, scope and usage on the right. Keys: `m` model, `a` alias, `t` effort, `s` move between global/project scope, <kbd>Enter</kbd> activate, `c` clear, `n` new role, `d` delete custom role.
+- Older v1 files are read and upgraded in memory; they are rewritten as v2 only when you change a role.
 
-`Ctrl+Alt+S` opens pi-jar settings directly in interactive TUI mode.
+## Tasks, questions and history
 
+- **`jar_todo`** — the agent keeps a branch-aware checklist for any multi-step request (list first, add missing outcomes, mark done as they complete). `/jar tasks` is your view/editor: `a` add, <kbd>Space</kbd>/<kbd>Enter</kbd> check, `e` edit, `d` delete, `f` filter.
+- **`jar_ask`** — structured questions: numbered options with descriptions, single or multi-select, *Type your own answer* (multi-line, paste-friendly) and *Chat about this* to discuss before choosing.
+- **`/jar history`** — separate, read-only timeline of the active branch (paging, search, expandable details). Pi's native transcript is untouched.
+- Pi's built-in read/shell/edit/write tool cards render compactly; the full output or diff stays one click or <kbd>Ctrl</kbd>+<kbd>O</kbd> away.
 
-## First-class workflows
+## Settings
 
-### Plan mode
+`/jar settings` (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd>, or the welcome's Settings action) has three tabs:
 
-`/plan` enters a real read-only planning mode. Pi-jar snapshots the current active tool set, keeps only recognized read/query tools, restricts `bash` to a conservative inspection allowlist, and adds a second `tool_call` guard so an unsafe call is blocked even if another extension exposes it. Unknown third-party tools fail closed while plan mode is active.
+- **Appearance** — accent, motion, rounded composer, Ember mascot, next-prompt suggestions, pi-jar UI.
+- **Footer** — field visibility.
+- **Pi** — mouse clicks (Pi fullscreen mode), copy on select, goal auto rounds.
 
-Use `/plan REQUEST` to enter plan mode and immediately send the planning request. The agent must finish with a numbered `Plan:` section. Pi-jar then opens a dedicated review surface with three explicit paths:
+pi-jar preferences are saved in `pi-jar-settings.json` in Pi's agent directory; the Pi tab writes Pi's own settings.
 
-1. **Implement now** — restore the prior tools/model and execute with the current context.
-2. **Compact, then implement** — preserve the approved plan through Pi compaction, restore execution access, then continue.
-3. **Stop here** — leave plan mode without starting implementation.
+## Integrations
 
-Approved plan steps are seeded into the same branch-aware `jar_todo` store, so execution progress is visible instead of evaporating into prose. `/plan stop` also exits without implementation. If a `plan` model role is assigned, pi-jar switches to it only for planning and restores the previous model and effort afterward.
-
-### Structured questions
-
-Pi-jar registers `jar_ask` as a first-class model tool. The agent can present one or more questions using numbered options with descriptions, single-select radio choices, multi-select checkboxes, and clear visual badges/chips. Every question can expose **Type your own answer** and **Chat about this**. Free-form answers use Pi's multiline editor, so normal terminal paste and the external-editor workflow remain available.
-
-`Chat about this` deliberately returns control to the model without pretending a choice was made; after discussing the ambiguity, the agent can ask again with a refined set of options.
-
-### Goal
-
-`/goal OUTCOME` stores an active goal in the current Pi session branch and displays `◎ goal · …` in the pi-jar footer. On every agent run, pi-jar injects the current goal plus guidance to keep `jar_todo` synchronized with concrete work toward it. Branch navigation and compaction restore the matching goal state instead of leaking it into another thread.
-
-Run `/goal` to edit/view it interactively, or `/goal clear` to remove it.
-
-### Model roles
-
-`/roles` opens role assignment. Each role can follow the current model or be pinned to any authenticated model exposed by Pi's model registry, with an optional thinking effort. Assignments are stored in `~/.pi/agent/pi-jar-roles.json` (or Pi's configured agent directory).
-
-Roles: `default`, `smol`, `slow`, `plan`, `commit`, `task`, and `advisor`. Use `/roles ROLE` to activate one immediately. Headless configuration is also available:
-
-```text
-/roles set plan PROVIDER/MODEL high
-/roles set smol PROVIDER/MODEL low
-/roles clear advisor
-```
-
-
-`/jar history` opens a **separate** read-only conversation timeline; Pi's native transcript is not restyled or changed. It snapshots the active branch on open (reopen after branching or new replies), pages through 80 visible entries at a time (`p` older, `o` newer), and shows user/assistant turns, tool calls/results, compactions and branch summaries; hidden custom entries, reasoning text and image payloads stay hidden. Arrows/j/k and PgUp/PgDn navigate; `e`/Enter expands details, `d`/`u` scroll details, `[`/`]` step through contiguous output segments of at most 2 KiB/30 lines, `/` searches up to the first 1024 characters of each entry **on the current page**, `n`/`N` advances through matches, Esc closes. Fullscreen supports click/wheel; regular mode is keyboard-only. The view sanitizes terminal control sequences but still shows ordinary session text, which may contain sensitive material; it never writes or logs that content.
-
-`/jar accent` lists the presets **Pi has loaded**; `/jar accent <gray|pink|teal|azure|violet|amber|default>` switches only loaded bundled color themes and keeps success/warning/error meanings intact. In a source checkout, `npm run themes:build` regenerates the accent themes from the base JSON and the dark Punakawan presets. Pi-jar registers a native `jar_todo` model tool and instructs the agent to use it proactively for requests with two or more substantive steps: it lists existing branch tasks first, adds missing outcomes, and marks them done as work completes. The state is persisted as Pi session entries and follows the active branch through navigation/compaction. `/jar tasks` is the human view/editor for the same list; it is no longer something the user must trigger to make tracking happen. It remains separate from Team Mode's `/tasks`. In the task view: `a` add, Space/Enter check, `e` edit, `d` delete with confirmation, `f` filter, Esc close. Headless commands include `/jar tasks list|add TITLE|done ID|open ID|edit ID TITLE|delete ID`. `/jar hub` still opens installed `/tasks` or `/subagents-fleet` managers, which retain their own state and controls. `/jar ask QUESTION` opens a pi-jar-owned answer dialog and inserts the answer into the editor without submitting it. Pi Jar enables a rounded composer with a steady focus accent at session start using Pi's `CustomEditor` (native application keybindings). Fullscreen uses Pi's native editor clicks. Regular mode deliberately leaves terminal mouse reporting disabled so wheel scrolling and text selection keep working; use the keyboard to position the editor cursor. Its title carries a small expressive pet sprite plus Pi's session title (or a stable readable alias such as `silver-lantern`), so parallel sessions are distinguishable without exposing a raw thread id; `/jar composer off` restores the previous editor and `/jar composer on` re-enables it. `/jar quota on` re-enables **session-local, read-only** quota requests for the active Codex/Anthropic OAuth provider, only when no valid public quota status is published. Requests use Pi's resolved OAuth credentials, a 5-second timeout and a 5-minute cache; unsupported/unavailable quotas are hidden. `/jar quota off` clears the cache and stops requests. Provider quota endpoints are not stable public APIs. Live role IDs, names, labels, tasks and states come from published `pi-jar.role.<id>` statuses—not from a fixed list or Team Mode internals. Without a publisher no live role appears. `/jar demo` previews **generic sample roles** and is explicitly labeled `DEMO`; it does not report live agent activity. `/jar animations off` disables role, working-indicator and welcome motion. `/jar welcome` replays the nonblocking animated flame and large-π welcome with the session overview until the next interactive prompt; `/jar ui off` restores Pi's built-in footer (`/jar ui on` re-enables pi-jar). Pi-jar only re-renders Pi's default read/bash/edit/write cards; third-party and MCP tool views remain untouched. Composer styling is enabled by default and restores the prior editor on disable.
-
-## Current preview
-
-```text
- DEMO  claude-sonnet effort high                 ctx 58%
- EXP ◈ analyze  ·  BLD ◐ implement  ·  REV ◇ waiting
-```
-
-The footer adapts to terminal width, truncates long names and paths, and prioritizes an active/failed role and context on narrow screens. The old `jar` prefix was branding, not a mode, so it is removed; `DEMO` still marks synthetic roles. Live model effort (`off` through `max`) uses the theme's distinct thinking colors. `/jar footer` remains a compatibility menu; its choices now save in `pi-jar-settings.json`. Session cost uses Pi-reported assistant costs on the current session branch (it may be zero for subscription usage). With no published role signals, no role is invented. Other extensions' published status texts remain visible when space allows.
-
-## Design direction
-
-**Setara influence**
-
-- clean technical surfaces;
-- cyan/blue precision accents;
-- readable hierarchy;
-- low-noise information density.
-
-**Punakawan influence**
-
-- warm amber/green secondary palette;
-- visible named roles;
-- orchestration state as part of the UI;
-- distinct role motion rather than generic spinners.
-
-The result should feel like one coherent terminal interface, not two products taped together.
+Other extensions can publish teammate roles and quota windows through Pi's public status API; see [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 
 ## Repository structure
 
 ```text
 pi-jar/
-├── extensions/          Pi extension entry point
-├── src/                 UI state and animation primitives
-├── themes/              Native Pi themes
-└── docs/
-    ├── PLAN.md
-    ├── DESIGN.md
-    ├── INTEGRATIONS.md
-    └── DEVELOPMENT.md
+├── extensions/index.ts   extension entry: wiring, welcome, footer, commands
+├── src/
+│   ├── flame.ts          pixel fire simulation
+│   ├── mascot.ts         Ember's moods and sprites
+│   ├── composer.ts       rounded composer, ghost text, mouse mapping
+│   ├── suggest.ts        jar_suggest tool and suggestion state
+│   ├── plan*.ts          plan mode, plan parsing/validation, plan view
+│   ├── goal*.ts          goal state and the implement → audit loop
+│   ├── model-roles.ts    role config, resolution, activation
+│   ├── roles-ui.ts       role manager
+│   ├── split-view.ts     shared two-pane frame
+│   ├── welcome.ts        welcome layout and hit-testing
+│   └── …                 footer, tasks, questions, history, settings, quota
+├── themes/               native Pi themes
+├── tests/                node:test suites
+└── docs/                 design, workflows, flame, integrations, development
 ```
 
-## Roadmap
+## Documentation
 
-The implementation plan lives in [docs/PLAN.md](docs/PLAN.md). The major milestones are:
-
-1. foundation and theme;
-2. responsive role-aware footer;
-3. optional adapters when Team Mode publishes supported role events/statuses;
-4. optional Advisor Flow and SoL-Pi status adapters when public signals exist;
-5. configurable presets and packaging polish.
-
-## Development
-
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+- [docs/WORKFLOWS.md](docs/WORKFLOWS.md) — plan, goal, roles and suggestions in depth.
+- [docs/DESIGN.md](docs/DESIGN.md) — palette, motion, layout and accessibility.
+- [docs/FLAME.md](docs/FLAME.md) — how the flame and mascot are drawn.
+- [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) — public status contracts.
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — setup, testing and release checks.
+- [docs/PLAN.md](docs/PLAN.md) — roadmap.
 
 ## Contributing
 

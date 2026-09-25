@@ -2,14 +2,9 @@
 
 ## Identity
 
-pi-jar takes visual cues from Setara and Punakawan without copying either product literally.
+pi-jar should feel technical, calm and readable, warm enough not to look like another neon-blue terminal, clearly aware of who (or which role) is doing what, and useful during long sessions.
 
-The theme should feel:
-
-- technical, calm, and readable;
-- warm enough not to look like another generic neon-blue terminal;
-- distinctly role-aware;
-- useful during long-running multi-agent sessions.
+Rule of thumb: **state first, useful telemetry second, decoration last.** Every animation carries meaning, and everything still works with motion off.
 
 ## Palette
 
@@ -17,91 +12,72 @@ The theme should feel:
 | --- | --- |
 | suggested terminal background | `#0B1018` |
 | surface | `#111927` |
-| Setara dark teal (default accent) | `#00C2B8` |
-| Punakawan technical blue | `#7FA8EE` |
-| Punakawan warning amber | `#E5A940` |
-| Punakawan success green | `#35C79A` |
+| default accent (teal) | `#00C2B8` |
+| technical blue | `#7FA8EE` |
+| warning amber | `#E5A940` |
+| success green | `#35C79A` |
 | text | `#F3F6FA` |
 | muted text | `#98A5B6` |
-| Punakawan danger terracotta | `#EE7A5E` |
+| danger terracotta | `#EE7A5E` |
 
-Setara's dark UI uses deep navy and teal; Punakawan's dark panel uses navy surfaces, blue, amber and green status cues. `pi-jar-dark` uses Setara teal with Punakawan dark surfaces and semantic status colors. Six complete alternate themes mirror Punakawan's **dark accent presets**: gray, pink, teal, azure, violet and amber. `/jar accent <preset>` switches a bundled theme; `default` restores Setara teal. Accent choices change accents/selection only, never success/warning/error. Native Pi themes cannot change the terminal emulator's actual background; match the suggested canvas in terminal settings for the closest appearance.
+`pi-jar-dark` uses the teal accent on deep navy surfaces with semantic status colors. Six alternate themes change only the accent and selection: gray, pink, teal, azure, violet and amber. Success, warning and error never change. `/jar accent <preset>` switches between loaded bundled themes; `default` restores teal. The fire palette used by the flame and mascot is documented in [FLAME.md](FLAME.md).
 
 ## Role language
 
-Live names and labels are publisher-supplied: `pi-jar.role.<id>` can describe any teammate. The Punakawan names inspire the visual identity but are neither reserved IDs nor fixed roles. The synthetic `/jar demo` uses clearly labeled generic Explorer, Builder and Reviewer examples; it never claims live activity. Without published state, no teammate is shown.
+Live teammate names and labels come from publishers (`pi-jar.role.<id>`, see [INTEGRATIONS.md](INTEGRATIONS.md)); pi-jar never invents them. `/jar demo` shows clearly labeled generic samples. Model roles (`/roles`) are a separate concept: they choose which model runs a workflow. The active one shows as `role:<name>` in the footer and on the welcome card.
 
-State colors:
+State colors: thinking/working → accent · reviewing → warning · done → success · failed → error · waiting/idle → dim.
 
-- thinking/working → accent
-- reviewing → warning
-- done → success
-- failed → error
-- waiting/idle → dim
+## Motion language
 
-## Animation language
-
-Animations communicate state.
-
-| State | Frames |
-| --- | --- |
-| idle | `◇` |
-| thinking | `◈ ◆` |
-| working | `◐ ◓ ◑ ◒` |
-| waiting | `◇` |
-| reviewing | `◔ ◑ ◕ ●` |
-| done | `✓` |
-| failed | `×` |
+| Surface | Motion | Stops when |
+| --- | --- | --- |
+| Welcome flame | pixel fire, embers, sparks (90 ms) | the welcome closes, or motion is off (frozen frame) |
+| Ember mascot | blinks, mood changes, tip flicker (repaints only on change) | motion off (calm face) or mascot off |
+| Working indicator | `✢ ✣ ✤` while generating, `◐ ◓ ◑ ◒` for tools | the run settles |
+| Footer roles | `◈ ◆`, `◐ ◓ ◑ ◒`, `◔ ◑ ◕ ●` | the role is idle, done or failed |
 
 Rules:
 
-1. labels do not move;
-2. completed and failed roles are static;
-3. idle UI does not continuously repaint;
-4. at most two visually prominent animations should compete at once;
-5. animations must be optional.
+1. labels never move; only glyphs animate;
+2. completed and failed states are static;
+3. idle UI does not repaint continuously;
+4. at most two prominent animations compete at once;
+5. motion is optional and never the only carrier of information.
 
-## Responsive layout
+## Layout
 
-### Wide: 100+ columns
+### Welcome
 
-```text
-claude-sonnet effort high                               ctx 58%
-EXP ◈ analyze  ·  BLD ◐ implement  ·  REV ◇  ·  git feature/auth
-```
+- **Wide (≥ 72 columns):** flame and large `π` in a 28-column art column, with the card on the right, vertically centered.
+- **Medium (32–71):** a slightly cropped flame and compact `π` stacked above the card.
+- **Narrow (< 32):** cropped flame, compact `π` and a single Settings action.
 
-### Medium: 52–99 columns
+Card sections, top to bottom: header (version · model · effort · role), workspace (project · git · session), workflow (plan · goal · tasks · roles · team), message, actions. Long values truncate at the right. Actions are bracketed chips in fullscreen and plain keyboard hints in regular mode. A button is never advertised where it cannot be clicked.
 
-```text
-claude-sonnet effort medium          ctx 58%
-EXP ◈  ·  BLD ◐  ·  REV ◇
-```
+### Composer
 
-### Narrow: below 52 columns
+The Ember tip row sits above a rounded frame. The top border carries the face, the session title and the `↑ N more` overflow label; the bottom border carries `↓ N more` and dim key hints (hidden below 60 columns). Autocomplete menus render below the frame, aligned with the text. Ghost suggestions are dim and followed by `⇥ tab`.
 
-```text
-model effort low       EXP ◈ ctx 58%
-```
+### Split views (plan view, roles)
 
-Roles only appear when explicitly published or in the labeled demo. Optional detail is trimmed at the right; glyphs and text remain meaningful without color. The footer omits the decorative `jar` prefix; `DEMO` remains explicit when sample roles are enabled. Live model effort comes from Pi's thinking level, repaints when it changes and uses the semantic `thinkingOff`…`thinkingMax` colors. The footer keeps context visible at every width, adds Pi-reported session cost when space allows, and shows 5-hour/weekly usage only when a valid public quota or opt-in read-only OAuth fallback resolves it. At medium widths, quota may occupy a third line. The transient welcome shows four hand-authored, fixed-width flame frames above a **taller torch-shaped mathematical π**. Only the tip flickers; the bright core and base stay planted, and two occasional embers rise and fade. The π remains grounded and static. See [the reusable-asset review](FLAME_RESEARCH.md) for why no third-party renderer or sprite was incorporated. Two trailing spacer rows keep the torch visually separated from the composer. The landing card prioritizes a randomized hopeful line, active role/task state, project, installed managers, git state and quick actions; duplicate model/context/cost telemetry stays in the footer. Advisor state is intentionally omitted when unavailable instead of turning absence into a prominent warning. The Settings action is pointer-accessible in fullscreen through Pi's native routing and in regular mode through temporary click-only SGR reporting that is restored as soon as the welcome closes; `/jar settings` and `Ctrl+Alt+S` remain keyboard paths. A responsive full-screen settings view groups persisted pi-jar visual choices while keeping quota consent session-only. A smaller multi-row π remains on narrow terminals; motion-off freezes the flame without hiding the symbol. Working messages use Pi's observed generation/tool events: themed words and icons can animate only while active; motion-off is static and idle has no repaint timer. `/jar hub` navigates to existing Team Mode and subagent managers; `/jar tasks` is a visibly separate pi-jar-owned to-do list. Pi-jar's question cards are custom only for its own prompts, while the rounded composer uses Pi's `CustomEditor` to preserve application keybindings; its tiny cat-like mascot changes ears and facial expression by phase without corner glyphs that resemble hands, and the title shows Pi's session title or a stable readable alias before restoring the prior editor via `/jar composer off`.
+A shared frame (`src/split-view.ts`): title bar with a clickable `×`, a sidebar of `clamp(round(w × 0.26), 18, 32)` columns, a `│` divider, a body pane, a divider row, footer rows, and a closing border. Below 64 columns the sidebar collapses into a header pager.
 
-## Separate conversation timeline
+### Footer
 
-`/jar history` is an overlay, not an altered native transcript. Pi's public `sessionManager.getBranch()` provides a snapshot of the active branch when opened; only visible message, compaction and branch-summary entries get timeline rows. The marker, turn number, author, optional timestamp, compact sanitized excerpt and selected-entry details follow a chronological card/gutter pattern. Reasoning blocks, hidden custom messages and image bytes are excluded; tool arguments expose only a short command/path hint. The UI indexes visible entries without copying tool output, pages 80 rows, lazily extracts 2 KiB / 30-line contiguous chunks, and bounds render height and width. Search is deliberately page-local and limited to the first 1024 characters per entry. It cannot and does not change Pi's stored session, native message styling or scrollback; fullscreen mouse routing is optional.
+- **Wide (100+):** model · effort · session · cwd · context · RAM · cost, then roles and branch, with quota on a third line if needed.
+- **Medium (52–99):** fewer extras; context is always visible.
+- **Narrow (< 52):** model, effort, the active or failed role, context.
 
-## Presets
+The goal line shows `◎ goal · <progress>` when a goal exists.
 
-Planned presets:
+## Conversation timeline
 
-- **minimal:** model + context
-- **normal:** model + branch + roles + context
-- **verbose:** role tasks + integrations + tokens/cost
-- **focus:** active role + model + branch only
+`/jar history` is an overlay built from a snapshot of the active branch. It is not a restyled transcript. Visible messages, compactions and branch summaries become rows; reasoning, hidden custom messages and image bytes are excluded. Paging (80 rows), 2 KiB / 30-line chunks and page-local search keep it bounded.
 
 ## Accessibility
 
-- role state must never rely on color alone;
-- every active state includes a glyph;
-- animation-off mode must preserve all information;
-- avoid low-contrast tool diffs;
-- Nerd Font glyphs may enhance the display later, but core rendering must work with ordinary Unicode.
+- state never relies on color alone: every active state has a glyph or word;
+- motion-off preserves all information;
+- keyboard paths exist for every pointer action;
+- core rendering uses ordinary Unicode and works without 24-bit color.
