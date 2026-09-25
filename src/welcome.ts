@@ -175,7 +175,7 @@ function paintFlame(line: string): string {
     .replace(/▓+/g, (part) => rgb(FIRE_RGB.hot, part))
     .replace(/▒+/g, (part) => rgb(FIRE_RGB.orange, part))
     .replace(/░+/g, (part) => rgb(FIRE_RGB.edge, part))
-        .replace(/S+/g, (part) => rgb(FIRE_RGB.spark, "■".repeat(part.length)))
+    .replace(/S+/g, (part) => rgb(FIRE_RGB.spark, "■".repeat(part.length)))
     .replace(/s+/g, (part) => rgb(FIRE_RGB.ember, "▪".repeat(part.length)))
     .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, "·".repeat(part.length)));
 }
