@@ -11,7 +11,7 @@ export async function manageTasks(args: string, ctx: ExtensionContext, store: To
   };
   const list = () => {
     const items = store.all();
-    notify(items.length ? items.map((item) => `${item.done ? "[x]" : "[ ]"} ${item.title} (${item.id})`).join("\n") : "pi-jar to-do: empty (separate from Team Mode)");
+    notify(items.length ? items.map((item) => `${item.done ? "[x]" : "[ ]"} ${item.title} (${item.id})`).join("\n") : "pi-jar to-do: empty (separate from other task managers)");
   };
   if (!args && ctx.hasUI && ctx.mode === "tui") {
     const filter: { value: TodoFilter } = { value: "all" };

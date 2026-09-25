@@ -1,7 +1,7 @@
-import { getAgentDir, SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { registerAskTool } from "../src/ask-tool.ts";
@@ -12,13 +12,16 @@ import { promptText } from "../src/dialogs.ts";
 import { renderFooter } from "../src/footer.ts";
 import { openJarHistory } from "../src/history-ui.ts";
 import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
+import { GoalLoop } from "../src/goal-loop.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, migrateLegacySettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
-import { openJarSettings } from "../src/settings-ui.ts";
+import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
 import { PlanMode } from "../src/plan.ts";
+import { openRolesUi } from "../src/roles-ui.ts";
+import { registerSuggestions, SuggestionState } from "../src/suggest.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { ACTIVE_STATES, collectStatuses, type JarRole } from "../src/status.ts";
 import { manageTasks } from "../src/tasks-ui.ts";
@@ -26,9 +29,15 @@ import { registerTaskTool } from "../src/task-tool.ts";
 import { TASK_ENTRY, TodoStore } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
-import { hopefulWelcomeMessage, welcomeLines, welcomeSettingsHit } from "../src/welcome.ts";
+import { hopefulWelcomeMessage, welcomeHit, welcomeLines, type WelcomeAction } from "../src/welcome.ts";
 
 const WELCOME_KEY = "pi-jar.welcome";
+const VERSION = (() => {
+  try { return "v" + (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: string }).version; }
+  catch { return undefined; }
+})();
+/** Ignore the click Pi may synthesize right after a press we already acted on. */
+const WELCOME_CLICK_DEDUPE_MS = 400;
 export default function piJar(pi: ExtensionAPI): void {
   installCompactBuiltinTools(pi);
   let demo = false;
@@ -45,6 +54,7 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeTui: TUI | undefined;
   let welcomeGit: AbortController | undefined;
   let welcomeBranch = (): string | null => null;
+  let refreshWelcome: (() => void) | undefined;
   let todos: TodoStore | undefined;
   let goals: GoalStore | undefined;
   const composer = new ComposerStyle();
@@ -80,9 +90,35 @@ export default function piJar(pi: ExtensionAPI): void {
   registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
   registerAskTool(pi);
   const modelRoles = new ModelRoleManager(pi);
-  modelRoles.register();
+  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles));
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
   planMode.register();
+  const goalLoop = new GoalLoop(pi, {
+    goals: () => goals, todos: () => todos, roles: modelRoles, planActive: () => planMode.isEnabled(),
+    maxRounds: () => visualSettings.goalRounds,
+    changed: (ctx) => { footerTui?.requestRender(); welcomeTui?.requestRender(); updateTaskWidget(ctx); },
+    completed: () => composer.flash("complete", 4000)
+  });
+  goalLoop.register();
+  planMode.setOnEnter((ctx) => goalLoop.pause(ctx, "plan mode is on"));
+  const suggestions = new SuggestionState();
+  composer.attachSuggestions(suggestions);
+  const suggest = registerSuggestions(pi, suggestions, {
+    enabled: () => enabled && visualSettings.composer && visualSettings.suggestions && composer.enabled,
+    skip: () => planMode.isEnabled() || !!goals?.isActive()
+  });
+  let liveTui: { setCopyOnSelect?: (enabled: boolean) => void } | undefined;
+  /** Pi's own settings (TUI mode, copy-on-select); written through Pi's SettingsManager. */
+  const piPreferences = (ctx: ExtensionContext): PiPreferences | undefined => {
+    let manager: SettingsManager;
+    try { manager = SettingsManager.create(ctx.cwd, getAgentDir()); } catch { return undefined; }
+    const save = () => { void manager.flush().catch((error: unknown) => ctx.ui.notify("Could not save Pi settings: " + String(error), "error")); };
+    return {
+      get: () => ({ fullscreen: manager.getTuiMode() === "fullscreen", copyOnSelect: manager.getFullscreenCopyOnSelect() }),
+      setFullscreen: (on) => { manager.setTuiMode(on ? "fullscreen" : "regular"); save(); },
+      setCopyOnSelect: (on) => { manager.setFullscreenCopyOnSelect(on); save(); liveTui?.setCopyOnSelect?.(on); }
+    };
+  };
 
   const applyWorking = (ctx: ExtensionContext) => {
     const active = enabled && working.phase !== "idle";
@@ -112,6 +148,7 @@ export default function piJar(pi: ExtensionAPI): void {
     if (welcomeInterval) clearInterval(welcomeInterval);
     welcomeInterval = undefined;
     welcomeTui = undefined;
+    refreshWelcome = undefined;
     if (ctx?.hasUI && ctx.mode === "tui") {
       try { ctx.ui.setWidget(WELCOME_KEY, undefined); } catch { /* optional widget API */ }
     }
@@ -122,11 +159,21 @@ export default function piJar(pi: ExtensionAPI): void {
     stopWelcome(ctx);
     void openSettings(ctx);
   };
+  const runWelcomeAction = (action: WelcomeAction, ctx: ExtensionContext) => {
+    if (action === "settings") { openWelcomeSettings(ctx); return; }
+    if (action === "refresh") { refreshWelcome?.(); return; }
+    const report = (error: unknown) => ctx.ui.notify("pi-jar: " + String(error), "error");
+    if (action === "roles") void openRolesUi(ctx, modelRoles).catch(report);
+    else if (action === "plan") {
+      if (planMode.hasPlan()) void planMode.review(ctx).catch(report);
+      else ctx.ui.pasteToEditor("/plan ");
+    } else if (action === "goal") void goalLoop.prompt(ctx).catch(report);
+  };
 
   const showWelcome = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui" || !enabled) return;
     stopWelcome(ctx);
-    welcomeFrame = animations ? Math.floor(Math.random() * 64) : 0;
+    welcomeFrame = 0;
     welcomeDismiss = 0;
     try {
       const contextUsage = ctx.getContextUsage();
@@ -145,9 +192,9 @@ export default function piJar(pi: ExtensionAPI): void {
         cost: formatCost(cost),
         managers,
         quotaEnabled: quotaCache?.enabled ?? false,
-        tasks: todos?.all().filter((item) => !item.done).length,
         branch, dirty: false,
-        message: hopefulWelcomeMessage()
+        message: hopefulWelcomeMessage(),
+        flameSeed: 1 + Math.floor(Math.random() * 1000)
       };
       const git = new AbortController();
       welcomeGit = git;
@@ -162,22 +209,41 @@ export default function piJar(pi: ExtensionAPI): void {
         if (!branch) sample(["branch", "--show-current"], (output) => { info.branch = output.trim() || undefined; });
         sample(["status", "--porcelain"], (output) => { info.dirty = !!output.trim(); });
       }
+      refreshWelcome = () => {
+        info.message = hopefulWelcomeMessage(Math.random, info.message);
+        info.flameSeed = 1 + Math.floor(Math.random() * 1000);
+        welcomeFrame = 0;
+        if (ctx.cwd && existsSync(ctx.cwd) && !welcomeGit?.signal.aborted) sample(["status", "--porcelain"], (output) => { info.dirty = !!output.trim(); });
+        welcomeTui?.requestRender();
+      };
       ctx.ui.setWidget(WELCOME_KEY, (tui, theme) => {
         welcomeTui = tui;
         let visibleLines: string[] = [];
+        let pressed: { action: WelcomeAction; at: number } | undefined;
         return { invalidate() {}, handleMouse(event: TuiMouseEvent) {
-          if (event.button !== "left" || welcomeDismiss
-            || !welcomeSettingsHit(visibleLines, event.x, event.y)) return;
+          if (event.button !== "left" || welcomeDismiss) return;
+          const action = welcomeHit(visibleLines, event.x, event.y);
+          if (!action) return;
           if (event.type !== "press" && event.type !== "click") return { handled: true };
-          queueMicrotask(() => openWelcomeSettings(ctx));
+          // Act on press (click synthesis is not guaranteed through multiplexers); drop the echo click.
+          const now = Date.now();
+          if (event.type === "click" && pressed?.action === action && now - pressed.at < WELCOME_CLICK_DEDUPE_MS) return { handled: true };
+          pressed = { action, at: now };
+          queueMicrotask(() => runWelcomeAction(action, ctx));
           return { handled: true, capture: event.type === "press" };
         }, render(width: number) {
           const statuses = welcomeStatuses();
           const live = collectStatuses(statuses, Date.now());
           const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, Date.now()) : undefined;
+          const open = todos?.all().filter((item) => !item.done) ?? [];
           const lines = welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), {
             ...info, settingsClickable: tui.mode !== "regular", roles: live.roles,
-            quota: quota?.week?.used ?? quota?.fiveHour?.used
+            quota: quota?.week?.used ?? quota?.fiveHour?.used,
+            effort: ctx.model?.reasoning === false ? "off" : pi.getThinkingLevel?.(),
+            ...(modelRoles.activeRole() ? { activeRole: modelRoles.activeRole()! } : {}),
+            tasks: open.length, ...(open[0] ? { nextTask: open[0].title } : {}),
+            plan: planMode.summary(), ...(goalLoop.progress() ? { goal: goalLoop.progress()! } : {}),
+            rolesSummary: modelRoles.summary(), ...(VERSION ? { version: VERSION } : {})
           });
           if (!welcomeDismiss) { visibleLines = lines; return lines; }
           // A short upward dissolve: dim the remaining art as rows disappear.
@@ -186,7 +252,7 @@ export default function piJar(pi: ExtensionAPI): void {
           return visibleLines;
         } };
       });
-      if (animations) welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS);
+      if (animations) { welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS); welcomeInterval.unref?.(); }
     } catch { stopWelcome(ctx); }
   };
 
@@ -210,6 +276,7 @@ export default function piJar(pi: ExtensionAPI): void {
     try {
       ctx.ui.setFooter((tui, theme, footerData) => {
         footerTui = tui;
+        liveTui = tui as { setCopyOnSelect?: (enabled: boolean) => void };
         welcomeStatuses = () => footerData.getExtensionStatuses();
         welcomeBranch = () => footerData.getGitBranch();
         let frame = 0;
@@ -267,7 +334,7 @@ export default function piJar(pi: ExtensionAPI): void {
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: ctx.sessionManager?.getSessionName?.(),
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
-                context, goal: goals?.current(), memory, cost: formatCost(cost), quota, roles, extras: live.extras,
+                context, goal: goalLoop.progress(), memory, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
             } catch {
@@ -307,11 +374,13 @@ export default function piJar(pi: ExtensionAPI): void {
     installUi(ctx);
     if (enabled && next.composer) composer.enable(ctx);
     else composer.disable(ctx);
+    composer.setMascot(next.mascot);
     composer.setActivity(enabled ? working.phase : "idle", animations);
+    suggest.sync();
     applyWorking(ctx);
     if (!wasEnabled && enabled) showWelcome(ctx);
     else if (!hadMotion && animations && welcomeTui && !welcomeInterval) {
-      welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS);
+      { welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS); welcomeInterval.unref?.(); }
     }
     footerTui?.requestRender();
     welcomeTui?.requestRender();
@@ -323,7 +392,7 @@ export default function piJar(pi: ExtensionAPI): void {
     if (settingsOpen) return;
     settingsOpen = true;
     try { await openJarSettings(ctx, () => visualSettings,
-      (next) => applyVisualSettings(next, ctx), loadedAccents(ctx)); }
+      (next) => applyVisualSettings(next, ctx), loadedAccents(ctx), piPreferences(ctx)); }
     finally { settingsOpen = false; }
   };
 
@@ -363,7 +432,9 @@ export default function piJar(pi: ExtensionAPI): void {
     quotaCache.enabled = true;
     updateCost(ctx);
     installUi(ctx);
+    composer.setMascot(visualSettings.mascot);
     if (visualSettings.composer && enabled) composer.enable(ctx);
+    suggest.sync();
     if (visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
     showWelcome(ctx);
   });
@@ -394,40 +465,13 @@ export default function piJar(pi: ExtensionAPI): void {
   // A request may span several tool turns; keep its elapsed time and reported tokens until agent_end.
   pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); updateCost(ctx); });
   pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
+  pi.on("agent_before_settle", (event) => { if (event.outcome === "error") composer.flash("error"); });
   pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); composer.refreshSession(ctx); });
   pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); });
   pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); footerTui?.requestRender(); });
-  pi.on("before_agent_start", async () => {
-    const goal = goals?.current();
-    if (!goal) return;
-    return {
-      message: {
-        customType: "pi-jar.goal-context",
-        content: [
-          "[PI-JAR ACTIVE GOAL]",
-          goal,
-          "Keep jar_todo synchronized with concrete steps that move this goal forward. Reuse matching open tasks, add missing work, and mark tasks done as outcomes complete."
-        ].join("\n"),
-        display: false
-      }
-    };
-  });
-  pi.on("context", async (event) => {
-    const goal = goals?.current();
-    let keptGoal = false;
-    const messages = [...event.messages].reverse().filter((raw) => {
-      const message = raw as { customType?: string };
-      if (message.customType !== "pi-jar.goal-context") return true;
-      if (!goal || keptGoal || typeof (message as { content?: unknown }).content !== "string" ||
-          !(message as { content: string }).content.startsWith("[PI-JAR ACTIVE GOAL]\n" + goal + "\n")) return false;
-      keptGoal = true;
-      return true;
-    }).reverse();
-    return { messages };
-  });
   pi.on("session_shutdown", (_event, ctx) => {
     stopWelcome(ctx);
     composer.disable(ctx);
@@ -444,42 +488,22 @@ export default function piJar(pi: ExtensionAPI): void {
     demo = false;
   });
 
+  pi.registerShortcut?.(Key.ctrlAlt("r"), {
+    description: "Refresh the pi-jar welcome screen",
+    handler: async (ctx) => {
+      if (!ctx.hasUI || ctx.mode !== "tui") return;
+      if (welcomeTui && !welcomeDismiss) refreshWelcome?.(); else showWelcome(ctx);
+    }
+  });
+  pi.registerShortcut?.(Key.ctrlAlt("m"), {
+    description: "Cycle pi-jar model roles",
+    handler: async (ctx) => { await modelRoles.cycle(ctx); footerTui?.requestRender(); }
+  });
   pi.registerShortcut?.(Key.ctrlAlt("s"), {
     description: "Open pi-jar settings",
     handler: async (ctx) => {
       if (!ctx.hasUI || ctx.mode !== "tui") return;
       await openSettings(ctx);
-    }
-  });
-
-  pi.registerCommand("goal", {
-    description: "Set, show or clear the active branch-aware goal; the agent keeps jar_todo aligned to it",
-    handler: async (args, ctx) => {
-      const store = goals;
-      if (!store) { ctx.ui.notify("Goal state is unavailable before the session starts", "warning"); return; }
-      const raw = args.trim();
-      if (/^(?:clear|off|none)$/i.test(raw)) {
-        if (store.clear()) {
-          footerTui?.requestRender();
-          ctx.ui.notify("Active goal cleared", "info");
-        }
-        return;
-      }
-      let next = raw;
-      if (!next && ctx.hasUI && ctx.mode === "tui") {
-        const edited = await ctx.ui.editor("◎ Active goal", store.current() ?? "");
-        next = edited?.trim() ?? "";
-      }
-      if (!next) {
-        ctx.ui.notify(store.current() ? "Active goal: " + store.current() : "No active goal. Use /goal <outcome>.", "info");
-        return;
-      }
-      if (!store.set(next)) {
-        ctx.ui.notify("Could not set goal; keep it concise and plain-text", "error");
-        return;
-      }
-      footerTui?.requestRender();
-      ctx.ui.notify("◎ Goal active · " + store.current(), "info");
     }
   });
 
@@ -493,7 +517,7 @@ export default function piJar(pi: ExtensionAPI): void {
         return;
       }
       if (!command || command === "status") {
-        ctx.ui.notify(`pi-jar: UI ${enabled ? "on" : "off"}; animations ${animations ? "on" : "off"}; quota ${quotaCache?.enabled ? "on" : "off"} (session-only); composer ${composer.enabled ? "on" : "off"}; ${todos?.all().length ?? 0} to-dos; demo ${demo ? "on" : "off"}`, "info");
+        ctx.ui.notify(`pi-jar: UI ${enabled ? "on" : "off"}; animations ${animations ? "on" : "off"}; quota ${quotaCache?.enabled ? "on" : "off"} (session-only); composer ${composer.enabled ? "on" : "off"}; mascot ${visualSettings.mascot ? "on" : "off"}; suggestions ${visualSettings.suggestions ? "on" : "off"}; ${todos?.all().length ?? 0} to-dos; demo ${demo ? "on" : "off"}`, "info");
         return;
       }
       if (command === "sessions" || command.startsWith("sessions ")) {
@@ -587,7 +611,7 @@ export default function piJar(pi: ExtensionAPI): void {
       if (command === "hub") {
         if (!ctx.hasUI || ctx.mode !== "tui") return;
         const native = [
-          { name: "tasks", label: "Tasks · Team Mode (/tasks)" },
+          { name: "tasks", label: "Tasks (/tasks)" },
           { name: "subagents-fleet", label: "Subagents · Fleet (/subagents-fleet)" }
         ].filter((entry) => pi.getCommands().some((item) => item.name === entry.name && item.source === "extension"));
         if (!native.length) { ctx.ui.notify("No task or subagent manager is installed", "info"); return; }

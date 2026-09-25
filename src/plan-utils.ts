@@ -88,3 +88,104 @@ export function extractPlanSteps(text: string): string[] {
 export function planTextFromSteps(steps: readonly string[]): string {
   return steps.map((step, index) => String(index + 1) + ". " + cleanText(step, 240)).join("\n");
 }
+
+export interface PlanSection { level: number; title: string; start: number; end: number; body: string }
+
+/** Split markdown into ATX-heading sections, ignoring `#` lines inside fenced code. */
+export function parsePlanSections(text: string): PlanSection[] {
+  const lines = text.replace(/\r/g, "").split("\n");
+  const sections: PlanSection[] = [];
+  let fence: string | undefined;
+  lines.forEach((line, index) => {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (marker) {
+      if (!fence) fence = marker[0]!.repeat(marker.length);
+      else if (marker.startsWith(fence)) fence = undefined;
+      return;
+    }
+    if (fence) return;
+    const heading = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (!heading) return;
+    const previous = sections.at(-1);
+    if (previous) previous.end = index;
+    sections.push({ level: heading[1]!.length, title: cleanText(heading[2]!, 120), start: index, end: lines.length, body: "" });
+  });
+  for (const section of sections) section.body = lines.slice(section.start + 1, section.end).join("\n").replace(/^\n+|\n+$/g, "");
+  return sections;
+}
+
+/** Sections every submitted plan must contain (matched case-insensitively by prefix). */
+export const REQUIRED_PLAN_SECTIONS = ["Context", "Approach", "Critical files", "Verification"] as const;
+export const PLAN_TEMPLATE = [
+  "# <Plan title>",
+  "",
+  "## Context",
+  "Why this change is needed, the literal request, and the intended end state (2–4 sentences).",
+  "",
+  "## Approach",
+  "1. Ordered, behavior-grouped steps. Name exact files, symbols, reused helpers, signatures and error handling.",
+  "2. …",
+  "",
+  "## Critical files",
+  "- `path/to/file.ts` — symbol — why it changes (at most ~5 files).",
+  "",
+  "## Verification",
+  "- Exact commands to run and at least one concrete check of new behavior (input → expected output).",
+  "",
+  "## Assumptions",
+  "- Only decisions the user could override, each with a pre-decided fallback."
+].join("\n");
+
+const sectionMatches = (title: string, required: string) => title.toLowerCase().replace(/[^a-z ]/g, "").trim().startsWith(required.toLowerCase());
+
+/** A section with its nested subsections (everything until the next heading of the same or higher level). */
+function sectionTree(sections: readonly PlanSection[], index: number): PlanSection[] {
+  const root = sections[index]!;
+  const tree = [root];
+  for (const section of sections.slice(index + 1)) {
+    if (section.level <= root.level) break;
+    tree.push(section);
+  }
+  return tree;
+}
+
+const findSection = (sections: readonly PlanSection[], name: string, minLevel = 1) =>
+  sections.findIndex((section) => section.level >= minLevel && sectionMatches(section.title, name));
+
+export interface PlanValidation { ok: boolean; title?: string; missing: string[]; problems: string[] }
+
+export function validatePlanDocument(text: string): PlanValidation {
+  const sections = parsePlanSections(text);
+  const title = sections.find((section) => section.level === 1)?.title;
+  const missing: string[] = [];
+  const problems: string[] = [];
+  if (!title) problems.push("add a single `# Title` heading at the top");
+  for (const required of REQUIRED_PLAN_SECTIONS) {
+    const index = findSection(sections, required, 2);
+    if (index < 0) { missing.push(required); continue; }
+    const content = sectionTree(sections, index).map((section) => section.body).join("\n");
+    if (!content.trim() && sectionTree(sections, index).length === 1) problems.push(`\`## ${sections[index]!.title}\` is empty`);
+    else if (required === "Approach" && sectionTree(sections, index).length === 1 && !/^\s*(?:\d+[.)]|[-*])\s+\S/m.test(content)) {
+      problems.push("list concrete numbered steps under `## Approach`");
+    }
+  }
+  return { ok: !missing.length && !problems.length, ...(title ? { title } : {}), missing, problems };
+}
+
+/** Actionable steps from the Approach section (`###` step headings or numbered items), falling back to a legacy `Plan:` list. */
+export function extractApproachSteps(text: string): string[] {
+  const sections = parsePlanSections(text);
+  const index = findSection(sections, "Approach", 2);
+  if (index < 0) return extractPlanSteps(text);
+  const [approach, ...nested] = sectionTree(sections, index);
+  const direct = nested.filter((section) => section.level === approach!.level + 1);
+  const steps = direct.length
+    ? direct.map((section) => section.title.replace(/^(?:step\s*)?\d+[.):]?\s*/i, ""))
+    : approach!.body.split("\n").map((line) => /^\s*\d+[.)]\s+(.+)$/.exec(line)?.[1] ?? "").map((step) => step.replace(/\*\*/g, ""));
+  return steps.map((step) => cleanText(step, 240)).filter(Boolean).slice(0, 50);
+}
+
+/** Filesystem-safe slug for plan file names. */
+export function planSlug(value: string): string {
+  return value.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "plan";
+}

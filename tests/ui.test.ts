@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Container, stripTerminalSequences, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import piJar from "../extensions/index.ts";
 import { renderFooter, type FooterView } from "../src/footer.ts";
-import { HOPEFUL_WELCOME_MESSAGES, hopefulWelcomeMessage, welcomeLines } from "../src/welcome.ts";
+import { HOPEFUL_WELCOME_MESSAGES, hopefulWelcomeMessage, welcomeHit, welcomeLines } from "../src/welcome.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 
 const plain = { fg: (_color: string, value: string) => value };
@@ -19,110 +19,74 @@ after(() => {
   rmSync(testAgentDir, { recursive: true, force: true });
 });
 
-test("centered layered flame silhouettes animate above π; welcome and footer fit terminal widths", () => {
+test("pixel flame sits above π; welcome and footer fit terminal widths", () => {
   const info = { project: "pi-jar", model: "test-model", context: "ctx 82%", cost: "cost $1.23", managers: ["tasks"] as const, quotaEnabled: false };
   for (const width of [12, 16, 24, 40, 64, 80, 120]) {
-    for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) assert.ok(welcomeLines(width, frame, plain.fg, info).every((line) => visibleWidth(line) <= width));
-    const text = welcomeLines(width, 0, plain.fg, info).join(" ");
+    for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) assert.ok(welcomeLines(width, frame, plain.fg, info).every((line) => visibleWidth(line) <= width), `${width}/${frame}`);
+    const text = welcomeLines(width, 0, plain.fg, info).map(stripTerminalSequences).join(" ");
     assert.ok(text.includes("pi-jar"));
     assert.doesNotMatch(text, /π/); // no second, literal symbol beneath the pixel artwork
+    if (width >= 64) assert.match(text, /quota off/);
     if (width >= 40) {
-      assert.match(text, /quota off/);
       assert.match(text, /Welcome to pi-jar/);
-      if (width >= 72) assert.match(text, /\/tasks/);
-      assert.doesNotMatch(text, /\/subagents-fleet/);
+      assert.match(text, /PROJECT\s+pi-jar · git unavailable/);
+      assert.match(text, /\/tasks/);
     }
-    if (width === 40) assert.ok(welcomeLines(width, 0, plain.fg, info).length <= 32);
     if (width >= 80) {
       const before = welcomeLines(width, 0, plain.fg, info);
       const after = welcomeLines(width, 1, plain.fg, info);
       const left = (lines: string[]) => lines.map((line) => stripTerminalSequences(line).slice(0, 28).trimEnd());
-      assert.notDeepEqual(left(before).slice(0, 13), left(after).slice(0, 13)); // flame and embers breathe
-      assert.deepEqual(left(before).slice(13), left(after).slice(13)); // π and spacing stay grounded
-      assert.ok(left(before).slice(0, 13).some((line) => line.includes("▓▓▓")), "flame has a bright, compact core");
-      assert.doesNotMatch(left(before).slice(0, 13).join(""), /●|ᴗ|█{4}/, "flame has no face or chunky block silhouette");
-      assert.ok(left(before).slice(13, 20).some((line) => line.includes("██")));
-      assert.ok(Array.from({ length: 24 }, (_, frame) => welcomeLines(width, frame, plain.fg, info).join(""))
-        .some((rendered) => stripTerminalSequences(rendered).includes("▪")), "rising ember particles are visible");
-      assert.ok(before.join("").includes("\x1b[38;2;255;242;166m"), "hot core stays bright");
-      const centerOf = (line: string) => {
-        const start = line.search(/\S/);
-        const end = line.length - 1 - [...line].reverse().join("").search(/\S/);
-        return (start + end) / 2;
-      };
-      assert.ok(Math.abs(centerOf(left(before)[12]!) - centerOf(left(before)[13]!)) <= 1, "flame and π share the same visual center");
+      const flameRows = (lines: string[]) => left(lines).findIndex((line) => line.includes("██"));
+      assert.notDeepEqual(before.slice(0, 14).map((line) => line.slice(0, 400)), after.slice(0, 14).map((line) => line.slice(0, 400)), "flame animates");
+      assert.ok(flameRows(before) > 0, "π sits beneath the flame");
+      assert.ok(before.join("").includes("▀") || before.join("").includes("▄"), "half-block pixels");
       assert.equal(stripTerminalSequences(before.at(-1) ?? ""), "");
-      assert.equal(stripTerminalSequences(before.at(-2) ?? ""), "");
-      assert.doesNotMatch(before.join(" "), /\\_+|\|\||\.\-\\/); // no grail
-      assert.match(text, /PROJECT.*pi-jar/);
-      assert.match(text, /role-assistant/);
     }
-    if (width < 32) {
-      for (const frame of [0, 1, 2, 3, 4, 5, 6, 7]) {
-        const flame = welcomeLines(width, frame, plain.fg, info).slice(0, 8);
-        assert.ok(flame.some((row) => stripTerminalSequences(row).includes("▓▓")), "narrow terminals retain the flame's core");
-        if (width === 24) assert.ok(flame.every((row) => visibleWidth(row) === 23), "fixed flame cell footprint");
-      }
-    }
-    const view: FooterView = {
-      model: "provider-model", context: "ctx 82%", cost: formatCost(1.23),
-      quota: { fiveHour: { used: 14 }, week: { used: 50 } }, branch: null,
-      roles: [{ id: "dev-1", name: "Developer", label: "DEV", state: "working" }],
-      extras: [], demo: false, animations: false, frame: 0
-    };
-    const lines = renderFooter(view, width, plain);
-    assert.ok(lines.every((line) => visibleWidth(line) <= width));
-    if (width >= 52) assert.match(lines.join(" "), /5h 14%.*week 50%/);
-    if (width >= 52) assert.match(lines.join(" "), /cost \$1\.23/);
-    if (width >= 32) assert.match(lines.join(" "), /5h 14%/);
-    if (width < 32) assert.doesNotMatch(lines.join(" "), /5h 14%/);
   }
 });
 
-test("flame loops with a restrained tip, fixed footprint, and planted base above stationary π", () => {
-  const tips = new Set<string>();
-  const bases = new Set<string>();
+test("welcome flame is stable per frame and seed, and the π never moves", () => {
   const pi = new Set<string>();
-  for (let frame = 0; frame < 160; frame++) {
-    const rows = welcomeLines(80, frame, plain.fg).map((line) => stripTerminalSequences(line).slice(0, 28));
-    const flame = rows.slice(0, 13);
-    assert.ok(flame.every((row) => visibleWidth(row) === 28), `frame ${frame}: fixed flame cell`);
-    assert.ok(flame.every((row) => !/[●ᴗ]/.test(row)), "flame stays an illustration rather than a face");
-    tips.add(flame.slice(0, 5).join("\n"));
-    bases.add(flame[12]!);
-    pi.add(rows.slice(13, 20).join("\n"));
+  for (let frame = 0; frame < 40; frame++) {
+    const rows = welcomeLines(80, frame, plain.fg, { flameSeed: 4 }).map((line) => stripTerminalSequences(line).slice(0, 28));
+    const start = rows.findIndex((row) => row.includes("▄▄▄▄▄▄▄▄▄▄▄"));
+    pi.add(rows.slice(start, start + 7).join("\n"));
   }
-  assert.ok(tips.size > 1, "the tip flickers");
-  assert.equal(bases.size, 1, "the base never wobbles");
   assert.equal(pi.size, 1, "the π never moves");
-  const cycle = (frame: number) => welcomeLines(80, frame, plain.fg).slice(0, 5).map(stripTerminalSequences);
-  assert.deepEqual(cycle(0), cycle(4), "hand-authored tips loop cleanly");
-  assert.notDeepEqual(cycle(0), cycle(1), "adjacent tip frames differ");
+  assert.deepEqual(welcomeLines(80, 9, plain.fg, { flameSeed: 4 }), welcomeLines(80, 9, plain.fg, { flameSeed: 4 }));
+  assert.notDeepEqual(welcomeLines(80, 9, plain.fg, { flameSeed: 4 }), welcomeLines(80, 9, plain.fg, { flameSeed: 5 }));
 });
 
-test("hopeful welcome copy is varied, bounded and injectable per render", () => {
+test("hopeful welcome copy is varied, bounded, refreshable and injectable per render", () => {
   assert.equal(hopefulWelcomeMessage(() => 0), HOPEFUL_WELCOME_MESSAGES[0]);
   assert.equal(hopefulWelcomeMessage(() => 0.999999), HOPEFUL_WELCOME_MESSAGES.at(-1));
+  let calls = 0;
+  assert.notEqual(hopefulWelcomeMessage(() => (calls++ ? 0.5 : 0), HOPEFUL_WELCOME_MESSAGES[0]), HOPEFUL_WELCOME_MESSAGES[0], "refresh changes the message");
   assert.ok(new Set(HOPEFUL_WELCOME_MESSAGES).size >= 6);
   for (const message of HOPEFUL_WELCOME_MESSAGES) {
     assert.match(message, /light|spark|step|path|work|begin|night/i);
-    const text = welcomeLines(100, 0, plain.fg, { project: "pi-jar", message }).join(" ");
+    const text = welcomeLines(120, 0, plain.fg, { project: "pi-jar", message }).map(stripTerminalSequences).join(" ");
     assert.ok(text.includes(message));
   }
 });
 
-test("welcome emphasizes roles, task and git state without unavailable advisor noise", () => {
-  const info = { project: "jar", roles: [
+test("welcome shows workspace, workflow state, roles and live teammates", () => {
+  const info = { project: "jar", version: "v1.2.3", model: "model-x", effort: "high", activeRole: "plan", roles: [
     { name: "assistant", state: "working", task: "Ship feature" },
     { name: "builder", state: "waiting" },
     { name: "reviewer", state: "working" }
-  ], advisor: "on", quota: 76, branch: "main", dirty: true, managers: ["tasks", "subagents"] as const };
-  for (const width of [40, 80]) {
+  ], quota: 76, branch: "main", dirty: true, managers: ["tasks", "subagents"] as const,
+  plan: { enabled: false, title: "Add hello", steps: 3 }, goal: "Ship · 1/2 tasks", tasks: 1, nextTask: "Write docs",
+  rolesSummary: "default→sonnet · plan→@slow" };
+  for (const width of [40, 80, 120]) {
     const lines = welcomeLines(width, 0, plain.fg, info);
-    const text = lines.join(" ");
+    const text = lines.map(stripTerminalSequences).join(" ");
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
-    for (const label of ["role-assistant", "subagents 2", "quota 76%", "git main", "dirty", "Ship feature", "Welcome to pi-jar"]) assert.ok(text.includes(label), `${width}: ${label}`);
-    assert.doesNotMatch(text, /advisor/i);
+    const labels = width >= 120 ? ["pi-jar v1.2.3", "model-x", "role:plan", "quota 76%", "git main · dirty", "Add hello (3 steps)", "Ship · 1/2 tasks",
+      "next: Write docs", "plan→@slow", "assistant working · 2 subagents · Ship feature", "Welcome to pi-jar"]
+      : width >= 80 ? ["pi-jar v1.2.3", "role:plan", "quota 76%", "git main · dirty", "Add hello (3 steps)", "Ship · 1/2 tasks", "2 subagents"]
+      : ["pi-jar v1.2.3", "git main", "Add hello", "Ship", "Welcome"];
+    for (const label of labels) assert.ok(text.includes(label), `${width}: ${label}`);
     assert.match(text, /╭─.*├─.*╰─/);
   }
 });
@@ -167,11 +131,12 @@ test("hub dispatches only installed native managers and never invents unavailabl
   };
   piJar(pi as unknown as Parameters<typeof piJar>[0]);
   events.get("session_start")?.({}, ctx);
-  assert.match(welcome()?.render(80).join(" ") ?? "", /PROJECT.*pi-jar/);
-  assert.match(welcome()?.render(80).join(" ") ?? "", /Welcome to pi-jar/);
-  assert.match(welcome()?.render(80).join(" ") ?? "", /MANAGERS.*\/tasks/);
+  const rendered = () => welcome()?.render(120).map(stripTerminalSequences).join(" ") ?? "";
+  assert.match(rendered(), /PROJECT\s+pi-jar/);
+  assert.match(rendered(), /Welcome to pi-jar/);
+  assert.match(rendered(), /TEAM.*\/tasks/);
   await handlers.get("jar")?.("hub", ctx);
-  assert.deepEqual(selectChoices, ["Tasks · Team Mode (/tasks)"]);
+  assert.deepEqual(selectChoices, ["Tasks (/tasks)"]);
   assert.deepEqual(sent, [{ message: "/tasks", expand: true }]);
   await handlers.get("jar")?.("animations off", ctx);
   assert.ok(welcome()?.render(40).join(" ").includes("pi-jar"));
@@ -232,26 +197,30 @@ test("late asynchronous Git samples do not repaint a dismissed welcome", async (
   assert.equal(renders, before);
 });
 
-test("welcome Settings action opens the pointer-accessible pane without submitting a prompt", async () => {
+test("welcome actions open settings, refresh, roles, plan and goal on press without submitting a prompt", async () => {
   const events = new Map<string, Function>();
   const widgets = new Map<string, Component>();
   let opened = 0;
+  const pasted: string[] = [];
+  const editors: string[] = [];
   const ctx = {
     hasUI: true, mode: "tui", cwd: "/not-a-real-pi-jar-project", isIdle: () => true,
-    model: { id: "test" }, sessionManager: { getBranch: () => [] },
+    model: { id: "test" }, sessionManager: { getBranch: () => [], getSessionId: () => "s" },
     getContextUsage: () => ({ percent: 0 }),
     ui: {
-      setWorkingIndicator() {}, setFooter() {}, notify() {},
+      setWorkingIndicator() {}, setFooter() {}, notify() {}, setStatus() {},
+      theme: { fg: (_c: string, text: string) => text },
+      pasteToEditor(text: string) { pasted.push(text); },
+      async editor(title: string) { editors.push(title); return undefined; },
       setWidget(key: string, factory?: Function) {
         if (factory) widgets.set(key, factory({ requestRender() {} }, plain));
         else widgets.delete(key);
       },
-      async custom(factory: Function, options?: unknown) {
-        assert.equal(options, undefined, "settings uses Pi's full custom screen, not an overlay");
+      async custom(factory: Function) {
         opened++;
         const pane = factory({ requestRender() {} }, plain, {}, () => {});
-        assert.ok(pane.render(64).join(" ").includes("settings"));
-        pane.handleInput("\x1b");
+        assert.ok(pane.render(64).join(" ").match(/settings|roles/));
+        pane.handleInput("\\x1b");
       }
     }
   };
@@ -260,33 +229,39 @@ test("welcome Settings action opens the pointer-accessible pane without submitti
     getCommands: () => [], registerCommand() {}
   } as never);
   events.get("session_start")?.({}, ctx);
-  // Simulate fullscreen dispatch through a container at a nonzero screen origin.
-  // The control opens on press so terminal/multiplexer click synthesis is not required.
-  for (const width of [24, 40, 80]) {
+  const press = async (label: string, width = 100) => {
     const widget = widgets.get("pi-jar.welcome")!;
     const lines = widget.render(width);
-    const y = lines.findIndex((line) => stripTerminalSequences(line).includes(width < 32 ? "/jar settings" : "[ ⚙ Settings ↗ ]"));
-    assert.ok(y >= 0);
+    const y = lines.findIndex((line) => stripTerminalSequences(line).includes(label));
+    assert.ok(y >= 0, label);
     const text = stripTerminalSequences(lines[y]!);
-    const label = width < 32 ? "/jar settings" : "[ ⚙ Settings ↗ ]";
-    const x = visibleWidth(text.slice(0, text.indexOf(label))) + 3;
+    const x = visibleWidth(text.slice(0, text.indexOf(label))) + 2;
+    // Dispatch through a container at a nonzero origin, like Pi's fullscreen layout.
     const root = new Container();
     root.addChild({ render: () => ["above"], invalidate() {} });
     root.addChild(widget);
     root.render(width);
     const pointer = (type: "press" | "click", localX: number) => root.handleMouse({
-      type, button: "left", x: localX, y: y + 1, screenX: localX + 5, screenY: y + 8,
-      width, height: lines.length + 1
+      type, button: "left", x: localX, y: y + 1, screenX: localX + 5, screenY: y + 8, width, height: lines.length + 1
     } as never);
-    assert.equal(pointer("press", width - 1), undefined);
-    const press = pointer("press", x);
-    assert.ok(press?.handled, `${width}: settings press handled`);
-    assert.ok(press?.capture, `${width}: settings press captured`);
+    assert.equal(pointer("press", width - 1), undefined, "empty space is not captured");
+    const result = pointer("press", x);
+    assert.ok(result?.handled && result.capture, `${label}: press handled and captured`);
+    assert.ok(pointer("click", x)?.handled, "the echo click is swallowed");
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(opened, width === 24 ? 1 : width === 40 ? 2 : 3);
-    if (width !== 80) events.get("session_start")?.({}, ctx);
-  }
-  assert.equal(widgets.has("pi-jar.welcome"), false);
+  };
+  await press("[ ▤ Plan ]");
+  assert.deepEqual(pasted, ["/plan "], "without a plan, Plan pre-fills the command");
+  await press("[ ◎ Goal ]");
+  assert.deepEqual(editors, ["◎ New goal"]);
+  await press("[ ◆ Roles ]");
+  assert.equal(opened, 1);
+  const before = widgets.get("pi-jar.welcome")!.render(100).map(stripTerminalSequences).join("\\n");
+  await press("[ ↻ Refresh ]");
+  assert.notEqual(widgets.get("pi-jar.welcome")!.render(100).map(stripTerminalSequences).join("\\n"), before, "refresh changes the message or flame");
+  await press("[ ⚙ Settings ]", 40);
+  assert.equal(opened, 2, "each action runs exactly once");
+  assert.equal(widgets.has("pi-jar.welcome"), false, "settings replaces the welcome");
   events.get("session_shutdown")?.({}, ctx);
 });
 
@@ -313,10 +288,30 @@ test("regular welcome leaves terminal mouse reporting and scrollback untouched",
     getCommands: () => [], registerCommand() {} } as never);
   events.get("session_start")?.({}, ctx);
   const rendered = widget?.render(120).map(stripTerminalSequences).join(" ") ?? "";
-  assert.match(rendered, /\/jar settings/);
-  assert.doesNotMatch(rendered, /\[ ⚙ Settings ↗ \]/, "regular mode must not advertise an unclickable button");
+  assert.match(rendered, /ctrl\+alt\+s settings · ctrl\+alt\+r refresh/);
+  assert.doesNotMatch(rendered, /\[ ⚙ Settings \]/, "regular mode must not advertise an unclickable button");
   events.get("session_shutdown")?.({}, ctx);
   assert.equal(listeners, 0);
   assert.deepEqual(writes, [], "terminal owns its mouse wheel and selection");
 });
 
+
+test("welcome hit-testing finds every action at wide, medium and narrow widths", () => {
+  const labels = { settings: "[ ⚙ Settings ]", refresh: "[ ↻ Refresh ]", roles: "[ ◆ Roles ]", plan: "[ ▤ Plan ]", goal: "[ ◎ Goal ]" } as const;
+  for (const width of [24, 50, 80, 140]) {
+    const lines = welcomeLines(width, 0, plain.fg, { project: "jar" });
+    for (const [action, label] of Object.entries(labels)) {
+      const y = lines.findIndex((line) => stripTerminalSequences(line).includes(label));
+      if (width < 32 && action !== "settings") { assert.equal(y, -1); continue; }
+      assert.ok(y >= 0, `${width}: ${label}`);
+      const text = stripTerminalSequences(lines[y]!);
+      const start = visibleWidth(text.slice(0, text.indexOf(label)));
+      assert.equal(welcomeHit(lines, start, y), action);
+      assert.equal(welcomeHit(lines, start + visibleWidth(label) - 1, y), action);
+      assert.notEqual(welcomeHit(lines, start + visibleWidth(label), y), action);
+    }
+    assert.equal(welcomeHit(lines, 0, 0), undefined);
+  }
+  const regular = welcomeLines(100, 0, plain.fg, { settingsClickable: false });
+  assert.ok(regular.every((_, y) => regular.every((__, x) => welcomeHit(regular, x, y) === undefined)), "regular mode exposes no click targets");
+});

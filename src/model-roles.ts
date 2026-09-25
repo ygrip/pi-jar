@@ -1,106 +1,233 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { cleanText } from "./status.ts";
 
-export const MODEL_ROLES = ["default", "smol", "slow", "plan", "commit", "task", "advisor"] as const;
-export type ModelRole = (typeof MODEL_ROLES)[number];
+/** Built-in roles and the pi-jar feature that uses each one. Any other valid name is a custom role. */
+export const BUILTIN_ROLES = [
+  { role: "default", label: "Default", usedBy: "session start and approved plans" },
+  { role: "smol", label: "Fast", usedBy: "quick edits and cycling" },
+  { role: "slow", label: "Thinking", usedBy: "deep reasoning and cycling" },
+  { role: "plan", label: "Architect", usedBy: "plan mode" },
+  { role: "advisor", label: "Auditor", usedBy: "goal audit pass" },
+  { role: "task", label: "Subtask", usedBy: "delegated tasks" },
+  { role: "commit", label: "Commit", usedBy: "commit messages" }
+] as const;
+export const MODEL_ROLES = BUILTIN_ROLES.map((item) => item.role);
+export type ModelRole = string;
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type RoleScope = "global" | "project";
 export interface RoleAssignment { provider: string; model: string; thinking?: ThinkingLevel }
-interface RoleConfig { version: 1; roles: Partial<Record<ModelRole, RoleAssignment>> }
-
-const ROLE_FILE = "pi-jar-roles.json";
-const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-const isRole = (value: string): value is ModelRole => MODEL_ROLES.includes(value as ModelRole);
-const isThinking = (value: unknown): value is ThinkingLevel => typeof value === "string" && THINKING.includes(value as ThinkingLevel);
-
-function loadConfig(): RoleConfig {
-  try {
-    const raw: unknown = JSON.parse(readFileSync(join(getAgentDir(), ROLE_FILE), "utf8"));
-    if (!raw || typeof raw !== "object" || (raw as Record<string, unknown>).version !== 1) return { version: 1, roles: {} };
-    const source = (raw as { roles?: Record<string, unknown> }).roles ?? {};
-    const roles: RoleConfig["roles"] = {};
-    for (const role of MODEL_ROLES) {
-      const value = source[role];
-      if (!value || typeof value !== "object") continue;
-      const item = value as Record<string, unknown>;
-      if (typeof item.provider !== "string" || typeof item.model !== "string") continue;
-      roles[role] = {
-        provider: cleanText(item.provider, 64), model: cleanText(item.model, 160),
-        ...(isThinking(item.thinking) ? { thinking: item.thinking } : {})
-      };
-    }
-    return { version: 1, roles };
-  } catch {
-    return { version: 1, roles: {} };
-  }
+export interface ResolvedRole extends RoleAssignment { via: string[] }
+export interface RoleTag { name?: string; color?: string }
+export interface RoleConfig { version: 2; roles: Record<string, string>; cycleOrder?: string[]; tags?: Record<string, RoleTag> }
+export interface RoleRow {
+  role: string; label: string; usedBy?: string; custom: boolean;
+  spec?: string; scope?: RoleScope; resolved?: ResolvedRole; error?: string;
 }
 
-function saveConfig(config: RoleConfig): void {
-  const directory = getAgentDir();
-  mkdirSync(directory, { recursive: true });
-  const target = join(directory, ROLE_FILE);
-  const temporary = target + "." + String(process.pid) + "." + Math.random().toString(36).slice(2) + ".tmp";
+export const ROLE_FILE = "pi-jar-roles.json";
+export const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const DEFAULT_CYCLE = ["smol", "default", "slow"];
+const MAX_ALIAS_DEPTH = 5;
+export const isRoleName = (value: string): boolean => /^[a-z][a-z0-9-]{0,31}$/.test(value);
+export const isThinking = (value: unknown): value is ThinkingLevel => typeof value === "string" && THINKING.includes(value as ThinkingLevel);
+
+/** Parse `provider/model[:thinking]`, `@role[:thinking]` or `*`; returns a canonical spec or undefined. */
+export function normalizeSpec(raw: string): string | undefined {
+  const value = raw.trim();
+  if (value === "*") return "@default";
+  const colon = value.lastIndexOf(":");
+  const suffix = colon > 0 ? value.slice(colon + 1) : "";
+  const head = colon > 0 && isThinking(suffix) ? value.slice(0, colon) : value;
+  const thinking = head === value ? "" : ":" + suffix;
+  if (head.startsWith("@")) return isRoleName(head.slice(1)) ? head + thinking : undefined;
+  const slash = head.indexOf("/");
+  if (slash <= 0 || slash === head.length - 1 || /\s/.test(head)) return undefined;
+  return cleanText(head.slice(0, slash), 64) + "/" + cleanText(head.slice(slash + 1), 160) + thinking;
+}
+
+/** Accepts v2 files and migrates v1 `{provider, model, thinking}` objects in memory. */
+export function parseRoleConfig(raw: unknown): RoleConfig {
+  const config: RoleConfig = { version: 2, roles: {} };
+  if (!raw || typeof raw !== "object") return config;
+  const value = raw as Record<string, unknown>;
+  if (value.version !== 1 && value.version !== 2) return config;
+  const source = value.roles && typeof value.roles === "object" ? value.roles as Record<string, unknown> : {};
+  for (const [role, entry] of Object.entries(source)) {
+    if (!isRoleName(role)) continue;
+    let spec: string | undefined;
+    if (typeof entry === "string") spec = normalizeSpec(entry);
+    else if (entry && typeof entry === "object") {
+      const item = entry as Record<string, unknown>;
+      if (typeof item.provider === "string" && typeof item.model === "string") {
+        spec = normalizeSpec(item.provider + "/" + item.model + (isThinking(item.thinking) ? ":" + item.thinking : ""));
+      }
+    }
+    if (spec) config.roles[role] = spec;
+  }
+  if (Array.isArray(value.cycleOrder)) {
+    const order = value.cycleOrder.filter((item): item is string => typeof item === "string" && isRoleName(item));
+    if (order.length) config.cycleOrder = [...new Set(order)];
+  }
+  if (value.tags && typeof value.tags === "object") {
+    const tags: Record<string, RoleTag> = {};
+    for (const [role, tag] of Object.entries(value.tags as Record<string, unknown>)) {
+      if (!isRoleName(role) || !tag || typeof tag !== "object") continue;
+      const item = tag as Record<string, unknown>;
+      tags[role] = {
+        ...(typeof item.name === "string" ? { name: cleanText(item.name, 24) } : {}),
+        ...(typeof item.color === "string" ? { color: cleanText(item.color, 16) } : {})
+      };
+    }
+    if (Object.keys(tags).length) config.tags = tags;
+  }
+  return config;
+}
+
+/** Follow `@alias` chains; an explicit thinking suffix on the referring role wins over the target's. */
+export function resolveRole(roles: Readonly<Record<string, string>>, role: string): ResolvedRole | { error: string } | undefined {
+  const via: string[] = [];
+  let current = role;
+  let thinking: ThinkingLevel | undefined;
+  for (let depth = 0; depth <= MAX_ALIAS_DEPTH; depth++) {
+    if (via.includes(current)) return { error: "alias cycle: " + [...via, current].join(" → ") };
+    via.push(current);
+    const spec = roles[current];
+    if (!spec) return depth === 0 ? undefined : { error: "@" + current + " is not assigned" };
+    const colon = spec.lastIndexOf(":");
+    const suffix = colon > 0 ? spec.slice(colon + 1) : "";
+    const head = colon > 0 && isThinking(suffix) ? spec.slice(0, colon) : spec;
+    if (head !== spec) thinking ??= suffix as ThinkingLevel;
+    if (head.startsWith("@")) { current = head.slice(1); continue; }
+    const slash = head.indexOf("/");
+    return { provider: head.slice(0, slash), model: head.slice(slash + 1), ...(thinking ? { thinking } : {}), via };
+  }
+  return { error: "alias chain deeper than " + MAX_ALIAS_DEPTH };
+}
+
+function readConfig(file: string): RoleConfig {
+  try { return parseRoleConfig(JSON.parse(readFileSync(file, "utf8"))); }
+  catch { return { version: 2, roles: {} }; }
+}
+
+function writeConfig(file: string, config: RoleConfig): void {
+  mkdirSync(dirname(file), { recursive: true });
+  const temporary = file + "." + String(process.pid) + "." + Math.random().toString(36).slice(2) + ".tmp";
   try {
     writeFileSync(temporary, JSON.stringify(config, null, 2) + "\n", { flag: "wx" });
-    renameSync(temporary, target);
+    renameSync(temporary, file);
   } catch (error) {
     try { if (existsSync(temporary)) unlinkSync(temporary); } catch {}
     throw error;
   }
 }
 
-function describe(role: ModelRole, assignment?: RoleAssignment): string {
-  if (!assignment) return role.toUpperCase() + "  ·  follow current model";
-  return role.toUpperCase() + "  ·  " + assignment.provider + "/" + assignment.model + (assignment.thinking ? "  ·  " + assignment.thinking : "");
+export const projectRoleFile = (cwd: string) => join(cwd, ".pi", ROLE_FILE);
+
+export function describeRole(row: RoleRow): string {
+  const target = row.error ? "⚠ " + row.error
+    : row.resolved ? row.resolved.provider + "/" + row.resolved.model + (row.resolved.thinking ? " · " + row.resolved.thinking : "")
+    : "follows current model";
+  return row.role + "  ·  " + (row.spec?.startsWith("@") ? row.spec + " → " : "") + target + (row.scope === "project" ? "  · project" : "");
 }
 
 export class ModelRoleManager {
-  private config = loadConfig();
-  private active: ModelRole | undefined;
+  private global: RoleConfig = readConfig(join(getAgentDir(), ROLE_FILE));
+  private project: RoleConfig = { version: 2, roles: {} };
+  private cwd: string | undefined;
+  private active: string | undefined;
   private readonly pi: ExtensionAPI;
 
   constructor(pi: ExtensionAPI) {
     this.pi = pi;
   }
 
-  get(role: ModelRole): RoleAssignment | undefined {
-    const value = this.config.roles[role];
-    return value && { ...value };
+  /** Reload global and project files; project assignments override global ones per role. */
+  load(cwd?: string): void {
+    this.global = readConfig(join(getAgentDir(), ROLE_FILE));
+    this.cwd = cwd;
+    this.project = cwd ? readConfig(projectRoleFile(cwd)) : { version: 2, roles: {} };
+  }
+
+  private merged(): Record<string, string> { return { ...this.global.roles, ...this.project.roles }; }
+  activeRole(): string | undefined { return this.active; }
+  cycleOrder(): string[] { return this.project.cycleOrder ?? this.global.cycleOrder ?? DEFAULT_CYCLE; }
+  tag(role: string): RoleTag | undefined { return this.project.tags?.[role] ?? this.global.tags?.[role]; }
+  spec(role: string): string | undefined { return this.merged()[role]; }
+  scopeOf(role: string): RoleScope | undefined { return role in this.project.roles ? "project" : role in this.global.roles ? "global" : undefined; }
+
+  resolve(role: string): ResolvedRole | undefined {
+    const result = resolveRole(this.merged(), role);
+    return result && !("error" in result) ? result : undefined;
+  }
+
+  get(role: string): RoleAssignment | undefined {
+    const resolved = this.resolve(role);
+    if (!resolved) return undefined;
+    const { via: _via, ...assignment } = resolved;
+    return assignment;
+  }
+
+  list(): RoleRow[] {
+    const roles = this.merged();
+    const custom = Object.keys(roles).filter((role) => !MODEL_ROLES.includes(role as never)).sort();
+    const rows = [
+      ...BUILTIN_ROLES.map((item) => ({ role: item.role, label: item.label, usedBy: item.usedBy as string, custom: false })),
+      ...custom.map((role) => ({ role, label: this.tag(role)?.name ?? role, custom: true }))
+    ];
+    return rows.map((row) => {
+      const result = resolveRole(roles, row.role);
+      return { ...row, spec: roles[row.role], scope: this.scopeOf(row.role),
+        ...(result && "error" in result ? { error: result.error } : result ? { resolved: result } : {}) };
+    });
+  }
+
+  /** Summary for compact surfaces such as the welcome card. */
+  summary(limit = 3): string {
+    const rows = this.list().filter((row) => row.resolved || row.spec);
+    if (!rows.length) return "all roles follow the current model";
+    return rows.slice(0, limit).map((row) => row.role + "→" + (row.spec?.startsWith("@") ? row.spec.split(":")[0] : row.resolved?.model ?? "?")).join(" · ")
+      + (rows.length > limit ? ` · +${rows.length - limit}` : "");
   }
 
   private status(ctx: ExtensionContext): void {
-    ctx.ui.setStatus("pi-jar.model-role", this.active ? ctx.ui.theme.fg("accent", "role:" + this.active) : undefined);
+    try { ctx.ui.setStatus("pi-jar.model-role", this.active ? ctx.ui.theme.fg("accent", "role:" + this.active) : undefined); }
+    catch { /* status is decorative */ }
   }
 
-  async activate(role: ModelRole, ctx: ExtensionContext, quiet = false): Promise<boolean> {
-    const assignment = this.config.roles[role];
-    if (!assignment) {
+  async activate(role: string, ctx: ExtensionContext, quiet = false): Promise<boolean> {
+    const result = resolveRole(this.merged(), role);
+    if (result && "error" in result) {
+      if (!quiet) ctx.ui.notify("Role " + role + ": " + result.error, "warning");
+      return false;
+    }
+    if (!result) {
       if (!quiet) ctx.ui.notify("Role " + role + " follows the current model; assign one with /roles", "info");
       this.active = role;
       this.status(ctx);
       return true;
     }
-    const model = ctx.modelRegistry.find(assignment.provider, assignment.model);
+    const model = ctx.modelRegistry.find(result.provider, result.model);
     if (!model) {
-      if (!quiet) ctx.ui.notify("Model not found for role " + role + ": " + assignment.provider + "/" + assignment.model, "warning");
+      if (!quiet) ctx.ui.notify("Model not found for role " + role + ": " + result.provider + "/" + result.model, "warning");
       return false;
     }
     const changed = await this.pi.setModel(model);
     if (!changed) {
-      if (!quiet) ctx.ui.notify("No configured authentication for " + assignment.provider + "/" + assignment.model, "warning");
+      if (!quiet) ctx.ui.notify("No configured authentication for " + result.provider + "/" + result.model, "warning");
       return false;
     }
-    if (assignment.thinking) this.pi.setThinkingLevel(assignment.thinking);
+    if (result.thinking) this.pi.setThinkingLevel(result.thinking);
     this.active = role;
     this.status(ctx);
-    if (!quiet) ctx.ui.notify("Role " + role + " · " + assignment.provider + "/" + assignment.model + (assignment.thinking ? " · " + assignment.thinking : ""), "info");
+    if (!quiet) ctx.ui.notify("Role " + role + " · " + result.provider + "/" + result.model + (result.thinking ? " · " + result.thinking : ""), "info");
     return true;
   }
 
-  async activateTemporary(role: ModelRole, ctx: ExtensionContext): Promise<() => Promise<void>> {
-    const assignment = this.config.roles[role];
-    if (!assignment) return async () => {};
+  /** Switch to a role for a bounded workflow; the returned function restores the previous model. */
+  async activateTemporary(role: string, ctx: ExtensionContext): Promise<() => Promise<void>> {
+    if (!this.resolve(role)) return async () => {};
     const previousModel = ctx.model;
     const previousThinking = this.pi.getThinkingLevel();
     const previousActive = this.active;
@@ -114,88 +241,67 @@ export class ModelRoleManager {
     };
   }
 
-  private update(role: ModelRole, assignment: RoleAssignment | undefined): void {
-    this.config = { version: 1, roles: { ...this.config.roles, [role]: assignment } };
-    if (!assignment) delete this.config.roles[role];
-    saveConfig(this.config);
+  /** Activate the next assigned role in the cycle order. */
+  async cycle(ctx: ExtensionContext): Promise<string | undefined> {
+    const order = this.cycleOrder().filter((role) => this.resolve(role));
+    if (!order.length) { ctx.ui.notify("No roles in the cycle order are assigned; configure them with /roles", "info"); return undefined; }
+    const next = order[(order.indexOf(this.active ?? "") + 1) % order.length]!;
+    return await this.activate(next, ctx) ? next : undefined;
   }
 
-  private async configure(role: ModelRole, ctx: ExtensionContext): Promise<void> {
-    if (!ctx.hasUI || ctx.mode !== "tui") return;
-    while (true) {
-      const current = this.config.roles[role];
-      const choice = await ctx.ui.select("◆ ROLE · " + describe(role, current), [
-        "Assign provider/model", "Set thinking effort", "Activate role now", "Clear assignment", "Back"
-      ]);
-      if (!choice || choice === "Back") return;
-      if (choice === "Assign provider/model") {
-        const models = ctx.modelRegistry.getAvailable().slice().sort((a, b) => (a.provider + "/" + a.id).localeCompare(b.provider + "/" + b.id));
-        if (!models.length) { ctx.ui.notify("No authenticated models are currently available", "warning"); continue; }
-        const labels = models.map((model) => model.provider + "/" + model.id);
-        const selected = await ctx.ui.select("Model for " + role, labels);
-        const at = selected ? labels.indexOf(selected) : -1;
-        if (at >= 0) {
-          const model = models[at]!;
-          this.update(role, { provider: model.provider, model: model.id, ...(current?.thinking ? { thinking: current.thinking } : {}) });
-        }
-      } else if (choice === "Set thinking effort") {
-        const selected = await ctx.ui.select("Thinking effort for " + role, ["follow current", ...THINKING]);
-        if (!selected) continue;
-        if (!current) { ctx.ui.notify("Assign a model first", "warning"); continue; }
-        const { thinking: _previousThinking, ...base } = current;
-        this.update(role, selected === "follow current"
-          ? base
-          : { ...base, thinking: selected as ThinkingLevel });
-      } else if (choice === "Activate role now") {
-        await this.activate(role, ctx);
-      } else if (choice === "Clear assignment") {
-        this.update(role, undefined);
-        ctx.ui.notify("Role " + role + " now follows the current model", "info");
-      }
-    }
+  /** Assign (or clear with undefined) a role in the chosen scope. */
+  update(role: string, spec: string | undefined, scope: RoleScope = this.scopeOf(role) ?? "global"): void {
+    if (!isRoleName(role)) throw new Error("Invalid role name: " + role);
+    const normalized = spec === undefined ? undefined : normalizeSpec(spec);
+    if (spec !== undefined && !normalized) throw new Error("Invalid role target: " + spec);
+    if (scope === "project" && !this.cwd) throw new Error("Project roles need a working directory");
+    const target = scope === "project" ? this.project : this.global;
+    const roles = { ...target.roles };
+    if (normalized) roles[role] = normalized; else delete roles[role];
+    const next: RoleConfig = { ...target, version: 2, roles };
+    writeConfig(scope === "project" ? projectRoleFile(this.cwd!) : join(getAgentDir(), ROLE_FILE), next);
+    if (scope === "project") this.project = next; else this.global = next;
   }
 
-  register(): void {
+  register(openUi?: (ctx: ExtensionContext) => Promise<void>): void {
     this.pi.on("session_start", async (_event, ctx) => {
-      if (this.config.roles.default) await this.activate("default", ctx, true);
+      this.load(ctx.cwd);
+      this.active = undefined;
+      if (this.resolve("default")) await this.activate("default", ctx, true);
     });
 
     this.pi.registerCommand("roles", {
-      description: "Configure model assignments for default/smol/slow/plan/commit/task/advisor roles",
+      description: "Configure model roles (default/smol/slow/plan/advisor/task/commit or custom): /roles, /roles set ROLE provider/model[:effort]|@role, /roles <role>",
       handler: async (args, ctx) => {
         const parts = args.trim().split(/\s+/).filter(Boolean);
         const verb = (parts[0] ?? "").toLowerCase();
-        if (!verb) {
-          if (!ctx.hasUI || ctx.mode !== "tui") {
-            ctx.ui.notify(MODEL_ROLES.map((role) => describe(role, this.config.roles[role])).join("\n"), "info");
-            return;
-          }
-          const labels = MODEL_ROLES.map((role) => describe(role, this.config.roles[role]));
-          const selected = await ctx.ui.select("◆ pi-jar · model roles", labels);
-          const at = selected ? labels.indexOf(selected) : -1;
-          if (at >= 0) await this.configure(MODEL_ROLES[at]!, ctx);
+        if (!verb || verb === "list") {
+          if (!verb && ctx.hasUI && ctx.mode === "tui" && openUi) { await openUi(ctx); return; }
+          ctx.ui.notify(this.list().map(describeRole).join("\n"), "info");
           return;
         }
+        if (verb === "cycle") { await this.cycle(ctx); return; }
         if (verb === "set") {
           const role = (parts[1] ?? "").toLowerCase();
-          const target = parts[2] ?? "";
-          const slash = target.indexOf("/");
-          if (!isRole(role) || slash <= 0 || slash === target.length - 1) { ctx.ui.notify("Usage: /roles set ROLE PROVIDER/MODEL [effort]", "error"); return; }
-          const requestedThinking = parts[3];
-          const thinking = isThinking(requestedThinking) ? requestedThinking : undefined;
-          if (requestedThinking && !thinking) { ctx.ui.notify("Unknown thinking effort: " + requestedThinking, "error"); return; }
-          this.update(role, { provider: target.slice(0, slash), model: target.slice(slash + 1), ...(thinking ? { thinking } : {}) });
-          ctx.ui.notify("Assigned " + role + " → " + target, "info");
+          const legacyThinking = parts[3];
+          const target = (parts[2] ?? "") + (legacyThinking && isThinking(legacyThinking) ? ":" + legacyThinking : "");
+          const scope: RoleScope = parts.includes("--project") ? "project" : "global";
+          if (legacyThinking && legacyThinking !== "--project" && !isThinking(legacyThinking)) { ctx.ui.notify("Unknown thinking effort: " + legacyThinking, "error"); return; }
+          if (!isRoleName(role) || !normalizeSpec(target)) { ctx.ui.notify("Usage: /roles set ROLE PROVIDER/MODEL[:effort]|@ROLE [--project]", "error"); return; }
+          try { this.update(role, target, scope); }
+          catch (error) { ctx.ui.notify("Could not save role: " + (error as Error).message, "error"); return; }
+          ctx.ui.notify("Assigned " + role + " → " + normalizeSpec(target) + (scope === "project" ? " (project)" : ""), "info");
           return;
         }
         if (verb === "clear") {
           const role = (parts[1] ?? "").toLowerCase();
-          if (!isRole(role)) { ctx.ui.notify("Usage: /roles clear ROLE", "error"); return; }
-          this.update(role, undefined);
+          if (!isRoleName(role)) { ctx.ui.notify("Usage: /roles clear ROLE", "error"); return; }
+          try { this.update(role, undefined); }
+          catch (error) { ctx.ui.notify("Could not save role: " + (error as Error).message, "error"); return; }
           ctx.ui.notify("Cleared role " + role, "info");
           return;
         }
-        if (!isRole(verb)) { ctx.ui.notify("Unknown role. Use: " + MODEL_ROLES.join(", "), "error"); return; }
+        if (!isRoleName(verb)) { ctx.ui.notify("Unknown role. Use: " + this.list().map((row) => row.role).join(", "), "error"); return; }
         await this.activate(verb, ctx);
       }
     });

@@ -75,3 +75,31 @@ test("settings pane supports fullscreen clicks, keyboard operation and narrow wi
   assert.equal(closed, true);
   assert.ok(renders >= 3);
 });
+
+test("Pi tab toggles fullscreen mouse, copy-on-select and goal rounds", async () => {
+  let state = defaultVisualSettings();
+  const prefs = { fullscreen: false, copyOnSelect: true };
+  const notices: string[] = [];
+  const ctx = { hasUI: true, mode: "tui", ui: {
+    notify(message: string) { notices.push(message); },
+    custom: async (factory: Function) => {
+      const pane = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text }, {}, () => {});
+      pane.handleInput("\t"); pane.handleInput("\t");
+      assert.match(pane.render(64).join(" "), /PI & WORKFLOWS/);
+      assert.match(pane.render(64).join(" "), /Mouse clicks.*OFF/);
+      pane.handleInput(" ");
+      assert.equal(prefs.fullscreen, true);
+      assert.ok(notices.some((notice) => /restart Pi/.test(notice)));
+      pane.handleInput("\x1b[B"); pane.handleInput(" ");
+      assert.equal(prefs.copyOnSelect, false);
+      pane.handleInput("\x1b[B"); pane.handleInput(" ");
+      assert.equal(state.goalRounds, 12);
+      pane.handleMouse({ type: "click", button: "left", x: 5, y: 1 });
+      assert.match(pane.render(64).join(" "), /APPEARANCE/);
+      pane.handleInput("\x1b");
+    }
+  } };
+  await openJarSettings(ctx as never, () => state, (next) => { state = next; }, [], {
+    get: () => ({ ...prefs }), setFullscreen: (on) => { prefs.fullscreen = on; }, setCopyOnSelect: (on) => { prefs.copyOnSelect = on; }
+  });
+});

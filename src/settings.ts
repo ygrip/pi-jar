@@ -10,12 +10,20 @@ export interface JarVisualSettings {
   animations: boolean;
   ui: boolean;
   composer: boolean;
+  /** Ember mascot perched on the composer. */
+  mascot: boolean;
+  /** Agent-provided next-prompt ghost text in the composer. */
+  suggestions: boolean;
+  /** Automatic implement/audit rounds per user message while a goal is active. */
+  goalRounds: number;
   footer: FooterSettings;
 }
 
+export const GOAL_ROUND_CHOICES = [4, 8, 12, 20] as const;
+
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, footer: { ...footer } };
 }
 
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
@@ -41,6 +49,10 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     animations: typeof value.animations === "boolean" ? value.animations : fallback.animations,
     ui: typeof value.ui === "boolean" ? value.ui : fallback.ui,
     composer: typeof value.composer === "boolean" ? value.composer : fallback.composer,
+    mascot: typeof value.mascot === "boolean" ? value.mascot : fallback.mascot,
+    suggestions: typeof value.suggestions === "boolean" ? value.suggestions : fallback.suggestions,
+    goalRounds: typeof value.goalRounds === "number" && Number.isInteger(value.goalRounds) && value.goalRounds >= 1 && value.goalRounds <= 50
+      ? value.goalRounds : fallback.goalRounds,
     footer: Object.fromEntries(FOOTER_FIELDS.map((field) => [field,
       typeof footer[field] === "boolean" ? footer[field] : fallback.footer[field]])) as FooterSettings
   };

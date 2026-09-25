@@ -19,5 +19,5 @@ export function roleFrame(state: RoleState, frame: number, animations = true): s
 }
 
 export const WORKING_FRAMES = ["◇", "◆", "◇", "◈"] as const;
-/** Hand-drawn torch-tip flicker with sparse embers; static when motion is disabled. */
-export const WELCOME_INTERVAL_MS = 120;
+/** Pixel-fire tick for the welcome flame; frozen when motion is disabled. */
+export const WELCOME_INTERVAL_MS = 90;

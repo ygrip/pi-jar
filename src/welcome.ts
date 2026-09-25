@@ -1,21 +1,33 @@
-import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { FLAME_WIDTH, flameFrame } from "./flame.ts";
 import { cleanText } from "./status.ts";
 
+export type WelcomeAction = "settings" | "refresh" | "roles" | "plan" | "goal";
+
 export interface WelcomeInfo {
+  version?: string;
   model?: string;
+  effort?: string;
+  activeRole?: string;
   project?: string;
   context?: string;
   cost?: string;
   managers?: readonly ("tasks" | "subagents")[];
   quotaEnabled?: boolean;
   quota?: number;
+  /** Publisher-supplied live roles (other extensions, subagents). */
   roles?: readonly { name: string; state: string; task?: string }[];
   tasks?: number;
-  advisor?: string;
+  nextTask?: string;
+  plan?: { enabled: boolean; title?: string; steps: number };
+  goal?: string;
+  rolesSummary?: string;
   branch?: string;
   dirty?: boolean;
   message?: string;
+  /** Pi fullscreen mode delivers mouse events; otherwise keyboard hints are shown. */
   settingsClickable?: boolean;
+  flameSeed?: number;
 }
 
 type WelcomeColor = "accent" | "warning" | "error" | "muted" | "dim";
@@ -32,36 +44,16 @@ export const HOPEFUL_WELCOME_MESSAGES = [
   "Every useful thing starts as a small spark."
 ] as const;
 
-export function hopefulWelcomeMessage(random: () => number = Math.random): string {
-  const value = random();
-  const index = Math.min(HOPEFUL_WELCOME_MESSAGES.length - 1,
-    Math.max(0, Math.floor((Number.isFinite(value) ? value : 0) * HOPEFUL_WELCOME_MESSAGES.length)));
-  return HOPEFUL_WELCOME_MESSAGES[index]!;
-}
-
-// Original fixed-width sprite: a small, curved flame with a steady base.
-// Only the tip changes between frames; never shift the torch or its hot core.
-// See docs/FLAME_RESEARCH.md for the third-party asset review.
-const FLAME_WIDTH = 23;
-const FLAME_TIPS = [
-  ["           ╱", "          ╱╲", "         ╱░╲", "          ╲▒╲", "         ╱▒▓╲"],
-  ["            ╱", "           ╱╲", "          ╱░╲", "          ╲▒╲", "         ╱▒▓╲"],
-  ["           ╱", "          ╱╲", "          ╲░╲", "         ╱▒▒╲", "         ╱▒▓╲"],
-  ["          ╱", "         ╱╲", "         ╲░╲", "          ╲▒╲", "         ╱▒▓╲"]
-] as const;
-const FLAME_BASE = [
-  "        ╱▒▓▓▒╲",
-  "        ╲▒▓▓▓╲",
-  "         ╲▒▓▓▒╲",
-  "        ╱▒▓▓▓▒╲",
-  "       ╱▒▓▓▓▓▒╲",
-  "       ╲▒▓▓▓▒▒╱",
-  "        ╲▒▒▒▒╱",
-  "         ╲▒▒╱"
-] as const;
-
-function flameSprite(frame: number): string[] {
-  return [...FLAME_TIPS[((frame % FLAME_TIPS.length) + FLAME_TIPS.length) % FLAME_TIPS.length]!, ...FLAME_BASE];
+export function hopefulWelcomeMessage(random: () => number = Math.random, previous?: string): string {
+  const pick = () => {
+    const value = random();
+    return HOPEFUL_WELCOME_MESSAGES[Math.min(HOPEFUL_WELCOME_MESSAGES.length - 1,
+      Math.max(0, Math.floor((Number.isFinite(value) ? value : 0) * HOPEFUL_WELCOME_MESSAGES.length)))]!;
+  };
+  let message = pick();
+  // Refresh should visibly change the message.
+  for (let attempt = 0; previous && message === previous && attempt < 4; attempt++) message = pick();
+  return message;
 }
 
 const PI_LARGE = [
@@ -82,20 +74,13 @@ const PI_COMPACT = [
 ] as const;
 
 const ART_WIDTH = 28;
-const FIRE_RGB = {
-  core: "#FFF2A6",
-  hot: "#FFD45A",
-  orange: "#FF8A1F",
-  edge: "#E65B27",
-  spark: "#FFE16A",
-  ember: "#FF991F",
-  fading: "#A94320"
-} as const;
-
-const EMBERS = [
-  { x: 6, startY: 8, phase: 0, life: 36, drift: -0.08, sway: 0.4 },
-  { x: 17, startY: 7, phase: 17, life: 40, drift: 0.08, sway: 0.4 }
-] as const;
+const ACTIONS: readonly { action: WelcomeAction; label: string; hint: string }[] = [
+  { action: "settings", label: "[ ⚙ Settings ]", hint: "ctrl+alt+s settings" },
+  { action: "refresh", label: "[ ↻ Refresh ]", hint: "ctrl+alt+r refresh" },
+  { action: "roles", label: "[ ◆ Roles ]", hint: "/roles" },
+  { action: "plan", label: "[ ▤ Plan ]", hint: "/plan" },
+  { action: "goal", label: "[ ◎ Goal ]", hint: "/goal" }
+];
 
 const center = (line: string, width: number) => {
   const room = Math.max(0, width - visibleWidth(line));
@@ -106,138 +91,113 @@ const fixedCell = (line: string, width: number) => {
   const value = truncateToWidth(line, width);
   return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
 };
-const flameCell = (line: string) => fixedCell(line, FLAME_WIDTH);
-const flameArtCell = (line: string) => center(line, ART_WIDTH);
-const piArtCell = (line: string) => center(fixedCell(line, 21), ART_WIDTH);
 
-function rgb(hex: string, text: string): string {
-  const value = hex.replace("#", "");
-  if (value.length !== 6) return text;
-  const r = Number.parseInt(value.slice(0, 2), 16);
-  const g = Number.parseInt(value.slice(2, 4), 16);
-  const b = Number.parseInt(value.slice(4, 6), 16);
-  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
-}
-
-function addEmbers(lines: readonly string[], frame: number): string[] {
-  const canvas = lines.map((line) => [...flameCell(line)]);
-  for (const particle of EMBERS) {
-    const age = (frame + particle.phase) % particle.life;
-    // Long dormant intervals keep sparks occasional instead of forming a halo.
-    if (age > 11) continue;
-    const rise = Math.floor(age * 0.68);
-    const y = particle.startY - rise;
-    const sway = Math.sin((age + particle.phase) * 0.58) * particle.sway;
-    const x = Math.round(particle.x + particle.drift * age + sway);
-    if (y < 0 || y >= canvas.length || x < 0 || x >= FLAME_WIDTH) continue;
-    if (canvas[y]![x] !== " ") continue;
-    canvas[y]![x] = age <= 1 ? "S" : age <= 5 ? "s" : ".";
+/** Pack chips into rows no wider than `width`. */
+function pack(items: readonly string[], width: number, gap = " "): string[] {
+  const rows: string[] = [];
+  for (const item of items) {
+    const last = rows.length - 1;
+    if (last >= 0 && visibleWidth(rows[last]!) + visibleWidth(gap) + visibleWidth(item) <= width) rows[last] += gap + item;
+    else rows.push(item);
   }
-  return canvas.map((row) => row.join(""));
-}
-
-function paintFlame(line: string): string {
-  return line
-    .replace(/▓+/g, (part) => rgb(FIRE_RGB.core, part))
-    .replace(/▒+/g, (part) => rgb(FIRE_RGB.hot, part))
-    .replace(/░+/g, (part) => rgb(FIRE_RGB.orange, part))
-    .replace(/[╱╲]+/g, (part) => rgb(FIRE_RGB.edge, part))
-    .replace(/S+/g, (part) => rgb(FIRE_RGB.spark, "■".repeat(part.length)))
-    .replace(/s+/g, (part) => rgb(FIRE_RGB.ember, "▪".repeat(part.length)))
-    .replace(/\.+/g, (part) => rgb(FIRE_RGB.fading, "·".repeat(part.length)));
+  return rows;
 }
 
 function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
-  const w = Math.max(8, width);
+  const w = Math.max(12, width);
   const inner = w - 4;
+  const narrow = w < 48;
   const cell = (value: string) => {
     const text = truncateToWidth(value, inner);
     return fg("dim", "│ ") + text + " ".repeat(Math.max(0, inner - visibleWidth(text))) + fg("dim", " │");
   };
   const divider = fg("dim", "├" + "─".repeat(w - 2) + "┤");
-  const role = info.roles?.find((item) => ["working", "thinking", "reviewing", "failed"].includes(item.state)) ?? info.roles?.[0];
-  const roleName = cleanText(role?.name ?? "assistant", w < 48 ? 12 : 25);
-  const roleState = cleanText(role?.state ?? "ready", 12);
-  const task = role?.task ?? (info.tasks ? `${info.tasks} open to-do${info.tasks === 1 ? "" : "s"}` : "no active task");
-  const subagents = Math.max(0, (info.roles?.length ?? 0) - (info.roles?.some((r) => r.name === "assistant") ? 1 : 0));
-  const roleChip = fg("accent", `[ role-${roleName} ]`);
-  const activityChip = fg(role?.state === "failed" ? "error" : "warning", `[ ${roleState} ]`);
-  const subagentChip = fg("accent", `[ subagents ${subagents} ]`);
-  const quotaChip = info.quota != null
-    ? fg("warning", `[ quota ${Math.round(info.quota)}% ]`)
-    : fg("dim", `[ quota ${info.quotaEnabled ? "unavailable" : "off"} ]`);
-  const narrow = w < 48;
-  const badges = [roleChip, activityChip, subagentChip, quotaChip];
-  const badgeRows: string[] = [];
-  for (const badge of badges) {
-    const last = badgeRows.length - 1;
-    if (last >= 0 && visibleWidth(badgeRows[last]!) + visibleWidth(badge) + 1 <= inner) badgeRows[last] += " " + badge;
-    else badgeRows.push(badge);
-  }
-  const branch = info.branch ? fg("muted", `[ git ${cleanText(info.branch, 24)} ]`) : fg("dim", "[ git unavailable ]");
-  const git = branch + (info.dirty ? " " + fg("warning", "[ dirty ]") : "");
+  const labelWidth = narrow ? 8 : 10;
   const label = (name: string, value: string, color: WelcomeColor = "muted") =>
-    fg("dim", `${name.padEnd(10)} │ `) + fg(color, cleanText(value, 70));
-  const managers = info.managers?.length
-    ? (narrow ? info.managers.join(" + ") : info.managers.map((m) => m === "tasks" ? "/tasks" : "/subagents-fleet").join(" · "))
-    : "none detected";
-  const hope = cleanText(info.message ?? HOPEFUL_WELCOME_MESSAGES[0], 100);
+    fg("dim", name.padEnd(labelWidth)) + fg(color, cleanText(value, 120));
+
+  const header = [fg("accent", "pi-jar" + (info.version ? " " + info.version : "")),
+    info.model ? fg("muted", cleanText(info.model, 40)) : fg("dim", "no model"),
+    info.effort && info.effort !== "off" ? fg("muted", info.effort) : "",
+    info.activeRole ? fg("warning", "role:" + cleanText(info.activeRole, 16)) : ""].filter(Boolean).join(fg("dim", " · "));
+
+  const git = info.branch ? "git " + cleanText(info.branch, 24) + (info.dirty ? " · dirty" : "") : "git unavailable";
+  const quota = info.quota != null ? `quota ${Math.round(info.quota)}%` : `quota ${info.quotaEnabled ? "unavailable" : "off"}`;
+  const plan = info.plan?.enabled ? "◆ planning" + (info.plan.title ? " · " + info.plan.title : "")
+    : info.plan?.title ? "last · " + info.plan.title + ` (${info.plan.steps} steps)` : "none · /plan <idea>";
+  const tasks = info.tasks ? `${info.tasks} open${info.nextTask ? " · next: " + info.nextTask : ""}` : "none open";
+  const live = info.roles?.filter((role) => role.name !== "assistant") ?? [];
+  const lead = info.roles?.find((item) => ["working", "thinking", "reviewing", "failed"].includes(item.state));
+  const managers = info.managers?.length ? info.managers.map((m) => m === "tasks" ? "/tasks" : "/subagents-fleet").join(" · ") : "";
+  const team = [lead ? `${cleanText(lead.name, 16)} ${lead.state}` : "", live.length ? `${live.length} subagent${live.length === 1 ? "" : "s"}` : "",
+    lead?.task ? cleanText(lead.task, 30) : "", managers].filter(Boolean).join(" · ");
+
+  const actions = info.settingsClickable === false
+    ? pack(ACTIONS.map((item) => item.hint), inner, fg("dim", " · ")).map((row) => fg("dim", row))
+    : pack(ACTIONS.map((item) => fg(item.action === "settings" ? "accent" : "muted", item.label)), inner);
   return [
     fg("dim", "╭" + "─".repeat(w - 2) + "╮"),
-    cell(fg("accent", "pi-jar") + fg("muted", "  ·  roles & orchestration")),
+    cell(header),
     divider,
-    ...badgeRows.map(cell),
+    cell(label("PROJECT", (info.project || "unavailable") + " · " + git, info.dirty ? "warning" : "muted")),
+    cell(label("SESSION", [info.context ?? "ctx ?", quota, info.cost ?? ""].filter(Boolean).join(" · "))),
     divider,
-    cell(fg("muted", "Welcome to ") + fg("accent", "pi-jar")),
-    cell(fg("dim", hope)),
+    cell(label("PLAN", plan, info.plan?.enabled ? "warning" : "muted")),
+    cell(label("GOAL", info.goal ?? "none · /goal <outcome>", info.goal ? "accent" : "muted")),
+    cell(label("TASKS", tasks, info.tasks ? "accent" : "muted")),
+    cell(label("ROLES", info.rolesSummary ?? "all roles follow the current model")),
+    ...(team ? [cell(label("TEAM", team, lead?.state === "failed" ? "error" : "muted"))] : []),
     divider,
-    cell(label("TASK", task, role?.state === "failed" ? "error" : "accent")),
-    cell(label("PROJECT", info.project || "unavailable")),
-    cell(label("MANAGERS", managers)),
-    cell(git),
+    cell(fg("muted", "Welcome to ") + fg("accent", "pi-jar") + fg("dim", " — " + cleanText(info.message ?? HOPEFUL_WELCOME_MESSAGES[0], 100))),
     divider,
-    cell(info.settingsClickable === false
-      ? fg("accent", "/jar settings") + fg("dim", "  ·  /jar hub  ·  /jar welcome")
-      : fg("accent", "[ ⚙ Settings ↗ ]") + fg("dim", narrow ? "  /jar settings" : "  ·  /jar hub  ·  /jar welcome")),
+    ...actions.map(cell),
     fg("dim", "╰" + "─".repeat(w - 2) + "╯")
   ];
 }
 
-export function welcomeSettingsHit(lines: readonly string[], x: number, y: number): boolean {
+/** Which welcome action (if any) sits under a zero-based cell in the rendered lines. */
+export function welcomeHit(lines: readonly string[], x: number, y: number): WelcomeAction | undefined {
   const line = lines[y];
-  if (!line) return false;
+  if (!line) return undefined;
   const text = stripTerminalSequences(line);
-  const labels = ["[ ⚙ Settings ↗ ]", "[ Settings ↗ ]", "/jar settings"];
-  const label = labels.find((candidate) => text.includes(candidate));
-  if (!label) return false;
-  const offset = text.indexOf(label);
-  const start = visibleWidth(text.slice(0, offset));
-  return x >= Math.max(0, start - 1) && x < start + visibleWidth(label) + 1;
+  for (const item of ACTIONS) {
+    const offset = text.indexOf(item.label);
+    if (offset < 0) continue;
+    const start = visibleWidth(text.slice(0, offset));
+    if (x >= start && x < start + visibleWidth(item.label)) return item.action;
+  }
+  return undefined;
+}
+
+/** Back-compat helper: true when the Settings chip is under the pointer. */
+export function welcomeSettingsHit(lines: readonly string[], x: number, y: number): boolean {
+  return welcomeHit(lines, x, y) === "settings";
 }
 
 export function welcomeLines(width: number, frame: number, fg: Paint, info: WelcomeInfo = {}): string[] {
   if (width <= 0) return [];
   const fit = (line: string) => truncateToWidth(line, width);
-  const rawFlame = addEmbers(flameSprite(frame), frame);
-  const flame = rawFlame.map((line) => paintFlame(line));
-  const compactFlame = rawFlame.slice(2, 10);
-  if (width < 32) return [
-    ...compactFlame.map((line) => {
-      const start = Math.max(0, Math.floor((FLAME_WIDTH - width) / 2));
-      return fit(paintFlame(line.slice(start, start + width)));
-    }),
-    ...PI_COMPACT.map((line) => fit(fg("accent", line))),
-    fit(fg("accent", "pi-jar · role-assistant")),
-    fit(fg("accent", "/jar settings")),
-    ""
-  ];
+  const seed = info.flameSeed ?? 1;
+  const flame = flameFrame(frame, seed, (color, text) => fg(color, text));
+  if (width < 32) {
+    const start = Math.max(0, Math.floor((FLAME_WIDTH - width) / 2));
+    return [
+      ...flame.slice(4).map((line) => fit(sliceByColumn(line, start, Math.min(width, FLAME_WIDTH)))),
+      ...PI_COMPACT.map((line) => fit(fg("accent", line))),
+      fit(fg("accent", "pi-jar")),
+      fit(fg(info.settingsClickable === false ? "dim" : "accent", info.settingsClickable === false ? "ctrl+alt+s settings" : "[ ⚙ Settings ]")),
+      ""
+    ];
+  }
   const wide = width >= 72;
-  const art = wide ? [
-    ...flame.map((line) => flameArtCell(line)),
-    ...PI_LARGE.map((line) => fg("accent", piArtCell(line)))
-  ] : [...compactFlame.map(paintFlame), ...PI_COMPACT.map((line) => fg("accent", line))];
-  const details = card(wide ? width - ART_WIDTH - 2 : width, fg, info);
-  if (!wide) return [...art.map(fit), ...details.map(fit), ""];
+  const flameArt = flame.map((line) => center(fixedCell(line, FLAME_WIDTH), ART_WIDTH));
+  if (!wide) {
+    const art = [...flame.slice(2).map((line) => center(fixedCell(line, FLAME_WIDTH), Math.min(width, ART_WIDTH))),
+      ...PI_COMPACT.map((line) => fg("accent", center(line, Math.min(width, ART_WIDTH))))];
+    return [...art.map(fit), ...card(width, fg, info).map(fit), ""];
+  }
+  const art = [...flameArt, ...PI_LARGE.map((line) => fg("accent", center(fixedCell(line, 21), ART_WIDTH)))];
+  const details = card(width - ART_WIDTH - 2, fg, info);
   const topPad = Math.max(0, Math.floor((details.length - art.length) / 2));
   const artRows = [...Array.from({ length: topPad }, () => " ".repeat(ART_WIDTH)), ...art];
   const merged = Array.from({ length: Math.max(artRows.length, details.length) }, (_, index) => {

@@ -30,9 +30,9 @@ const contrast = (a: string, b: string) => {
   return (light + 0.05) / (dark + 0.05);
 };
 
-test("Setara × Punakawan theme preserves semantic colors across all six dark accents", () => {
+test("pi-jar dark theme preserves semantic colors across all six dark accents", () => {
   assert.equal(base.vars.accent, "#2DDED0"); // sharpened dark teal
-  assert.equal(base.export.pageBg, "#0B1018"); // Punakawan dark canvas
+  assert.equal(base.export.pageBg, "#0B1018"); // dark canvas
   assert.equal(base.colors.accent, "accent");
   const semantic = ["success", "warning", "error", "toolSuccessBg", "toolErrorBg", "toolDiffAdded", "toolDiffRemoved"];
   const expected = Object.fromEntries(semantic.map((key) => [key, base.colors[key]]));

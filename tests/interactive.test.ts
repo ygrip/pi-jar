@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { ComposerStyle, composerIcon, roundedInput, sessionDisplayName } from "../src/composer.ts";
+import { Mascot, SLEEPY_AFTER_MS } from "../src/mascot.ts";
+import { SuggestionState } from "../src/suggest.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import piJar from "../extensions/index.ts";
 import { promptChoice, promptText, todoView } from "../src/dialogs.ts";
@@ -11,6 +13,9 @@ import { registerTaskTool } from "../src/task-tool.ts";
 import { WorkingState } from "../src/working.ts";
 
 const theme = { fg: (_color: string, text: string) => text, borderColor: (text: string) => text };
+const plainLines = (lines: readonly string[]) => lines.map(stripTerminalSequences);
+/** The framed title row (the tip row, when present, sits above it). */
+const titleRow = (lines: readonly string[]) => plainLines(lines).find((line) => line.startsWith("╭")) ?? "";
 
 test("working wording follows observed events, sanitizes tool names and stops on motion-off/idle", () => {
   const state = new WorkingState();
@@ -66,7 +71,7 @@ test("pi-jar to-dos replay only valid active-branch entries and persist edits/to
   assert.deepEqual(broken.all(), []);
 });
 
-test("extension reconstructs pi-jar tasks on session branch navigation without touching Team Mode", async () => {
+test("extension reconstructs pi-jar tasks on session branch navigation without touching other task managers", async () => {
   const events = new Map<string, Function>();
   let command: Function | undefined;
   let branch: { type: string; customType: string; data: TodoEvent }[] = [];
@@ -198,23 +203,21 @@ test("default Pi tools keep native metadata while collapsed cards stay brief", (
   assert.doesNotMatch(writeCollapsed, /two/);
 });
 
-test("rounded input fits, shows the pet sprite and exposes a human session label", () => {
+test("rounded input fits, shows the ember face and exposes a human session label", () => {
   const paint = (text: string) => `\x1b[36m${text}\x1b[0m`;
-  const lines = ["top", "draft", "bottom"];
+  const lines = ["────", "draft", "────"];
   const idle = roundedInput(lines, 40, false, theme as never, paint);
   const focused = roundedInput(lines, 40, true, theme as never, paint, composerIcon("idle"), "ember-trail");
-  assert.ok(focused[0]?.includes("♨(•ᴗ•)♨"));
+  assert.ok(focused[0]?.includes("(•ᴗ•)"));
   assert.ok(focused[0]?.includes("session ember-trail"));
   const widths = new Set<number>();
   for (const phase of ["idle", "generating", "tool", "waiting"] as const) {
-    widths.add(visibleWidth(composerIcon(phase, 2)));
-    assert.ok(roundedInput(lines, 40, true, theme as never, paint, composerIcon(phase, 2))[0]?.includes(composerIcon(phase, 2)));
+    widths.add(visibleWidth(composerIcon(phase, 1)));
+    assert.ok(roundedInput(lines, 40, true, theme as never, paint, composerIcon(phase, 1))[0]?.includes(composerIcon(phase, 1)));
   }
-  assert.equal(widths.size, 1);
-  assert.ok([...widths][0]! > 1);
-  assert.notEqual(composerIcon("generating", 0)[0], composerIcon("generating", 1)[0], "mascot ears animate without hand-like glyphs");
-  assert.notEqual(composerIcon("generating", 0)[2], composerIcon("generating", 1)[2], "mascot eyes change with expression");
-  assert.doesNotMatch(composerIcon("idle"), /[╭╮╰╯]/, "mascot no longer uses corner glyphs that read like hands");
+  assert.equal(widths.size, 1, "every expression has the same width");
+  assert.notEqual(composerIcon("generating", 0), composerIcon("generating", 1), "expressions change while generating");
+  assert.notEqual(composerIcon("tool"), composerIcon("idle"));
   assert.equal(sessionDisplayName("Welcome polish", "019a0a2b-f81d-7350-8188-abcdef123456"), "Welcome polish");
   const fallback = sessionDisplayName(undefined, "019a0a2b-f81d-7350-8188-abcdef123456");
   assert.match(fallback, /^[a-z]+-[a-z]+$/);
@@ -226,6 +229,28 @@ test("rounded input fits, shows the pet sprite and exposes a human session label
   for (const width of [4, 8, 16, 28, 40]) {
     assert.ok(roundedInput(lines, width, true, theme as never, paint, composerIcon("idle"), "ember-trail").every((line) => visibleWidth(line) <= width));
   }
+});
+
+test("rounded input keeps autocomplete rows below the frame and overflow labels in the borders", () => {
+  const lines = ["─── ↑ 2 more ───", "line a", "line b", "─── ↓ 1 more ───", "  /plan   Plan mode", "  /goal   Goal mode"];
+  const framed = plainLines(roundedInput(lines, 60, true, theme as never, undefined, composerIcon("idle"), "s", { hint: "⏎ send" }));
+  assert.equal(framed.length, 6);
+  assert.match(framed[0]!, /^╭─ \(•ᴗ•\) · session s .*↑ 2 more ─╮$/);
+  assert.match(framed[1]!, /^│line a\s+│$/);
+  assert.match(framed[3]!, /^╰─ ↓ 1 more ─+ ⏎ send ─╯$/);
+  assert.equal(framed[4], "   /plan   Plan mode", "autocomplete rows are not wrapped as editor content");
+  assert.equal(framed[5], "   /goal   Goal mode");
+  assert.ok(framed.every((line) => visibleWidth(line) <= 60));
+});
+
+test("empty composer shows a dim ghost suggestion after the cursor", () => {
+  const cursor = "\x1b[7m \x1b[0m";
+  const dim = (text: string) => `<${text}>`;
+  const framed = roundedInput(["────", cursor + " ".repeat(30), "────"], 40, true, theme as never, undefined, composerIcon("idle"), "", { ghost: "Run the full test suite", dim });
+  assert.match(framed[1]!, /│\x1b\[7m \x1b\[0m<Run the full test suite …>│|│\x1b\[7m \x1b\[0m<Run the full test suite\s+⇥ tab>\s*│/);
+  assert.ok(framed.every((line) => visibleWidth(line) <= 40));
+  const typed = roundedInput(["────", "hello" + " ".repeat(20), "────"], 40, true, theme as never, undefined, composerIcon("idle"), "", { ghost: "x", dim });
+  assert.doesNotMatch(typed[1]!, /<x/, "no ghost once the cursor row has text without the empty cursor");
 });
 
 test("composer enable failure restores a previously installed editor", () => {
@@ -273,8 +298,9 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.notEqual(current, original);
   assert.equal(draft, "keep this draft");
   const decorated = current?.({}, theme, {}) as { render(width: number): string[]; setText(text: string): void };
-  assert.ok(decorated.render(80)[0]?.includes("♨(•ᴗ•)♨"));
-  assert.ok(decorated.render(80)[0]?.includes("session Welcome polish"));
+  assert.ok(titleRow(decorated.render(80)).includes("(•ᴗ•)"));
+  assert.ok(titleRow(decorated.render(80)).includes("session Welcome polish"));
+  assert.match(plainLines(decorated.render(80))[0]!, /^ {3,5}[▴▲∙*·ˇ★]/, "flame tips perch above the face");
   decorated.setText("editing");
   style.disable(ctx as never);
   assert.equal(current, original);
@@ -309,16 +335,16 @@ test("regular composer never captures terminal mouse reporting or scrollback", (
   const style = new ComposerStyle();
   assert.equal(style.enable(ctx as never), true);
   const editor = factory?.(tui, theme, {}) as { render(width: number): string[] };
-  assert.ok(editor.render(40)[0]?.includes("♨(•ᴗ•)♨"));
+  assert.ok(titleRow(editor.render(40)).includes("(•ᴗ•)"));
   style.disable(ctx as never);
   assert.equal(listeners, 0);
   assert.deepEqual(writes, [], "terminal owns its mouse wheel and selection");
 });
 
-test("composer icon tracks observed phases, refreshes session title, honors motion-off and stops after interruption", async () => {
+test("composer face tracks observed phases, refreshes session title, honors motion-off and stops after interruption", async () => {
   let current: Function | undefined = () => ({
     onSubmit: undefined, onChange: undefined, focused: true,
-    render: () => ["top", "existing draft", "bottom"],
+    render: () => ["────", "existing draft", "────"],
     getText: () => "existing draft", setText() {}, invalidate() {}, handleInput() {}
   });
   let redraws = 0;
@@ -335,27 +361,85 @@ test("composer icon tracks observed phases, refreshes session title, honors moti
   const style = new ComposerStyle();
   assert.equal(style.enable(ctx as never), true);
   const editor = current?.(tui, theme, {}) as { render(width: number): string[] };
-  const icon = () => editor.render(40)[0] ?? "";
-  assert.ok(icon().includes("♨(•ᴗ•)♨"));
-  assert.ok(icon().includes("session Welcome polish"));
+  const title = () => titleRow(editor.render(40));
+  assert.ok(title().includes("(•ᴗ•)") || title().includes("(-ᴗ-)"));
+  assert.ok(title().includes("session Welcome polish"));
   sessionName = "Flame pass";
   style.refreshSession(ctx as never);
-  assert.ok(icon().includes("session Flame pass"));
+  assert.ok(title().includes("session Flame pass"));
   style.setActivity("generating", true);
-  await new Promise((resolve) => setTimeout(resolve, 270));
-  assert.ok(redraws > 0);
-  assert.ok(icon().includes("⌁(◕ᴗ◕)♨"));
+  await new Promise((resolve) => setTimeout(resolve, 520));
+  assert.ok(redraws > 0, "flame tips flicker while generating");
+  assert.match(title(), /\((\^ᴗ\^|°ᴗ°)\)/);
   style.setActivity("tool", false);
-  assert.ok(icon().includes("♨(>ᴗ<)♨"));
+  assert.ok(title().includes("(•ᴗ•)"), "motion-off shows a calm face");
   const stopped = redraws;
-  await new Promise((resolve) => setTimeout(resolve, 270));
-  assert.equal(redraws, stopped);
-  style.setActivity("generating", true);
+  await new Promise((resolve) => setTimeout(resolve, 520));
+  assert.equal(redraws, stopped, "motion-off stops the timer");
+  style.setActivity("tool", true);
+  assert.ok(title().includes("(>ᴗ<)"));
+  style.flash("error", 1000);
+  assert.ok(title().includes("(×_×)"));
+  style.setMascot(false);
   style.setActivity("idle", true); // interrupted
-  assert.ok(icon().includes("♨(•ᴗ•)♨"));
   const stoppedAfterInterrupt = redraws;
-  await new Promise((resolve) => setTimeout(resolve, 270));
-  assert.equal(redraws, stoppedAfterInterrupt);
+  await new Promise((resolve) => setTimeout(resolve, 520));
+  assert.equal(redraws, stoppedAfterInterrupt, "idle without a mascot needs no timer");
+  assert.doesNotMatch(title(), /ᴗ/, "mascot off hides the face");
   style.disable(ctx as never);
   assert.match(editor.render(40)[1] ?? "", /existing draft/);
 });
+
+test("ember mascot blinks, gets sleepy when idle and shows transient moods", () => {
+  const mascot = new Mascot(0, () => 0);
+  assert.equal(mascot.mood(10), "idle");
+  assert.equal(mascot.mood(3050), "blink");
+  assert.equal(mascot.mood(3400), "idle");
+  assert.equal(mascot.mood(SLEEPY_AFTER_MS + 1), "sleepy");
+  mascot.setPhase("tool", SLEEPY_AFTER_MS + 2);
+  assert.equal(mascot.mood(SLEEPY_AFTER_MS + 3), "tool");
+  mascot.flash("complete", 100, SLEEPY_AFTER_MS + 4);
+  assert.equal(mascot.face(SLEEPY_AFTER_MS + 5), "(★ᴗ★)");
+  assert.equal(mascot.mood(SLEEPY_AFTER_MS + 200), "tool");
+  for (let frame = 0; frame < 6; frame++) assert.equal(visibleWidth(mascot.tip(0, frame)), 5);
+});
+
+test("native composer auto-expands, accepts ghost suggestions with Tab and maps clicks below the perched mascot", () => {
+  let current: Function | undefined;
+  const suggestions = new SuggestionState();
+  const ctx = { hasUI: true, mode: "tui", sessionManager: {}, ui: {
+    getEditorComponent: () => current, setEditorComponent(value: Function | undefined) { current = value; },
+    getEditorText: () => "", setEditorText() {}
+  } };
+  const style = new ComposerStyle();
+  style.attachSuggestions(suggestions);
+  assert.equal(style.enable(ctx as never), true);
+  const tui = { requestRender() {}, terminal: { rows: 20, columns: 80 } };
+  const keys = { matches: () => false };
+  const editor = current?.(tui, { borderColor: (text: string) => text, selectList: {} }, keys) as any;
+  suggestions.set("Run the full test suite");
+  let lines = plainLines(editor.render(60));
+  assert.match(lines.join("\n"), /Run the full test suite/);
+  assert.match(lines.join("\n"), /⇥ accept/);
+  editor.handleInput("\t");
+  assert.equal(editor.getText(), "Run the full test suite");
+  assert.equal(suggestions.text, undefined, "accepting clears the ghost");
+  editor.setText(Array.from({ length: 12 }, (_, index) => "line " + index).join("\n"));
+  lines = plainLines(editor.render(60));
+  const content = lines.filter((line) => /^│line \d+/.test(line)).length;
+  assert.ok(content > 6, `drafts grow past Pi's 30% cap (${content} rows)`);
+  assert.equal(tui.terminal.rows, 20, "the terminal proxy is restored");
+  editor.setText("abcdef\nsecond");
+  lines = plainLines(editor.render(60));
+  const row = lines.findIndex((line) => line.startsWith("│second"));
+  const result = editor.handleMouse({ type: "click", button: "left", x: 4, y: row, screenX: 4, screenY: row, width: 60, height: lines.length, shift: false, alt: false, ctrl: false });
+  assert.ok(result?.handled);
+  editor.handleInput("X");
+  assert.equal(editor.getText(), "abcdef\nsecXond", "click places the cursor at the pointed cell");
+  const poke = editor.handleMouse({ type: "click", button: "left", x: 4, y: 1, screenX: 4, screenY: 1, width: 60, height: lines.length, shift: false, alt: false, ctrl: false });
+  assert.ok(poke?.handled, "clicking the face pokes the mascot");
+  assert.match(titleRow(editor.render(60)), /\(\^o\^\)/);
+  assert.equal(editor.handleMouse({ type: "drag", button: "left", x: 4, y: row, screenX: 4, screenY: row, width: 60, height: 9, shift: false, alt: false, ctrl: false }), undefined, "drags stay with Pi's selection");
+  style.disable(ctx as never);
+});
+
