@@ -16,6 +16,10 @@ export interface JarVisualSettings {
   suggestions: boolean;
   /** Automatic implement/audit rounds per user message while a goal is active. */
   goalRounds: number;
+  /** The jar_advisor second-opinion tool and /advisor. */
+  advisor: boolean;
+  /** Consult the advisor automatically when the agent repeats a tool call or keeps failing. */
+  advisorGates: boolean;
   footer: FooterSettings;
 }
 
@@ -23,7 +27,7 @@ export const GOAL_ROUND_CHOICES = [4, 8, 12, 20] as const;
 
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, advisor: true, advisorGates: true, footer: { ...footer } };
 }
 
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
@@ -53,6 +57,8 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     suggestions: typeof value.suggestions === "boolean" ? value.suggestions : fallback.suggestions,
     goalRounds: typeof value.goalRounds === "number" && Number.isInteger(value.goalRounds) && value.goalRounds >= 1 && value.goalRounds <= 50
       ? value.goalRounds : fallback.goalRounds,
+    advisor: typeof value.advisor === "boolean" ? value.advisor : fallback.advisor,
+    advisorGates: typeof value.advisorGates === "boolean" ? value.advisorGates : fallback.advisorGates,
     footer: Object.fromEntries(FOOTER_FIELDS.map((field) => [field,
       typeof footer[field] === "boolean" ? footer[field] : fallback.footer[field]])) as FooterSettings
   };

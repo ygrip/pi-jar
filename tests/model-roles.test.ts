@@ -97,7 +97,7 @@ test("project roles override global ones, custom roles list after built-ins, and
     assert.equal(h.manager.scopeOf("default"), "project");
     assert.deepEqual(h.manager.get("review"), { provider: "p", model: "project", thinking: "low" });
     const list = h.manager.list();
-    assert.deepEqual(list.slice(0, 7).map((row) => row.role), ["default", "smol", "slow", "plan", "advisor", "task", "commit"]);
+    assert.deepEqual(list.slice(0, 8).map((row) => row.role), ["default", "smol", "slow", "plan", "implement", "advisor", "task", "commit"]);
     assert.equal(list.at(-1)?.role, "review");
     assert.equal(list.at(-1)?.custom, true);
     assert.equal(await h.manager.cycle(h.ctx), "smol");
@@ -120,4 +120,16 @@ test("temporary activation restores the previous model and effort", withAgentDir
   assert.deepEqual(h.models, ["auditor", "previous"]);
   assert.deepEqual(h.thinking, ["xhigh", "off"]);
   assert.equal(h.manager.activeRole(), undefined);
+}));
+
+test("a model picked by the user during a temporary role is kept on restore", withAgentDir(async () => {
+  const h = harness();
+  h.manager.update("implement", "p/builder");
+  (h.ctx as { model?: unknown }).model = { provider: "p", id: "previous" };
+  const restore = await h.manager.activateTemporary("implement", h.ctx);
+  assert.equal(h.manager.activeRole(), "implement", "pi-jar's own switch is not treated as manual");
+  await h.events.get("model_select")!({ source: "set" }, h.ctx);
+  assert.equal(h.manager.activeRole(), undefined, "a manual pick clears the role label");
+  await restore();
+  assert.deepEqual(h.models, ["builder"], "no restore over the user's choice");
 }));

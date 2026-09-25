@@ -19,6 +19,10 @@ import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
+import { jarCommit } from "../src/commit.ts";
+import { registerAdvisor } from "../src/advisor.ts";
+import { registerInfoPanels } from "../src/info-panels.ts";
+import { SideUsage } from "../src/side-model.ts";
 import { PlanMode } from "../src/plan.ts";
 import { openRolesUi } from "../src/roles-ui.ts";
 import { registerSuggestions, SuggestionState } from "../src/suggest.ts";
@@ -135,6 +139,10 @@ export default function piJar(pi: ExtensionAPI): void {
   };
   registerAskTool(pi);
   const modelRoles = new ModelRoleManager(pi);
+  const sideUsage = new SideUsage();
+  registerAdvisor(pi, modelRoles, { enabled: () => visualSettings.advisor, gates: () => visualSettings.advisorGates, usage: sideUsage });
+  registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
+    quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
   modelRoles.register((ctx) => openRolesUi(ctx, modelRoles));
   registerDelegate(pi, modelRoles);
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
@@ -479,6 +487,7 @@ export default function piJar(pi: ExtensionAPI): void {
     footerTui?.requestRender();
   };
   pi.on("session_start", (_event, ctx) => {
+    sideUsage.clear();
     migrateLegacySettings(getAgentDir());
     visualSettings = loadVisualSettings(getAgentDir());
     animations = visualSettings.animations;
@@ -738,6 +747,7 @@ export default function piJar(pi: ExtensionAPI): void {
         return;
       }
       if (command === "welcome") { showWelcome(ctx); return; }
+      if (command === "commit" || command.startsWith("commit ")) { await jarCommit(pi, ctx, modelRoles, sideUsage, args.trim().slice(6).trim()); return; }
       if (command === "shells") {
         if (!shells) return;
         if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify(shells.list().map((job) => `${job.id} ${job.name} ${job.status}`).join("\n") || "No background shells", "info"); return; }
@@ -753,7 +763,7 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "quota on" && quotaCache) { quotaCache.enabled = true; quotaDisabledByUser = false; }
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaDisabledByUser = true; quotaCache.stop(); }
       else {
-        ctx.ui.notify("Usage: /jar [status|settings|sessions [search]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        ctx.ui.notify("Usage: /jar [status|settings|commit [note]|sessions [search]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
       }
       if (!["animations on", "animations off", "ui on", "ui off"].includes(command)) installUi(ctx);

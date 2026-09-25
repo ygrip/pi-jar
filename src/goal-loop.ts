@@ -46,6 +46,7 @@ export class GoalLoop {
   private readonly options: GoalLoopOptions;
   private prompting = 0;
   private restoreRole: (() => Promise<void>) | undefined;
+  private roleInUse: "implement" | "advisor" | undefined;
 
   constructor(pi: ExtensionAPI, options: GoalLoopOptions) {
     this.pi = pi;
@@ -68,7 +69,16 @@ export class GoalLoop {
   private async restore(): Promise<void> {
     const restore = this.restoreRole;
     this.restoreRole = undefined;
+    this.roleInUse = undefined;
     if (restore) await restore();
+  }
+
+  /** Run goal rounds on their role: `implement` while building, `advisor` for the audit. */
+  private async useRole(role: "implement" | "advisor", ctx: ExtensionContext): Promise<void> {
+    if (this.roleInUse === role) return;
+    await this.restore();
+    this.restoreRole = await this.options.roles.activateTemporary(role, ctx);
+    this.roleInUse = role;
   }
 
   private context(goal: Goal): string {
@@ -243,9 +253,10 @@ export class GoalLoop {
         : "Goal active: create jar_todo tasks for the goal first; changes are blocked while no task is open." };
     });
 
-    this.pi.on("before_agent_start", async () => {
+    this.pi.on("before_agent_start", async (_event, ctx) => {
       const goal = this.goal();
       if (!goal || goal.status === "complete") return;
+      if (goal.status === "active" && !this.options.planActive()) await this.useRole(goal.phase === "audit" ? "advisor" : "implement", ctx);
       return { message: { customType: CONTEXT_TYPE, content: this.context(goal), display: false } };
     });
 
@@ -282,8 +293,7 @@ export class GoalLoop {
       const audit = tasks.length > 0 && tasks.every((item) => item.done);
       const round = goal.rounds + 1;
       store.setRound(round, audit ? "audit" : "implement");
-      if (audit && !this.restoreRole) this.restoreRole = await this.options.roles.activateTemporary("advisor", ctx);
-      if (!audit) await this.restore();
+      await this.useRole(audit ? "advisor" : "implement", ctx);
       this.options.changed?.(ctx);
       return {
         entries: [{ type: "custom_message", customType: CONTINUATION_TYPE, display: false,

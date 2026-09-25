@@ -34,7 +34,7 @@ export async function openJarSettings(
     let width = 64;
     const accents: JarAccent[] = ["follow", ...availableAccents.filter((name): name is JarAccent =>
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
-    const fields = () => page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 3 : 6;
+    const fields = () => page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 5 : 6;
     const piError = (error: unknown) => ctx.ui.notify("Could not change Pi setting: " + (error as Error).message, "error");
     const pageSize = () => Math.min(fields(), Math.max(4, (process.stdout.rows ?? 24) - 9));
     const firstVisible = () => Math.min(Math.max(0, selected - pageSize() + 1), Math.max(0, fields() - pageSize()));
@@ -51,6 +51,8 @@ export async function openJarSettings(
           const at = GOAL_ROUND_CHOICES.indexOf(state.goalRounds as never);
           update({ ...state, goalRounds: GOAL_ROUND_CHOICES[(at + 1) % GOAL_ROUND_CHOICES.length]! });
         }
+        else if (index === 3) update({ ...state, advisor: !state.advisor });
+        else if (index === 4) update({ ...state, advisorGates: !state.advisorGates });
       } else if (index === 0) {
         const at = Math.max(0, accents.indexOf(state.accent));
         update({ ...state, accent: accents[(at + 1) % accents.length]! });
@@ -126,7 +128,9 @@ export async function openJarSettings(
           : page === "pi" ? [
             row(0, "Mouse clicks (Pi fullscreen, restart)", !prefs ? "N/A" : prefs.fullscreen ? "ON" : "OFF", !!prefs?.fullscreen),
             row(1, "Copy on select", !prefs ? "N/A" : prefs.copyOnSelect ? "ON" : "OFF", !!prefs?.copyOnSelect),
-            row(2, "Goal auto rounds", String(state.goalRounds), true)
+            row(2, "Goal auto rounds", String(state.goalRounds), true),
+            row(3, "Advisor (jar_advisor, /advisor)", state.advisor ? "ON" : "OFF", state.advisor),
+            row(4, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates)
           ] : [
             row(0, "Accent", state.accent === "follow" ? "FOLLOW PI" : state.accent.toUpperCase(), true),
             row(1, "Motion", state.animations ? "ON" : "OFF", state.animations),

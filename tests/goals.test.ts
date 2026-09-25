@@ -97,7 +97,7 @@ test("implementor continues while tasks are open, then an auditor pass must comp
   assert.match((await h.tool({ action: "complete", evidence: "done" })).content[0].text, /audit pass/, "cannot skip the audit");
   const audit = await h.settle();
   assert.match(audit.entries[0].content, /auditor · round 3\/5/);
-  assert.deepEqual(h.roleCalls, ["on:advisor"]);
+  assert.deepEqual(h.roleCalls, ["on:implement", "off:implement", "on:advisor"], "implement rounds, then the advisor audits");
   assert.equal(h.goals.current()?.phase, "audit");
   assert.match((await h.guard("edit", { path: "a.ts" }))?.reason, /do not edit during the audit/);
   assert.equal(await h.guard("bash", { command: "npm test" }), undefined, "auditor may run verification");
@@ -108,7 +108,7 @@ test("implementor continues while tasks are open, then an auditor pass must comp
   assert.deepEqual(h.completed, ["Ship it"]);
   assert.equal(await h.settle(), undefined, "a completed goal never continues");
   await h.events.get("agent_settled")!({}, h.ctx);
-  assert.deepEqual(h.roleCalls, ["on:advisor", "off:advisor"]);
+  assert.deepEqual(h.roleCalls, ["on:implement", "off:implement", "on:advisor", "off:advisor"]);
 });
 
 test("auditor gaps send work back to the implementor on the previous role", async () => {
@@ -119,7 +119,7 @@ test("auditor gaps send work back to the implementor on the previous role", asyn
   h.todos.add("Fix missed edge case");
   const back = await h.settle();
   assert.match(back.entries[0].content, /implementor[\s\S]*Fix missed edge case/);
-  assert.deepEqual(h.roleCalls, ["on:advisor", "off:advisor"]);
+  assert.deepEqual(h.roleCalls, ["on:advisor", "off:advisor", "on:implement"], "gaps go back to the implement role");
 });
 
 test("the loop pauses on interruption, errors, the round limit, plan mode and blocks", async () => {

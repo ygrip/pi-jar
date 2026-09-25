@@ -17,7 +17,7 @@ type PlanState = { v: 2; enabled: boolean; steps: string[]; text?: string; path?
 
 // Only tools with known read-only semantics are allowed. Name suffixes (for example
 // "remote_get") do not prove that an extension or MCP tool is safe to invoke.
-export const PLAN_SAFE_TOOLS = new Set(["read", "bash", "grep", "find", "ls", "jar_ask"]);
+export const PLAN_SAFE_TOOLS = new Set(["read", "bash", "grep", "find", "ls", "jar_ask", "jar_advisor"]);
 /** Allowed only for markdown files inside the session's plan directory. */
 const PLAN_WRITE_TOOLS = new Set(["write", "edit"]);
 const MAX_PLAN_BYTES = 64 * 1024;
@@ -75,6 +75,8 @@ export class PlanMode {
   private reviewing = false;
   private compacting = false;
   private compactGeneration = 0;
+  private executionRestore: (() => Promise<void>) | undefined;
+  private executionRunning = false;
   private restoreRole: (() => Promise<void>) | undefined;
   private onEnter: ((ctx: ExtensionContext) => void) | undefined;
   private readonly pi: ExtensionAPI;
@@ -187,7 +189,9 @@ export class PlanMode {
   private async implement(ctx: ExtensionContext, role?: string): Promise<void> {
     this.seedTodos(ctx);
     await this.leave(ctx);
+    // A role picked in the plan view sticks; otherwise the run uses `implement` and then returns.
     if (role) await this.roles.activate(role, ctx, true);
+    else if (this.roles.resolve("implement")) this.executionRestore = await this.roles.activateTemporary("implement", ctx);
     this.pi.sendUserMessage(this.executeMessage(), { deliverAs: "followUp" });
   }
 
@@ -437,7 +441,15 @@ export class PlanMode {
       };
     });
 
+    // The approved plan's run ends: return from the temporary `implement` role.
+    this.pi.on("agent_start", () => { if (this.executionRestore) this.executionRunning = true; });
     this.pi.on("agent_settled", async (_event, ctx) => {
+      if (this.executionRestore && this.executionRunning) {
+        const restore = this.executionRestore;
+        this.executionRestore = undefined;
+        this.executionRunning = false;
+        await restore();
+      }
       if (this.enabled && this.pendingReview) await this.review(ctx);
     });
 

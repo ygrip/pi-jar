@@ -9,9 +9,10 @@ export const BUILTIN_ROLES = [
   { role: "smol", label: "Fast", usedBy: "quick edits and cycling" },
   { role: "slow", label: "Thinking", usedBy: "deep reasoning and cycling" },
   { role: "plan", label: "Architect", usedBy: "plan mode" },
-  { role: "advisor", label: "Auditor", usedBy: "goal audit pass" },
+  { role: "implement", label: "Builder", usedBy: "goal implement rounds and approved plans" },
+  { role: "advisor", label: "Advisor", usedBy: "second opinions, stuck-work gates and the goal audit" },
   { role: "task", label: "Subtask", usedBy: "delegated tasks" },
-  { role: "commit", label: "Commit", usedBy: "commit messages" }
+  { role: "commit", label: "Commit", usedBy: "/jar commit messages" }
 ] as const;
 export const MODEL_ROLES = BUILTIN_ROLES.map((item) => item.role);
 export type ModelRole = string;
@@ -138,6 +139,10 @@ export class ModelRoleManager {
   private cwd: string | undefined;
   private active: string | undefined;
   private readonly pi: ExtensionAPI;
+  /** True while pi-jar itself is switching models, so its own changes are not seen as manual. */
+  private applying = false;
+  /** Bumped whenever the user picks a model or effort themselves. */
+  private manualEpoch = 0;
 
   constructor(pi: ExtensionAPI) {
     this.pi = pi;
@@ -213,12 +218,14 @@ export class ModelRoleManager {
       if (!quiet) ctx.ui.notify("Model not found for role " + role + ": " + result.provider + "/" + result.model, "warning");
       return false;
     }
-    const changed = await this.pi.setModel(model);
+    let changed: boolean;
+    this.applying = true;
+    try { changed = await this.pi.setModel(model); } finally { this.applying = false; }
     if (!changed) {
       if (!quiet) ctx.ui.notify("No configured authentication for " + result.provider + "/" + result.model, "warning");
       return false;
     }
-    if (result.thinking) this.pi.setThinkingLevel(result.thinking);
+    if (result.thinking) this.withApplying(() => this.pi.setThinkingLevel(result.thinking!));
     this.active = role;
     this.status(ctx);
     if (!quiet) ctx.ui.notify("Role " + role + " · " + result.provider + "/" + result.model + (result.thinking ? " · " + result.thinking : ""), "info");
@@ -233,12 +240,21 @@ export class ModelRoleManager {
     const previousActive = this.active;
     const applied = await this.activate(role, ctx, true);
     if (!applied) return async () => {};
+    const epoch = this.manualEpoch;
     return async () => {
-      if (previousModel) await this.pi.setModel(previousModel);
-      this.pi.setThinkingLevel(previousThinking);
+      // A model or effort the user picked during the workflow wins over the saved one.
+      if (this.manualEpoch !== epoch) { this.active = undefined; this.status(ctx); return; }
+      this.applying = true;
+      try { if (previousModel) await this.pi.setModel(previousModel); this.pi.setThinkingLevel(previousThinking); }
+      finally { this.applying = false; }
       this.active = previousActive;
       this.status(ctx);
     };
+  }
+
+  private withApplying(action: () => void): void {
+    this.applying = true;
+    try { action(); } finally { this.applying = false; }
   }
 
   /** Activate the next assigned role in the cycle order. */
@@ -264,6 +280,13 @@ export class ModelRoleManager {
   }
 
   register(openUi?: (ctx: ExtensionContext) => Promise<void>): void {
+    const manual = (_event: unknown, ctx: ExtensionContext) => {
+      if (this.applying) return;
+      this.manualEpoch++;
+      if (this.active) { this.active = undefined; this.status(ctx); }
+    };
+    this.pi.on("model_select", manual);
+    this.pi.on("thinking_level_select", manual);
     this.pi.on("session_start", async (_event, ctx) => {
       this.load(ctx.cwd);
       this.active = undefined;
