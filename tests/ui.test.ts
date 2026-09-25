@@ -307,7 +307,7 @@ test("welcome Settings is clickable in regular mode and restores terminal mouse 
   events.get("session_start")?.({}, ctx);
   assert.ok(widget);
   previousLines = ["old terminal row", ...widget!.render(120)];
-  assert.ok(writes.filter((value) => value.includes("\x1b[?1000h")).length >= 2, "mouse reporting is reasserted after welcome render");
+  assert.equal(writes.filter((value) => value.includes("\x1b[?1000h")).length, 1, "mouse reporting has one owner and is not toggled during render");
   const y = previousLines.findIndex((line) => stripTerminalSequences(line).includes("[ ⚙ Settings ↗ ]"));
   assert.ok(y >= 0);
   const row = stripTerminalSequences(previousLines[y]!);

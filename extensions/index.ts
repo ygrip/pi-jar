@@ -6,6 +6,7 @@ import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-wo
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { registerAskTool } from "../src/ask-tool.ts";
 import { ComposerStyle } from "../src/composer.ts";
+import { acquireRegularMouse } from "../src/regular-mouse.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
 import { promptText } from "../src/dialogs.ts";
@@ -48,6 +49,7 @@ export default function piJar(pi: ExtensionAPI): void {
   let todos: TodoStore | undefined;
   let goals: GoalStore | undefined;
   const composer = new ComposerStyle();
+  composer.setPointerOverlay(() => !!welcomeTui && !welcomeDismiss);
   let footerSettings = visualSettings.footer;
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
@@ -136,7 +138,8 @@ export default function piJar(pi: ExtensionAPI): void {
     // the transient welcome is visible, opt into click-only SGR reporting so
     // Settings behaves like the button it looks like, then restore the terminal
     // immediately when the welcome closes.
-    tui.terminal.write("\x1b[?1000h\x1b[?1006h");
+    welcomePointerCleanup?.();
+    const release = acquireRegularMouse(tui);
     const remove = tui.addInputListener((data) => {
       const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
       if (!mouse) return;
@@ -153,7 +156,7 @@ export default function piJar(pi: ExtensionAPI): void {
     });
     welcomePointerCleanup = () => {
       remove();
-      try { tui.terminal.write("\x1b[?1000l\x1b[?1006l"); } catch { /* best effort terminal restore */ }
+      release();
     };
   };
   const showWelcome = (ctx: ExtensionContext) => {
@@ -199,7 +202,6 @@ export default function piJar(pi: ExtensionAPI): void {
         welcomeTui = tui;
         installRegularWelcomePointer(tui, ctx);
         let visibleLines: string[] = [];
-        let reportedAfterPaint = false;
         return { invalidate() {}, handleMouse(event: TuiMouseEvent) {
           if (event.button !== "left" || welcomeDismiss
             || !welcomeSettingsHit(visibleLines, event.x, event.y)) return;
@@ -207,10 +209,6 @@ export default function piJar(pi: ExtensionAPI): void {
           queueMicrotask(() => openWelcomeSettings(ctx));
           return { handled: true, capture: event.type === "press" };
         }, render(width: number) {
-          if (!reportedAfterPaint && tui.mode === "regular") {
-            reportedAfterPaint = true;
-            tui.terminal.write("\x1b[?1000h\x1b[?1006h");
-          }
           const statuses = welcomeStatuses();
           const live = collectStatuses(statuses, Date.now());
           const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, Date.now()) : undefined;
@@ -480,11 +478,6 @@ export default function piJar(pi: ExtensionAPI): void {
     disposeFooter?.();
     disposeFooter = undefined;
     demo = false;
-  });
-
-  pi.registerShortcut?.(Key.ctrl("e"), {
-    description: "Toggle expanded tool output",
-    handler: (ctx) => ctx.ui.setToolsExpanded(!ctx.ui.getToolsExpanded())
   });
 
   pi.registerShortcut?.(Key.ctrlAlt("s"), {

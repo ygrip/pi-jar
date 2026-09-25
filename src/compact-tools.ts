@@ -18,7 +18,7 @@ const outputText = (result: ToolResult): string => result.content
   .join("\n");
 
 const nonEmptyLines = (text: string): string[] => text.split("\n").filter((line) => line.trim().length > 0);
-const expandHint = " · [ expand ] Ctrl+E / Ctrl+O";
+const expandHint = " · [ expand ] Ctrl+O";
 
 function compactText(text: string, max = 72): string {
   const clean = text.replace(/\s+/g, " ").trim();

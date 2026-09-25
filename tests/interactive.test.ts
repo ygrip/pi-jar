@@ -139,19 +139,13 @@ test("task dialog is keyboard-accessible, width bounded and filters without dele
   assert.equal(await answer, "yes");
 });
 
-test("Ctrl+E toggles Pi's native expanded tool state both ways", () => {
-  const shortcuts = new Map<string, { handler: (ctx: unknown) => void }>();
-  piJar({ on() {}, registerCommand() {}, registerShortcut(key: string, options: { handler: (ctx: unknown) => void }) {
+test("does not claim Pi's built-in Ctrl+E cursor-line-end shortcut", () => {
+  const shortcuts = new Map<string, unknown>();
+  piJar({ on() {}, registerCommand() {}, registerShortcut(key: string, options: unknown) {
     shortcuts.set(key, options);
   } } as never);
-  const toggle = shortcuts.get("ctrl+e")?.handler;
-  assert.ok(toggle);
-  let expanded = false;
-  const ctx = { ui: { getToolsExpanded: () => expanded, setToolsExpanded(value: boolean) { expanded = value; } } };
-  toggle(ctx);
-  assert.equal(expanded, true);
-  toggle(ctx);
-  assert.equal(expanded, false);
+  assert.equal(shortcuts.has("ctrl+e"), false);
+  assert.equal(shortcuts.has("ctrl+alt+s"), true);
 });
 
 test("default Pi tools keep native metadata while collapsed cards stay brief", () => {
@@ -169,7 +163,7 @@ test("default Pi tools keep native metadata while collapsed cards stay brief", (
   const bash = definitions.find((tool) => tool.name === "bash")!;
   const bashResult = { content: [{ type: "text", text: "first log line\nsecond log line" }] };
   const bashCollapsed = bash.renderResult(bashResult, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n");
-  assert.match(bashCollapsed, /\[ expand \].*Ctrl\+E/);
+  assert.match(bashCollapsed, /\[ expand \].*Ctrl\+O/);
   assert.doesNotMatch(bashCollapsed, /second log line/);
   initTheme("dark", false);
   const bashExpanded = bash.renderResult(bashResult, { expanded: true, isPartial: false }, colors, { state: {}, invalidate() {}, showImages: false }).render(120).join("\n");
@@ -280,6 +274,47 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.equal(widgets.size, 0);
   style.disable(ctx as never);
   assert.equal(widgets.size, 0);
+});
+
+test("regular composer maps screen clicks into editor rows and releases mouse mode", () => {
+  let factory: Function | undefined = () => ({
+    render: () => ["top", "first line", "second line", "bottom"],
+    handleMouse(event: unknown) { clicks.push(event); return { handled: true }; },
+    getText: () => "draft", setText() {}, handleInput() {}, invalidate() {}
+  });
+  const clicks: any[] = [];
+  const writes: string[] = [];
+  let listener: ((data: string) => { consume?: boolean } | undefined) | undefined;
+  let previousLines: string[] = [];
+  let redraws = 0;
+  const tui = { mode: "regular", terminal: { write(value: string) { writes.push(value); } },
+    requestRender() { redraws++; },
+    captureRenderState: () => ({ previousLines, previousViewportTop: 1, previousWidth: 40 }),
+    addInputListener(fn: typeof listener) { listener = fn; return () => { listener = undefined; }; }
+  };
+  const ctx = { hasUI: true, mode: "tui", sessionManager: {}, ui: {
+    getEditorComponent: () => factory, setEditorComponent(value: Function | undefined) { factory = value; },
+    getEditorText: () => "draft", setEditorText() {}
+  } };
+  const style = new ComposerStyle();
+  assert.equal(style.enable(ctx as never), true);
+  const editor = factory?.(tui, theme, {}) as { render(width: number): string[] };
+  const rendered = editor.render(40);
+  previousLines = ["other row", "scrolled row", ...rendered, "footer"];
+  assert.equal(listener?.("\x1b[<0;8;3M")?.consume, true);
+  assert.equal(clicks.length, 1);
+  assert.equal(clicks[0].y, 1);
+  assert.equal(clicks[0].x, 6); // border coordinate removed
+  assert.equal(clicks[0].width, 38); // rounded border delegates to native editor
+  assert.equal(listener?.("\x1b[<0;8;1M")?.consume, true);
+  assert.equal(listener?.("\x1b[<64;8;3M")?.consume, true); // wheel is never forwarded into editor text
+  assert.equal(listener?.("\x1b[<0;8;3m")?.consume, true); // release cannot leak as input
+  assert.equal(clicks.length, 1);
+  assert.ok(redraws > 0);
+  assert.equal(writes.filter((line) => line.includes("?1000h")).length, 1);
+  style.disable(ctx as never);
+  assert.equal(listener, undefined);
+  assert.equal(writes.filter((line) => line.includes("?1000l")).length, 1);
 });
 
 test("composer icon tracks observed phases, refreshes session title, honors motion-off and stops after interruption", async () => {

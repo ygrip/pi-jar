@@ -164,6 +164,27 @@ const FLAME_FRAMES = [
   ]
 ] as const;
 
+// A narrow, wind-bent tongue of fire: the tip moves more than the base,
+// while the amber rim, orange body and hot core shift independently.
+function organicFlame(frame: number): string[] {
+  const widths = [1, 2, 3, 4, 5, 7, 9, 11, 13, 13, 11, 9, 5];
+  return widths.map((width, y) => {
+    const bend = Math.round(Math.sin(frame * 0.7 + y * 0.38) * (1 - y / 15) * 3);
+    const center = 11 + bend + (y > 8 ? Math.round(Math.sin(frame * 0.45 + y) * 0.6) : 0);
+    const half = Math.floor(width / 2);
+    const row = Array.from({ length: FLAME_WIDTH }, () => " ");
+    for (let x = center - half; x <= center + half; x++) {
+      if (x < 0 || x >= FLAME_WIDTH) continue;
+      const distance = Math.abs(x - center);
+      const flicker = Math.sin(frame * 0.9 + y * 1.9 + x * 0.73);
+      if (distance === half && flicker > 0.48 && y < 10) continue;
+      row[x] = distance >= half ? "░" : distance >= half - 1 ? "▒"
+        : distance >= half - 2 ? "▓" : y > 3 && flicker > -0.25 ? "@" : "█";
+    }
+    return row.join("");
+  });
+}
+
 const PI_LARGE = [
   "    ▄▄▄▄▄▄▄▄▄▄▄    ",
   "   ▄█████████████▄   ",
@@ -183,6 +204,7 @@ const PI_COMPACT = [
 
 const ART_WIDTH = 28;
 const FLAME_WIDTH = 23;
+const ORGANIC_FLAME_FRAMES = Array.from({ length: FLAME_FRAMES.length }, (_, frame) => organicFlame(frame));
 const FIRE_RGB = {
   core: "#FFF2A6",
   hot: "#FFD45A",
@@ -326,7 +348,7 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
   if (width <= 0) return [];
   const fit = (line: string) => truncateToWidth(line, width);
   const step = ((frame % FLAME_FRAMES.length) + FLAME_FRAMES.length) % FLAME_FRAMES.length;
-  const flame = addEmbers(FLAME_FRAMES[step] ?? FLAME_FRAMES[0], frame).map((line) => paintFlame(line));
+  const flame = addEmbers(ORGANIC_FLAME_FRAMES[step]!, frame).map((line) => paintFlame(line));
   const compactFlame = flame.slice(2, 10);
   if (width < 32) return [
     ...compactFlame.map((line) => fit(line)),
