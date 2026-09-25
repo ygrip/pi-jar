@@ -4,7 +4,7 @@ import { Key, matchesKey, Text, truncateToWidth, type TuiMouseEvent } from "@ear
 import { Type } from "typebox";
 import { safeLine } from "./diff-view.ts";
 import { cleanText } from "./status.ts";
-import { contentRows, sidebarWidth, splitFrame } from "./split-view.ts";
+import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
 
 export const SHELL_TOOL = "jar_shell";
 export const SHELL_MESSAGE = "pi-jar.shell";
@@ -241,6 +241,11 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
   });
 }
 
+const SHELL_ACTIONS = [
+  { key: "x", label: "Kill the selected shell" },
+  { key: "f", label: "Follow the latest output" }
+] as const;
+
 /** Overlay: shells on the left, the selected shell's live output on the right; k kills. */
 export async function openShellsView(ctx: ExtensionContext, manager: ShellManager): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
@@ -258,7 +263,7 @@ export async function openShellsView(ctx: ExtensionContext, manager: ShellManage
     timer.unref?.();
     manager.onChange = () => { previous?.(); tui.requestRender(); };
     const close = () => { clearInterval(timer); manager.onChange = previous; done(); };
-    return {
+    const component = {
       invalidate() {},
       handleInput(data: string) {
         const jobs = manager.list();
@@ -277,10 +282,12 @@ export async function openShellsView(ctx: ExtensionContext, manager: ShellManage
         if (event.type !== "click" || event.button !== "left") return;
         if (event.y === 0 && event.x >= width - 3) { close(); return { handled: true }; }
         if (row >= 0 && row < layout.rows && layout.leftWidth && event.x < layout.leftWidth + 3 && row < manager.list().length) { selected = row; follow = true; tui.requestRender(); return { handled: true, focus: true }; }
+        const action = SHELL_ACTIONS[event.y - layout.footerTop];
+        if (action) { component.handleInput(action.key); return { handled: true }; }
       },
       render(available: number): string[] {
         width = Math.max(24, available);
-        rows = contentRows(6, 6);
+        rows = contentRows(6 + SHELL_ACTIONS.length, 6);
         const jobs = manager.list();
         selected = Math.min(selected, Math.max(0, jobs.length - 1));
         const job = jobs[selected];
@@ -299,13 +306,14 @@ export async function openShellsView(ctx: ExtensionContext, manager: ShellManage
         if (job && !output.length) body.push(fg("dim", "(no output yet)"));
         const title = `⚙ SHELLS · ${manager.running()} running` + (job ? ` · ${describe(job)}` : "");
         const footer = [
-          fg("muted", "[ x kill ] [ f follow ]") + fg("dim", "  ↑↓ shell · PgUp/PgDn scroll · Esc close"),
-          fg("dim", job ? "$ " + truncateToWidth(cleanText(job.command, 400), width - 8) : "")
+          ...optionList(theme, SHELL_ACTIONS.map((item) => item.label), -1, SHELL_ACTIONS.map((item) => item.key)),
+          fg("dim", (job ? "$ " + truncateToWidth(cleanText(job.command, 400), Math.max(8, width - 60)) + "   " : "") + "↑↓ shell · PgUp/PgDn scroll · Esc close")
         ];
         const split = splitFrame(theme, width, title, list, body, footer, rows, listWidth);
         layout = split.layout;
         return split.lines;
       }
     };
+    return component;
   }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
 }

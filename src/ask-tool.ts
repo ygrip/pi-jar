@@ -11,7 +11,7 @@ const QuestionSchema = Type.Object({
   id: Type.Optional(Type.String({ maxLength: 64 })),
   header: Type.Optional(Type.String({ maxLength: 48 })),
   question: Type.String({ maxLength: 1000 }),
-  multi: Type.Optional(Type.Boolean()),
+  multi: Type.Optional(Type.Boolean({ description: "Show checkboxes so the user can select several options." })),
   allowCustom: Type.Optional(Type.Boolean()),
   options: Type.Optional(Type.Array(OptionSchema, { maxItems: 12 }))
 });
@@ -66,7 +66,10 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
         if (matchesKey(data, Key.escape)) return done({ kind: "cancel" });
         if (matchesKey(data, Key.up)) selected = (selected + totalRows() - 1) % totalRows();
         else if (matchesKey(data, Key.down)) selected = (selected + 1) % totalRows();
-        else if (/^[1-9]$/.test(data)) {
+        else if (multi && data === "a") {
+          // Select all, or clear when everything is already checked.
+          if (checked.size === options.length) checked.clear(); else options.forEach((_option, at) => checked.add(at));
+        } else if (/^[1-9]$/.test(data)) {
           const at = Number(data) - 1;
           if (at < options.length) { selected = at; choose(); }
         } else if (matchesKey(data, Key.enter) || data === " ") choose();
@@ -107,7 +110,8 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
         actions.forEach((action, at) => {
           const row = options.length + at;
           const active = row === selected;
-          const chip = "[ " + action.icon + " " + action.label + " ]";
+          const label = action.kind === "submit" ? `Continue with ${checked.size ? checked.size + " selected" : "none selected"}` : action.label;
+          const chip = "[ " + action.icon + " " + label + " ]";
           content.push({ target: row, line: fit(theme.fg(active ? "accent" : "dim", "│ " + (active ? "❯ " : "  ") + chip), width) });
         });
         const page = Math.max(3, Math.min(16, (process.stdout.rows ?? 24) - 5));
@@ -122,7 +126,7 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
           if (row.target !== undefined) hitRows[lines.length] = row.target;
           lines.push(row.line);
         });
-        const hint = multi ? "↑↓ move · Space/Enter toggle · wheel scroll · Esc cancel" : "↑↓ move · Enter choose · wheel scroll · Esc cancel";
+        const hint = multi ? `${checked.size}/${options.length} checked · ↑↓ move · Space/Enter toggle · a all · Esc cancel` : "↑↓ move · Enter choose · wheel scroll · Esc cancel";
         lines.push(fit(theme.fg("dim", `╰─ ${scroll + 1}–${Math.min(scroll + page, content.length)}/${content.length} · ${hint}`), width));
         return lines.map((line) => visibleWidth(line) <= width ? line : fit(line, width));
       }

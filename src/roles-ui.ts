@@ -1,31 +1,20 @@
 import type { ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Key, matchesKey, stripTerminalSequences, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { promptText } from "./dialogs.ts";
 import { isRoleName, normalizeSpec, THINKING, type ModelRoleManager, type RoleRow } from "./model-roles.ts";
-import { contentRows, sidebarWidth, splitFrame } from "./split-view.ts";
+import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
 
 type RoleAction = "model" | "alias" | "thinking" | "scope" | "activate" | "clear" | "new" | "delete";
-const ACTIONS: { action: RoleAction; key: string; label: string }[] = [
-  { action: "model", key: "m", label: "m model" },
-  { action: "alias", key: "a", label: "a alias" },
-  { action: "thinking", key: "t", label: "t effort" },
-  { action: "scope", key: "s", label: "s scope" },
-  { action: "activate", key: "\r", label: "⏎ activate" },
-  { action: "clear", key: "c", label: "c clear" },
-  { action: "new", key: "n", label: "n new role" },
-  { action: "delete", key: "d", label: "d delete" }
+const ACTIONS: { action: RoleAction; key: string; hint: string; label: string }[] = [
+  { action: "activate", key: "\r", hint: "⏎", label: "Activate this role now" },
+  { action: "model", key: "m", hint: "m", label: "Assign a model" },
+  { action: "alias", key: "a", hint: "a", label: "Alias another role (@role)" },
+  { action: "thinking", key: "t", hint: "t", label: "Set thinking effort" },
+  { action: "scope", key: "s", hint: "s", label: "Move between global and project" },
+  { action: "clear", key: "c", hint: "c", label: "Clear the assignment" },
+  { action: "new", key: "n", hint: "n", label: "New custom role" },
+  { action: "delete", key: "d", hint: "d", label: "Delete this custom role" }
 ];
-
-/** Chip text for each footer action, laid out left to right on one row. */
-function actionChips(): { action: RoleAction; start: number; end: number; text: string }[] {
-  let x = 0;
-  return ACTIONS.map((item) => {
-    const text = "[ " + item.label + " ]";
-    const chip = { action: item.action, start: x, end: x + visibleWidth(text), text };
-    x = chip.end + 1;
-    return chip;
-  });
-}
 
 function detail(row: RoleRow, active: string | undefined): [ThemeColor, string][] {
   const target: [ThemeColor, string] = row.error ? ["error", "⚠ " + row.error]
@@ -52,6 +41,7 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
     let scroll = 0;
     let layout = { top: 1, rows: 0, leftWidth: 0, bodyX: 2, footerTop: 0 };
     let width = 80;
+    let actionsTop = -1;
     const rows = () => roles.list();
     const finish = (action: RoleAction) => done({ action, index: selected });
     return {
@@ -77,20 +67,21 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
         if (event.type !== "click" || event.button !== "left") return;
         if (event.y === 0 && event.x >= width - 3) { done(undefined); return { handled: true }; }
         const row = event.y - layout.top;
+        // Actions are listed in the detail pane, one per row.
+        const actionIndex = row - actionsTop;
+        if (row >= 0 && row < layout.rows && event.x >= layout.bodyX && actionIndex >= 0 && actionIndex < ACTIONS.length) {
+          finish(ACTIONS[actionIndex]!.action); return { handled: true };
+        }
         if (row >= 0 && row < layout.rows && (layout.leftWidth === 0 || event.x < layout.leftWidth + 3)) {
           const index = scroll + row;
           if (index < count) { selected = index; tui.requestRender(); return { handled: true, focus: true }; }
-        }
-        if (event.y === layout.footerTop) {
-          const chip = actionChips().find((item) => event.x - 2 >= item.start && event.x - 2 < item.end);
-          if (chip) { finish(chip.action); return { handled: true }; }
         }
       },
       render(available: number): string[] {
         width = Math.max(24, available);
         const list = rows();
         selected = Math.max(0, Math.min(list.length - 1, selected));
-        const height = Math.min(contentRows(8, 8), Math.max(12, list.length));
+        const height = Math.min(contentRows(5, 8), Math.max(12 + ACTIONS.length + 2, list.length));
         if (selected < scroll) scroll = selected;
         if (selected >= scroll + height) scroll = selected - height + 1;
         const active = roles.activeRole();
@@ -101,12 +92,17 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
         });
         const row = list[selected]!;
         const info = detail(row, active).map(([color, text]) => theme.fg(color, text));
-        const chips = actionChips().map((chip) => theme.fg(chip.action === "delete" && !row.custom ? "dim" : "accent", chip.text)).join(" ");
         // Narrow terminals collapse the sidebar into a pager header above the details.
         const narrow = sidebarWidth(width) === 0;
-        const body = narrow ? [theme.fg("accent", `‹ ${selected + 1}/${list.length} ${row.role} ›`), ...info] : info;
+        const header = narrow ? [theme.fg("accent", `‹ ${selected + 1}/${list.length} ${row.role} ›`)] : [];
+        const actions = optionList(theme, ACTIONS.map((item) => item.label), -1, ACTIONS.map((item) => item.hint))
+          .map((line, at) => ACTIONS[at]!.action === "delete" && !row.custom ? theme.fg("dim", stripTerminalSequences(line)) : line);
+        // Actions come right after the facts; the spec help (last three lines) goes last.
+        const facts = info.slice(0, -3), help = info.slice(-3);
+        const body = [...header, ...facts, theme.fg("accent", "Actions"), ...actions, ...help];
+        actionsTop = header.length + facts.length + 1;
         const split = splitFrame(theme, width, "pi-jar · roles", narrow ? [] : left, body, [
-          chips, theme.fg("dim", "↑↓ choose · letters or click act · Esc close")
+          theme.fg("dim", "↑↓ choose role · press a key or click an action · Esc close")
         ], height);
         layout = split.layout;
         return split.lines;

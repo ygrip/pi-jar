@@ -108,3 +108,24 @@ test("review overlay accepts, confirms reverts and closes when nothing is left; 
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "A\n", "accepted change kept");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("review actions are a vertical list and clicking one runs it", async () => {
+  const root = workspace();
+  try {
+    writeFileSync(join(root, "a.ts"), "a\n");
+    const tracker = new ChangeTracker(() => root);
+    tracker.capture("a.ts");
+    writeFileSync(join(root, "a.ts"), "A\n");
+    let component: any;
+    const ctx = { hasUI: true, mode: "tui", ui: { notify() {}, custom(factory: Function) {
+      return new Promise<void>((resolve) => { component = factory({ requestRender() {} }, { fg: plain, bold: (t: string) => t }, {}, resolve); });
+    } } };
+    const view = openDiffView(ctx as never, tracker);
+    const lines = component.render(100).map(stripTerminalSequences);
+    const rows = ["a  Accept this file", "r  Revert this file", "A  Accept all files", "R  Revert all files"].map((label) => lines.findIndex((line: string) => line.includes(label)));
+    assert.ok(rows.every((row, index) => row > 0 && (index === 0 || row === rows[index - 1]! + 1)), "one action per row");
+    component.handleMouse({ type: "click", button: "left", x: 6, y: rows[2] });
+    await view;
+    assert.equal(tracker.count(), 0, "Accept all ran");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -1,17 +1,17 @@
 import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, Markdown, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { parsePlanSections, type PlanSection } from "./plan-utils.ts";
-import { contentRows, sidebarWidth, splitFrame } from "./split-view.ts";
+import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
 
 export type PlanViewAction = "implement" | "compact" | "refine" | "edit" | "stop";
 export interface PlanViewResult { action: PlanViewAction; role?: string }
 export interface PlanViewInput { title: string; text: string; path?: string; roles?: readonly string[]; role?: string }
 
 const ACTIONS: { action: PlanViewAction; label: string }[] = [
-  { action: "implement", label: "1 ▶ Approve & execute" },
-  { action: "compact", label: "2 ◇ Approve, compact & execute" },
-  { action: "refine", label: "3 ✎ Refine" },
-  { action: "stop", label: "4 ■ Stop" }
+  { action: "implement", label: "▶ Approve & execute" },
+  { action: "compact", label: "◇ Approve, compact & execute" },
+  { action: "refine", label: "✎ Refine" },
+  { action: "stop", label: "■ Stop" }
 ];
 type Focus = "toc" | "body" | "actions";
 
@@ -56,8 +56,6 @@ export async function openPlanView(ctx: ExtensionContext, input: PlanViewInput):
     let bodyRows = 0;
     let rendered: { key: string; lines: string[] } | undefined;
     let layout = { top: 1, rows: 0, leftWidth: 0, bodyX: 2, footerTop: 0 };
-    let chips: { start: number; end: number; index: number }[] = [];
-    let roleChip = { start: -1, end: -1 };
     const finish = (value: PlanViewAction) => done({ action: value, ...(roleChoices[role] !== "current" ? { role: roleChoices[role] } : {}) });
     const body = (bodyWidth: number) => {
       const entry = entries[selected]!;
@@ -114,17 +112,14 @@ export async function openPlanView(ctx: ExtensionContext, input: PlanViewInput):
           if (index < entries.length) { selectEntry(index); focus = "toc"; tui.requestRender(); return { handled: true, focus: true }; }
         }
         if (inContent) { focus = "body"; tui.requestRender(); return { handled: true, focus: true }; }
-        if (event.y === layout.footerTop) {
-          const chip = chips.find((item) => event.x - 2 >= item.start && event.x - 2 < item.end);
-          if (chip) { action = chip.index; finish(ACTIONS[chip.index]!.action); return { handled: true }; }
-        }
-        if (event.y === layout.footerTop + 1 && event.x - 2 >= roleChip.start && event.x - 2 < roleChip.end) {
-          role = (role + 1) % roleChoices.length; tui.requestRender(); return { handled: true, focus: true };
-        }
+        // Footer: one row per action, then the role row.
+        const footerRow = event.y - layout.footerTop;
+        if (footerRow >= 0 && footerRow < ACTIONS.length) { action = footerRow; finish(ACTIONS[footerRow]!.action); return { handled: true }; }
+        if (footerRow === ACTIONS.length) { role = (role + 1) % roleChoices.length; tui.requestRender(); return { handled: true, focus: true }; }
       },
       render(available: number): string[] {
         width = Math.max(24, available);
-        bodyRows = contentRows(6, 6);
+        bodyRows = contentRows(6 + ACTIONS.length, 6);
         const tocWidth = sidebarWidth(width);
         const bodyWidth = tocWidth ? width - tocWidth - 6 : width - 4;
         const narrowHeader = tocWidth ? [] : [theme.fg("accent", `‹ ${selected + 1}/${entries.length} ${entries[selected]!.title} ›`), ""];
@@ -141,20 +136,11 @@ export async function openPlanView(ctx: ExtensionContext, input: PlanViewInput):
         });
         const window = content.slice(scroll, scroll + rows);
         const position = content.length > rows ? ` ${scroll + 1}–${Math.min(content.length, scroll + rows)}/${content.length}` : "";
-        let x = 0;
-        chips = [];
-        const actionRow = ACTIONS.map((item, index) => {
-          const text = `[ ${item.label} ]`;
-          chips.push({ start: x, end: x + visibleWidth(text), index });
-          x += visibleWidth(text) + 1;
-          const active = focus === "actions" && index === action;
-          return theme.fg(active ? "accent" : "muted", active ? theme.bold?.(text) ?? text : text);
-        }).join(" ");
-        const roleText = `[ continue with: ${roleChoices[role]} ⟳ ]`;
-        roleChip = { start: 0, end: visibleWidth(roleText) };
-        const hints = theme.fg("dim", "  Tab focus · ↑↓ move · PgUp/PgDn scroll · r role · e edit · Esc stop" + (input.path ? " · " + input.path : ""));
+        const actionRows = optionList(theme, ACTIONS.map((item) => item.label), focus === "actions" ? action : -1);
+        const roleText = `⟳ continue with: ${roleChoices[role]}`;
+        const hints = theme.fg("dim", "   Tab focus · ↑↓ move · 1–4 choose · r role · e edit · Esc stop" + (input.path ? " · " + input.path : ""));
         const split = splitFrame(theme, width, "◆ PLAN" + (title ? " · " + title : "") + " · read-only" + position, toc, window,
-          [actionRow, theme.fg("accent", roleText) + hints], rows, tocWidth);
+          [...actionRows, theme.fg("accent", roleText) + hints], rows, tocWidth);
         layout = split.layout;
         return split.lines;
       }

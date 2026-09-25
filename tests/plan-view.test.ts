@@ -58,8 +58,12 @@ test("mouse clicks pick headings and actions; drags stay with Pi for text select
   assert.match(view.render().join("\n"), /npm test/);
   assert.equal(view.mouse({ type: "drag", x: 40, y: 3 }), undefined, "drag is not captured");
   assert.equal(view.mouse({ type: "press", x: 40, y: 3 }), undefined, "press is not captured");
-  const footer = view.render().findIndex((line) => line.includes("[ 4 ■ Stop ]"));
-  const x = view.render()[footer]!.indexOf("[ 4 ■ Stop ]") + 2;
-  view.mouse({ x, y: footer });
+  // Actions are a vertical, numbered list: one row each.
+  const rendered = view.render();
+  const approve = rendered.findIndex((line) => /1\s+▶ Approve & execute/.test(line));
+  const stop = rendered.findIndex((line) => /4\s+■ Stop/.test(line));
+  assert.ok(approve > 0 && stop === approve + 3, "four actions on consecutive rows");
+  assert.match(rendered[stop + 1]!, /continue with: current/);
+  view.mouse({ x: 6, y: stop });
   assert.deepEqual(await view.pending, { action: "stop" });
 });

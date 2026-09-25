@@ -1,7 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { diffRows, lineDiff, type ChangeTracker, type DiffRow, type FileChange } from "./changes.ts";
-import { contentRows, sidebarWidth, splitFrame } from "./split-view.ts";
+import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
+
+const ACTIONS = [
+  { key: "a", label: "Accept this file (keep it, stop tracking)" },
+  { key: "r", label: "Revert this file (asks to confirm)" },
+  { key: "A", label: "Accept all files" },
+  { key: "R", label: "Revert all files (asks to confirm)" }
+] as const;
 
 const STATUS_MARK = { added: "A", modified: "M", deleted: "D" } as const;
 
@@ -60,7 +67,7 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
     };
     const select = (index: number) => { selected = Math.max(0, Math.min(changes.length - 1, index)); scroll = 0; };
     const scrollBody = (delta: number) => { scroll = Math.max(0, Math.min(Math.max(0, (cache?.lines.length ?? 0) - bodyRows), scroll + delta)); };
-    return {
+    const component = {
       invalidate() { cache = undefined; },
       handleInput(data: string) {
         const current = changes[selected];
@@ -95,10 +102,12 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
         if (event.type !== "click" || event.button !== "left") return;
         if (event.y === 0 && event.x >= width - 3) { done(); return { handled: true }; }
         if (inContent && inList && listScroll + row < changes.length) { select(listScroll + row); tui.requestRender(); return { handled: true, focus: true }; }
+        const action = ACTIONS[event.y - layout.footerTop];
+        if (action) { component.handleInput(action.key); return { handled: true }; }
       },
       render(available: number): string[] {
         width = Math.max(24, available);
-        bodyRows = contentRows(6, 6);
+        bodyRows = contentRows(6 + ACTIONS.length, 6);
         const listWidth = sidebarWidth(width, 20, 36);
         const bodyWidth = listWidth ? width - listWidth - 6 : width - 4;
         const current = changes[selected];
@@ -119,14 +128,15 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
         const totals = changes.reduce((sum, change) => [sum[0]! + change.added, sum[1]! + change.removed], [0, 0]);
         const title = `± CHANGES · ${changes.length} file${changes.length === 1 ? "" : "s"} · +${totals[0]} −${totals[1]}`;
         const footer = [
-          fg("muted", "[ a accept ] [ r revert ] [ A accept all ] [ R revert all ]") + fg("dim", "  ↑↓ file · PgUp/PgDn scroll · Esc close"),
-          message ? fg(armed ? "warning" : "dim", message) : fg("dim", "Accepting keeps the file as is; reverting restores it to before the agent's first edit.")
+          ...optionList(theme, ACTIONS.map((item) => item.label), -1, ACTIONS.map((item) => item.key)),
+          message ? fg(armed ? "warning" : "dim", message) : fg("dim", "↑↓ file · PgUp/PgDn scroll · press a key or click an action · Esc close")
         ];
         const split = splitFrame(theme, width, title, list, content.slice(scroll, scroll + bodyRows), footer, bodyRows, listWidth);
         layout = split.layout;
         return split.lines;
       }
     };
+    return component;
   }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
 }
 

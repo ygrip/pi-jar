@@ -88,3 +88,28 @@ test("jar_ask multi-select returns checked values; chat does not masquerade as a
     options: [{ label: "Yes" }] }, { question: "Unasked" }] }, undefined, undefined, chat.ctx);
   assert.deepEqual(discussed.details.answers, [{ id: "q1", chat: "I need context" }]);
 });
+
+test("multi-select shows checkboxes, a selected count and select-all", async () => {
+  let component: any;
+  const ctx = { hasUI: true, mode: "tui", ui: { notify() {}, custom(factory: Function) {
+    return new Promise((resolve) => { component = factory({ requestRender() {} }, { fg: (_c: string, t: string) => t }, {}, resolve); });
+  } } };
+  let tool: any;
+  registerAskTool({ registerTool(definition: unknown) { tool = definition; } } as never);
+  const pending = tool.execute("id", { questions: [{ question: "Pick", multi: true, options: [{ label: "Alpha" }, { label: "Beta" }, { label: "Gamma" }] }] }, undefined, undefined, ctx);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const screen = () => component.render(80).join("\n");
+  assert.match(screen(), /MULTI SELECT/);
+  assert.match(screen(), /☐ {2}1\. Alpha/);
+  assert.match(screen(), /Continue with none selected/);
+  component.handleInput("a");
+  assert.match(screen(), /☑ {2}1\. Alpha[\s\S]*☑ {2}2\. Beta[\s\S]*☑ {2}3\. Gamma/);
+  assert.match(screen(), /Continue with 3 selected/);
+  assert.match(screen(), /3\/3 checked/);
+  component.handleInput("2"); // uncheck Beta
+  assert.match(screen(), /Continue with 2 selected/);
+  for (let step = 0; step < 4; step++) component.handleInput("\x1b[B");
+  component.handleInput("\r");
+  const result = await pending;
+  assert.match(result.content[0].text, /Alpha, Gamma/);
+});

@@ -59,3 +59,16 @@ export function splitFrame(theme: SplitTheme, width: number, title: string, left
 export function contentRows(chrome: number, min = 4): number {
   return Math.max(min, (process.stdout.rows ?? 24) - chrome);
 }
+
+/**
+ * Numbered options, one per row: `❯ 1  label` for the selected one (or none when `selected` is -1).
+ * Use for any set of choices so they read as a list rather than a crowded single line.
+ */
+export function optionList(theme: SplitTheme & { bold?: (text: string) => string }, labels: readonly string[], selected: number, keys?: readonly string[]): string[] {
+  return labels.map((label, index) => {
+    const active = index === selected;
+    const key = keys?.[index] ?? String(index + 1);
+    const text = `${active ? "❯" : " "} ${key.padEnd(2)} ${label}`;
+    return theme.fg(active ? "accent" : "muted", active ? theme.bold?.(text) ?? text : text);
+  });
+}
