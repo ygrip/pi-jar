@@ -6,6 +6,8 @@ A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earend
 
 ## See it in action
 
+![pi-jar welcome: pixel flame over the π, the hero message and workspace card, and the composer with Ember](docs/assets/pi-jar-demo.gif)
+
 The showcase is captured from a real pi-jar terminal session: the torch-style `π`, animated flame and embers, live workspace state, tasks, roles and composer are the actual TUI rather than a mockup. Capture and media guidelines live in [docs/SHOWCASE.md](docs/SHOWCASE.md).
 
 ## Highlights
