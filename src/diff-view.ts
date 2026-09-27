@@ -152,14 +152,21 @@ export function registerChangeReview(pi: ExtensionAPI, tracker: () => ChangeTrac
     if (typeof path !== "string" || !path.trim() || !tracker()?.capture(path)) return;
     const id = (event as { toolCallId?: unknown }).toolCallId;
     if (typeof id === "string" && id) pending.set(id, path);
-    else fallback.push(path);
+    fallback.push(path);
   });
   pi.on("tool_result", (event) => {
     if (event.toolName !== "edit" && event.toolName !== "write") return;
     const id = (event as { toolCallId?: unknown }).toolCallId;
     let path: string | undefined;
-    if (typeof id === "string" && id) { path = pending.get(id); pending.delete(id); }
-    else path = fallback.shift();
+    if (typeof id === "string" && id) {
+      path = pending.get(id);
+      pending.delete(id);
+      if (path) {
+        const index = fallback.indexOf(path);
+        if (index >= 0) fallback.splice(index, 1);
+      }
+    }
+    if (!path) path = fallback.shift();
     if (path) tracker()?.markDirty(path);
     changed();
   });
