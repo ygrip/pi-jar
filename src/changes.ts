@@ -141,7 +141,8 @@ export class ChangeTracker {
     const before = this.baselines.get(target)!;
     const now = readText(target);
     this.diffCache.delete(target);
-    if (now === undefined || now === before) {
+    if (now === undefined) { this.drop(target); return false; }
+    if (now === before) {
       this.dirty.delete(target);
       return false;
     }
@@ -156,7 +157,8 @@ export class ChangeTracker {
       const before = this.baselines.get(path);
       if (before === undefined) { this.dirty.delete(path); this.diffCache.delete(path); continue; }
       const now = readText(path);
-      if (now === undefined || now === before) { this.dirty.delete(path); this.diffCache.delete(path); continue; }
+      if (now === undefined) { this.drop(path); continue; }
+      if (now === before) { this.dirty.delete(path); this.diffCache.delete(path); continue; }
       const cached = this.diffCache.get(path);
       if (cached) { result.push(cached); continue; }
       const ops = lineDiff(before ?? "", now ?? "");
