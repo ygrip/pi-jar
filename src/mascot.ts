@@ -79,6 +79,20 @@ export class Mascot {
     return tips[((frame % tips.length) + tips.length) % tips.length]!;
   }
 
+  /**
+   * Milliseconds until an idle mascot can visibly change again. Active phases are driven by
+   * the composer's low-frequency animation clock; idle uses this deadline instead of polling.
+   */
+  nextTransitionDelay(now = Date.now()): number | undefined {
+    const current = this.mood(now);
+    if (this.flashMood && now < this.flashMood.until) return Math.max(16, this.flashMood.until - now);
+    if (this.phase !== "idle") return undefined;
+    const sleepyAt = this.lastActive + SLEEPY_AFTER_MS;
+    if (now >= sleepyAt) return undefined;
+    const next = current === "blink" ? Math.min(this.nextBlink + BLINK_MS, sleepyAt) : Math.min(this.nextBlink, sleepyAt);
+    return Math.max(16, next - now);
+  }
+
   /** Visual identity for change detection (avoids needless renders). */
   key(now = Date.now(), frame = 0): string { return this.mood(now) + ":" + this.tip(now, frame); }
 }

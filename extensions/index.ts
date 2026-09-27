@@ -187,7 +187,7 @@ export default function piJar(pi: ExtensionAPI): void {
       ctx.ui.setWorkingMessage?.(view.message);
       const indicatorKey = `${working.phase}:${animations}`;
       if (indicatorKey !== workingIndicatorKey) {
-        ctx.ui.setWorkingIndicator({ frames: view.frames, intervalMs: 240 });
+        ctx.ui.setWorkingIndicator({ frames: view.frames, intervalMs: 600 });
         workingIndicatorKey = indicatorKey;
       }
       if (active && !workingClock) {
@@ -360,15 +360,16 @@ export default function piJar(pi: ExtensionAPI): void {
         let frame = 0;
         let memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
         let memoryTimer: ReturnType<typeof setTimeout> | undefined;
+        const MEMORY_SAMPLE_MS = 10_000;
         const sampleMemory = () => {
           if (disposed) return;
-          memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
-          tui.requestRender();
-          memoryTimer = setTimeout(sampleMemory, 3000);
+          const next = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
+          if (next !== memory) { memory = next; tui.requestRender(); }
+          memoryTimer = setTimeout(sampleMemory, MEMORY_SAMPLE_MS);
           memoryTimer.unref?.();
         };
         if (footerSettings.memory) {
-          memoryTimer = setTimeout(sampleMemory, 3000);
+          memoryTimer = setTimeout(sampleMemory, MEMORY_SAMPLE_MS);
           memoryTimer.unref?.();
         }
         let timer: ReturnType<typeof setInterval> | undefined;
@@ -402,8 +403,10 @@ export default function piJar(pi: ExtensionAPI): void {
                 role.expiresAt != null ? Math.min(min ?? Infinity, role.expiresAt) : min, undefined);
               if (nearest != null) expiryTimer = setTimeout(() => tui.requestRender(), Math.max(1, nearest - now));
               const active = animations && footerSettings.roles && roles.some((role) => ACTIVE_STATES.has(role.state));
-              if (active && !timer) timer = setInterval(() => { frame += 1; tui.requestRender(); }, 240);
-              else if (!active && timer) { clearInterval(timer); timer = undefined; }
+              if (active && !timer) {
+                timer = setInterval(() => { frame += 1; tui.requestRender(); }, 600);
+                timer.unref?.();
+              } else if (!active && timer) { clearInterval(timer); timer = undefined; }
               const usage = ctx.getContextUsage();
               const context = usage?.percent == null || !Number.isFinite(usage.percent)
                 ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
