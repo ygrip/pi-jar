@@ -403,8 +403,10 @@ export default function piJar(pi: ExtensionAPI): void {
                 role.expiresAt != null ? Math.min(min ?? Infinity, role.expiresAt) : min, undefined);
               if (nearest != null) expiryTimer = setTimeout(() => tui.requestRender(), Math.max(1, nearest - now));
               const active = animations && footerSettings.roles && roles.some((role) => ACTIVE_STATES.has(role.state));
-              if (active && !timer) timer = setInterval(() => { frame += 1; tui.requestRender(); }, 600);
-              else if (!active && timer) { clearInterval(timer); timer = undefined; }
+              if (active && !timer) {
+                timer = setInterval(() => { frame += 1; tui.requestRender(); }, 600);
+                timer.unref?.();
+              } else if (!active && timer) { clearInterval(timer); timer = undefined; }
               const usage = ctx.getContextUsage();
               const context = usage?.percent == null || !Number.isFinite(usage.percent)
                 ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
