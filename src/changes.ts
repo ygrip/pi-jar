@@ -4,11 +4,14 @@ import { isAbsolute, relative, resolve } from "node:path";
 /** Files larger than this, or binary files, are not tracked for review. */
 export const MAX_TRACKED_BYTES = 1024 * 1024;
 export const MAX_TRACKED_FILES = 200;
-/** Above this many (old × new) changed lines the inline diff is replaced by a summary. */
-const MAX_DIFF_CELLS = 4_000_000;
+/** Bound total retained baselines so a long editing session cannot pin hundreds of MiB. */
+export const MAX_TRACKED_TOTAL_BYTES = 8 * 1024 * 1024;
+/** Keep the quadratic fallback small; larger edits render a summary instead of allocating a huge matrix. */
+const MAX_DIFF_CELLS = 500_000;
+const MAX_DIFF_MIDDLE_LINES = 4_000;
 
 export type ChangeStatus = "added" | "modified" | "deleted";
-export interface FileChange { path: string; rel: string; status: ChangeStatus; before: string; after: string; added: number; removed: number }
+export interface FileChange { path: string; rel: string; status: ChangeStatus; before: string; after: string; added: number; removed: number; diff?: DiffOp[] | null }
 export type DiffOp = { op: " " | "+" | "-"; text: string };
 export type DiffRow = { kind: "hunk" | "context" | "add" | "remove" | "note"; text: string; oldLine?: number; newLine?: number };
 
@@ -32,10 +35,11 @@ export function lineDiff(before: string, after: string): DiffOp[] | undefined {
   let endA = a.length, endB = b.length;
   while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA--; endB--; }
   const midA = a.slice(start, endA), midB = b.slice(start, endB);
-  if (midA.length * midB.length > MAX_DIFF_CELLS) return undefined;
+  if (midA.length + midB.length > MAX_DIFF_MIDDLE_LINES || midA.length * midB.length > MAX_DIFF_CELLS) return undefined;
   const n = midA.length, m = midB.length;
-  // lcs[i][j] = LCS length of midA[i..] and midB[j..], flattened.
-  const lcs = new Uint32Array((n + 1) * (m + 1));
+  // lcs[i][j] = LCS length of midA[i..] and midB[j..], flattened. The matrix is
+  // intentionally capped above and Uint16 is enough because the capped middle is < 65k lines.
+  const lcs = new Uint16Array((n + 1) * (m + 1));
   for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) {
     lcs[i * (m + 1) + j] = midA[i] === midB[j] ? lcs[(i + 1) * (m + 1) + j + 1]! + 1
       : Math.max(lcs[(i + 1) * (m + 1) + j]!, lcs[i * (m + 1) + j + 1]!);
@@ -95,10 +99,20 @@ export function diffRows(ops: readonly DiffOp[], context = 3): DiffRow[] {
  */
 export class ChangeTracker {
   private baselines = new Map<string, string | null>();
+  private dirty = new Set<string>();
+  private diffCache = new Map<string, FileChange>();
+  private baselineBytes = 0;
   private readonly cwd: () => string;
   constructor(cwd: () => string) { this.cwd = cwd; }
 
   private absolute(path: string): string { return isAbsolute(path) ? resolve(path) : resolve(this.cwd(), path); }
+  private bytes(content: string | null): number { return content === null ? 0 : Buffer.byteLength(content, "utf8"); }
+  private drop(target: string): void {
+    if (this.baselines.has(target)) this.baselineBytes = Math.max(0, this.baselineBytes - this.bytes(this.baselines.get(target)!));
+    this.baselines.delete(target);
+    this.dirty.delete(target);
+    this.diffCache.delete(target);
+  }
 
   /** Record the pre-change content once; returns false when the file cannot be tracked. */
   capture(path: string): boolean {
@@ -110,29 +124,62 @@ export class ChangeTracker {
     if (this.baselines.size >= MAX_TRACKED_FILES) return false;
     const content = readText(target);
     if (content === undefined) return false;
+    const bytes = this.bytes(content);
+    if (this.baselineBytes + bytes > MAX_TRACKED_TOTAL_BYTES) return false;
     this.baselines.set(target, content);
+    this.baselineBytes += bytes;
     return true;
   }
 
+  /**
+   * Mark one captured file after an edit/write completes. This performs only one cheap file read;
+   * no line diff is calculated until the review UI is opened.
+   */
+  markDirty(path: string): boolean {
+    const target = this.absolute(path);
+    if (!this.baselines.has(target)) return false;
+    const before = this.baselines.get(target)!;
+    const now = readText(target);
+    this.diffCache.delete(target);
+    if (now === undefined || now === before) {
+      this.dirty.delete(target);
+      return false;
+    }
+    this.dirty.add(target);
+    return true;
+  }
+
+  /** Materialize detailed diffs lazily for the review UI only. */
   changes(): FileChange[] {
     const result: FileChange[] = [];
-    for (const [path, before] of this.baselines) {
+    for (const path of [...this.dirty]) {
+      const before = this.baselines.get(path);
+      if (before === undefined) { this.dirty.delete(path); this.diffCache.delete(path); continue; }
       const now = readText(path);
-      if (now === undefined || now === before) continue;
+      if (now === undefined || now === before) { this.dirty.delete(path); this.diffCache.delete(path); continue; }
+      const cached = this.diffCache.get(path);
+      if (cached) { result.push(cached); continue; }
       const ops = lineDiff(before ?? "", now ?? "");
       const added = ops ? ops.filter((op) => op.op === "+").length : splitLines(now ?? "").length;
       const removed = ops ? ops.filter((op) => op.op === "-").length : splitLines(before ?? "").length;
       const rel = relative(this.cwd(), path);
-      result.push({ path, rel: rel && !rel.startsWith("..") ? rel : path, status: before === null ? "added" : now === null ? "deleted" : "modified",
-        before: before ?? "", after: now ?? "", added, removed });
+      const change: FileChange = {
+        path, rel: rel && !rel.startsWith("..") ? rel : path,
+        status: before === null ? "added" : now === null ? "deleted" : "modified",
+        before: before ?? "", after: now ?? "", added, removed, diff: ops ?? null
+      };
+      this.diffCache.set(path, change);
+      result.push(change);
     }
     return result.sort((a, b) => a.rel.localeCompare(b.rel));
   }
 
-  count(): number { return this.changes().length; }
+  /** O(1): the footer never calculates file diffs just to show its badge. */
+  count(): number { return this.dirty.size; }
+  trackedBytes(): number { return this.baselineBytes; }
   /** Keep the current content: stop tracking the file. */
-  accept(path: string): void { this.baselines.delete(this.absolute(path)); }
-  acceptAll(): void { this.baselines.clear(); }
+  accept(path: string): void { this.drop(this.absolute(path)); }
+  acceptAll(): void { this.baselines.clear(); this.dirty.clear(); this.diffCache.clear(); this.baselineBytes = 0; }
   /** Restore the pre-change content (or remove a file the agent created). */
   revert(path: string): void {
     const target = this.absolute(path);
@@ -140,7 +187,7 @@ export class ChangeTracker {
     const before = this.baselines.get(target)!;
     if (before === null) { if (existsSync(target)) unlinkSync(target); }
     else writeFileSync(target, before);
-    this.baselines.delete(target);
+    this.drop(target);
   }
-  clear(): void { this.baselines.clear(); }
+  clear(): void { this.acceptAll(); }
 }
