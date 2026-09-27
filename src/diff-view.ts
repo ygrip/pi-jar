@@ -18,7 +18,7 @@ export const safeLine = (text: string) => text.slice(0, 4000).replace(/\t/g, "  
 
 /** Styled diff rows for one file, with a gutter of old/new line numbers. */
 export function renderDiff(change: FileChange, width: number, fg: (color: string, text: string) => string): string[] {
-  const ops = lineDiff(change.before, change.after);
+  const ops = change.diff === null ? undefined : (change.diff ?? lineDiff(change.before, change.after));
   if (!ops) return [fg("warning", `Too large for an inline diff: +${change.added} −${change.removed} lines.`)];
   const rows: DiffRow[] = diffRows(ops);
   if (!rows.length) return [fg("dim", "No textual changes.")];
@@ -142,12 +142,27 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
 
 /** Track edit/write targets before they run, and expose `/diff` plus ctrl+alt+d. */
 export function registerChangeReview(pi: ExtensionAPI, tracker: () => ChangeTracker | undefined, changed: () => void): void {
+  // Keep the path that belonged to each in-flight edit/write so tool completion dirties only
+  // that file. Older Pi builds may omit toolCallId here, hence the small FIFO fallback.
+  const pending = new Map<string, string>();
+  const fallback: string[] = [];
   pi.on("tool_call", (event) => {
     if (event.toolName !== "edit" && event.toolName !== "write") return;
     const path = (event.input as { path?: unknown }).path;
-    if (typeof path === "string" && path.trim()) tracker()?.capture(path);
+    if (typeof path !== "string" || !path.trim() || !tracker()?.capture(path)) return;
+    const id = (event as { toolCallId?: unknown }).toolCallId;
+    if (typeof id === "string" && id) pending.set(id, path);
+    else fallback.push(path);
   });
-  pi.on("tool_result", (event) => { if (event.toolName === "edit" || event.toolName === "write") changed(); });
+  pi.on("tool_result", (event) => {
+    if (event.toolName !== "edit" && event.toolName !== "write") return;
+    const id = (event as { toolCallId?: unknown }).toolCallId;
+    let path: string | undefined;
+    if (typeof id === "string" && id) { path = pending.get(id); pending.delete(id); }
+    else path = fallback.shift();
+    if (path) tracker()?.markDirty(path);
+    changed();
+  });
   const open = async (ctx: ExtensionContext) => {
     const current = tracker();
     if (!current) return;
