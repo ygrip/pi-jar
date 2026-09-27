@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { ChangeTracker, diffRows, lineDiff } from "../src/changes.ts";
+import { ChangeTracker, diffRows, lineDiff, MAX_TRACKED_TOTAL_BYTES } from "../src/changes.ts";
 import { openDiffView, registerChangeReview, renderDiff, safeLine } from "../src/diff-view.ts";
 
 const plain = (_color: string, text: string) => text;
@@ -20,6 +20,9 @@ test("line diff finds minimal edits and groups them into unified hunks", () => {
   assert.deepEqual(rows.find((row) => row.kind === "add" && row.text === "l"), { kind: "add", text: "l", newLine: 12 });
   assert.deepEqual(lineDiff("same\n", "same\n")!.every((op) => op.op === " "), true);
   assert.deepEqual(lineDiff("", "new\n"), [{ op: "+", text: "new" }]);
+  const largeBefore = Array.from({ length: 800 }, (_, i) => "old-" + i).join("\n");
+  const largeAfter = Array.from({ length: 800 }, (_, i) => "new-" + i).join("\n");
+  assert.equal(lineDiff(largeBefore, largeAfter), undefined, "large quadratic diffs fall back to a summary");
 });
 
 test("tracker captures once, reports added/modified/deleted, accepts and reverts", () => {
@@ -36,6 +39,9 @@ test("tracker captures once, reports added/modified/deleted, accepts and reverts
     tracker.capture("keep.ts"); // a second capture keeps the original baseline
     writeFileSync(join(root, "new.ts"), "hello\n");
     rmSync(join(root, "gone.ts"));
+    tracker.markDirty("keep.ts");
+    tracker.markDirty("new.ts");
+    tracker.markDirty("gone.ts");
     assert.deepEqual(tracker.changes().map((change) => [change.rel, change.status, change.added, change.removed]),
       [["gone.ts", "deleted", 0, 1], ["keep.ts", "modified", 1, 1], ["new.ts", "added", 1, 0]]);
     tracker.revert("keep.ts");
@@ -49,12 +55,33 @@ test("tracker captures once, reports added/modified/deleted, accepts and reverts
     assert.equal(tracker.count(), 0, "reverted files are no longer tracked");
     tracker.capture("keep.ts");
     writeFileSync(join(root, "keep.ts"), "again\n");
+    tracker.markDirty("keep.ts");
     tracker.accept("keep.ts");
     assert.equal(tracker.count(), 0);
     assert.throws(() => tracker.revert("keep.ts"), /not a tracked change/);
     mkdirSync(join(root, "bin"));
     writeFileSync(join(root, "bin", "blob"), Buffer.from([0, 1, 2]));
     assert.equal(tracker.capture("bin/blob"), false, "binary files are skipped");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("tracker caps total retained baseline bytes", () => {
+  const root = workspace();
+  try {
+    const tracker = new ChangeTracker(() => root);
+    const chunk = "x".repeat(1024 * 1024 - 16);
+    let captured = 0;
+    for (let i = 0; i < 12; i++) {
+      const name = `large-${i}.txt`;
+      writeFileSync(join(root, name), chunk);
+      if (tracker.capture(name)) captured++;
+      else break;
+    }
+    assert.ok(captured > 0);
+    assert.ok(tracker.trackedBytes() <= MAX_TRACKED_TOTAL_BYTES);
+    assert.ok(captured < 12, "aggregate cap stops retaining more baselines");
+    tracker.clear();
+    assert.equal(tracker.trackedBytes(), 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -78,13 +105,15 @@ test("review overlay accepts, confirms reverts and closes when nothing is left; 
     let changed = 0;
     registerChangeReview({ on: (name: string, handler: Function) => events.set(name, handler), registerCommand: (name: string, command: { handler: Function }) => commands.set(name, command.handler),
       registerShortcut() {} } as never, () => tracker, () => { changed++; });
-    events.get("tool_call")!({ toolName: "edit", input: { path: "a.ts" } });
-    events.get("tool_call")!({ toolName: "write", input: { path: join(root, "b.ts") } });
-    events.get("tool_call")!({ toolName: "read", input: { path: "c.ts" } });
+    events.get("tool_call")!({ toolName: "edit", toolCallId: "a", input: { path: "a.ts" } });
+    events.get("tool_call")!({ toolName: "write", toolCallId: "b", input: { path: join(root, "b.ts") } });
+    events.get("tool_call")!({ toolName: "read", toolCallId: "c", input: { path: "c.ts" } });
     writeFileSync(join(root, "a.ts"), "A\n");
     writeFileSync(join(root, "b.ts"), "B\n");
-    events.get("tool_result")!({ toolName: "edit" });
+    events.get("tool_result")!({ toolName: "edit", toolCallId: "a" });
     assert.equal(changed, 1);
+    assert.equal(tracker.count(), 1, "only the completed edit is marked dirty");
+    events.get("tool_result")!({ toolName: "write", toolCallId: "b" });
     assert.equal(tracker.count(), 2);
     let component: any;
     let closed = false;
@@ -116,6 +145,7 @@ test("review actions are a vertical list and clicking one runs it", async () => 
     const tracker = new ChangeTracker(() => root);
     tracker.capture("a.ts");
     writeFileSync(join(root, "a.ts"), "A\n");
+    tracker.markDirty("a.ts");
     let component: any;
     const ctx = { hasUI: true, mode: "tui", ui: { notify() {}, custom(factory: Function) {
       return new Promise<void>((resolve) => { component = factory({ requestRender() {} }, { fg: plain, bold: (t: string) => t }, {}, resolve); });
