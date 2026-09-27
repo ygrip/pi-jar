@@ -11,6 +11,7 @@ type MouseEvent = Parameters<NonNullable<EditorComponent["handleMouse"]>>[0];
 const PHASE_MOODS: Record<WorkingPhase, readonly MascotMood[]> = {
   idle: ["idle"], generating: ["happy", "thinking"], tool: ["tool"], waiting: ["waiting"]
 };
+export const COMPOSER_ACTIVE_INTERVAL_MS = 600;
 /** Plain one-line face for a phase; every phase has the same width. */
 export function composerIcon(phase: WorkingPhase, frame = 0): string {
   const moods = PHASE_MOODS[phase];
@@ -256,7 +257,7 @@ export class ComposerStyle {
   private owner?: EditorFactory;
   private previous?: EditorFactory;
   private tui?: TUI;
-  private timer?: ReturnType<typeof setInterval>;
+  private timer?: ReturnType<typeof setTimeout>;
   private phase: WorkingPhase = "idle";
   private frame = 0;
   private animations = true;
@@ -291,7 +292,7 @@ export class ComposerStyle {
       return text;
     },
     typed: () => this.suggestions?.clear(),
-    poke: () => { this.mascot.flash("poke", 1500); this.tui?.requestRender(); },
+    poke: () => { this.mascot.flash("poke", 1500); this.restartTimer(); this.tui?.requestRender(); },
     dim: (text) => this.colors?.fg("dim", text) ?? `\x1b[2m${text}\x1b[22m`,
     attachments: (text) => {
       if (!/\.(png|jpe?g|gif|webp)\b/i.test(text)) return undefined;
@@ -318,36 +319,49 @@ export class ComposerStyle {
   /** Short-lived expression, e.g. on errors or a completed goal. */
   flash(mood: "error" | "complete" | "poke", ms = 3000): void {
     this.mascot.flash(mood, ms);
+    this.restartTimer();
     if (this.enabled) this.tui?.requestRender();
   }
 
   setActivity(phase: WorkingPhase, animations: boolean): void {
     const changed = this.phase !== phase || this.animations !== animations;
     this.mascot.setPhase(phase);
-    if (!changed && (this.timer || !this.enabled || !animations)) return;
+    if (!changed) return;
     this.phase = phase;
     this.animations = animations;
-    if (changed) this.frame = 0;
+    this.frame = 0;
     this.restartTimer();
-    if (changed && this.enabled) this.tui?.requestRender();
+    if (this.enabled) this.tui?.requestRender();
   }
 
-  /** One unref'd timer drives flicker, blinks and sleepiness; it renders only when the sprite changes. */
+  /**
+   * Active motion ticks at a modest 600 ms. Idle motion has no polling loop at all: it sleeps
+   * until the mascot's next blink/sleep/flash deadline, then schedules the following deadline.
+   */
   private restartTimer(): void {
     this.stopTimer();
-    if (!this.enabled || !this.animations) return;
-    const active = this.phase === "generating" || this.phase === "tool";
-    if (!active && !this.mascotOn) return;
-    this.timer = setInterval(() => {
+    if (!this.enabled || !this.animations || !this.mascotOn) return;
+    this.lastKey = this.mascot.key(Date.now(), this.frame);
+    this.scheduleTimer();
+  }
+  private scheduleTimer(): void {
+    if (!this.enabled || !this.animations || !this.mascotOn || this.timer) return;
+    const active = this.phase === "generating" || this.phase === "tool" || this.phase === "waiting";
+    const delay = active ? COMPOSER_ACTIVE_INTERVAL_MS : this.mascot.nextTransitionDelay(Date.now());
+    if (delay === undefined) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
       this.frame++;
-      const key = this.mascotOn ? this.mascot.key(Date.now(), this.frame) : String(this.frame);
-      if (key === this.lastKey) return;
-      this.lastKey = key;
-      this.tui?.requestRender();
-    }, 240);
+      const key = this.mascot.key(Date.now(), this.frame);
+      if (key !== this.lastKey) {
+        this.lastKey = key;
+        this.tui?.requestRender();
+      }
+      this.scheduleTimer();
+    }, delay);
     this.timer.unref?.();
   }
-  private stopTimer(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+  private stopTimer(): void { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
   refreshSession(ctx: ExtensionContext): void {
     const manager = ctx.sessionManager as { getSessionId?: () => string; getSessionName?: () => string | undefined } | undefined;
     const next = sessionDisplayName(manager?.getSessionName?.(), manager?.getSessionId?.());
