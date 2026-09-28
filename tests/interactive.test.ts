@@ -419,8 +419,9 @@ test("composer face tracks observed phases, refreshes session title, honors moti
   style.refreshSession(ctx as never);
   assert.ok(title().includes("session Flame pass"));
   style.setActivity("generating", true);
-  await new Promise((resolve) => setTimeout(resolve, 520));
-  assert.ok(redraws > 0, "flame tips flicker while generating");
+  const generatingRedraws = redraws;
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.equal(redraws, generatingRedraws, "active mascot piggybacks on Pi renders instead of scheduling its own");
   assert.match(title(), /\((\^ᴗ\^|°ᴗ°)\)/);
   style.setActivity("tool", false);
   assert.ok(title().includes("(•ᴗ•)"), "motion-off shows a calm face");
