@@ -48,6 +48,7 @@ const VERSION = (() => {
 })();
 /** Ignore the click Pi may synthesize right after a press we already acted on. */
 const WELCOME_CLICK_DEDUPE_MS = 400;
+const LARGE_SESSION_ENTRIES = 800;
 export default function piJar(pi: ExtensionAPI): void {
   installCompactBuiltinTools(pi);
   let demo = false;
@@ -507,6 +508,14 @@ export default function piJar(pi: ExtensionAPI): void {
     if (visualSettings.composer && enabled) composer.enable(ctx);
     suggest.sync();
     if (visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
+    if (branch.length >= LARGE_SESSION_ENTRIES) {
+      try {
+        const prefs = piPreferences(ctx)?.get();
+        if (prefs && !prefs.fullscreen) {
+          ctx.ui.notify(`Large session (${branch.length} entries): regular TUI redraw cost grows with history. Enable Fullscreen in /jar settings for smoother rendering.`, "warning");
+        }
+      } catch { /* Performance hint is optional. */ }
+    }
     // Resumed sessions already have a transcript to paint. Rebuilding the animated welcome and
     // scanning other session files competes with that expensive initial render for no real benefit.
     if (branch.length === 0) showWelcome(ctx);
