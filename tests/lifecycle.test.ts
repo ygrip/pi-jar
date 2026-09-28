@@ -270,7 +270,7 @@ test("standalone flame above large π freezes on motion-off and replays safely",
   }
 });
 
-test("Pi lifecycle keeps activity wording steady while icons animate without idle repaint", async () => {
+test("Pi lifecycle keeps working UI static and event-driven in long sessions", async () => {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
   const intervals = new Set<{ callback: () => void }>();
@@ -287,7 +287,6 @@ test("Pi lifecycle keeps activity wording steady while icons animate without idl
     let command: Function | undefined;
     let message: string | undefined;
     let frames: string[] = [];
-    let frameResets = 0;
     const ctx = {
       hasUI: true, mode: "tui", isIdle: () => true,
       model: { provider: "test", id: "test" },
@@ -296,7 +295,7 @@ test("Pi lifecycle keeps activity wording steady while icons animate without idl
       ui: {
         theme: { fg: (_color: string, text: string) => text },
         setWorkingMessage(value?: string) { message = value; },
-        setWorkingIndicator(value?: { frames: string[] }) { frames = value?.frames ?? []; frameResets++; },
+        setWorkingIndicator(value?: { frames: string[] }) { frames = value?.frames ?? []; },
         setWidget() {}, setFooter() {}, notify() {}
       }
     };
@@ -311,18 +310,15 @@ test("Pi lifecycle keeps activity wording steady while icons animate without idl
     assert.equal(intervals.size, 0);
     events.get("agent_start")?.({}, ctx);
     assert.match(message ?? "", /A spark remains… \(0s\)/);
-    assert.ok(frames.length > 1);
-    assert.equal(intervals.size, 1); // one elapsed-time clock, no idle repaint
-    const resetsBeforeTick = frameResets;
-    intervals.values().next().value?.callback();
-    assert.equal(frameResets, resetsBeforeTick, "clock does not restart spinner frames");
-    events.get("message_end")?.({ message: { role: "assistant", usage: { output: 1700 } } }, ctx);
+    assert.equal(frames.length, 1, "working indicator is static; native Pi renders drive updates");
+    assert.equal(intervals.size, 0, "working state adds no repaint loop");
+    events.get("message_end")?.({ message: { role: "assistant", usage: { output: 1700, cost: { total: 0.01 } } } }, ctx);
     assert.match(message ?? "", /↓ 1\.7k tokens/);
     events.get("tool_execution_start")?.({ toolCallId: "a", toolName: "read" }, ctx);
     assert.match(message ?? "", /read/);
     await command?.("animations off", ctx);
     assert.equal(frames.length, 1);
-    assert.equal(intervals.size, 1); // duration updates even with animation disabled
+    assert.equal(intervals.size, 0);
     events.get("turn_end")?.({}, ctx);
     assert.match(message ?? "", /↓ 1\.7k tokens/); // keep totals across tool turns
     events.get("agent_end")?.({}, ctx);
