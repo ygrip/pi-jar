@@ -252,6 +252,14 @@ test("default Pi tools keep native metadata while collapsed cards stay brief", (
   const writeCollapsed = write.renderCall({ path: "pet.ts", content: "one\ntwo" }, colors, { expanded: false }).render(120).join("\n");
   assert.match(writeCollapsed, /2 lines/);
   assert.doesNotMatch(writeCollapsed, /two/);
+
+  const huge = { content: [{ type: "text", text: ("line\n").repeat(20_000) }] };
+  const hugeCollapsed = bash.renderResult(huge, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n");
+  assert.match(hugeCollapsed, /\d+\+ lines/, "large historical outputs use a bounded summary");
+  assert.ok(hugeCollapsed.length < 200);
+  const hugeEdit = edit.renderResult({ content: [{ type: "text", text: "Applied" }], details: { diff: ("+x\n").repeat(30_000) } },
+    { expanded: false, isPartial: false }, colors, {}).render(120).join("\n");
+  assert.match(hugeEdit, /large diff/);
 });
 
 test("rounded input fits, shows the ember face and exposes a human session label", () => {
