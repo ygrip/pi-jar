@@ -72,7 +72,19 @@ export class GoalStore {
 
   restore(branch: readonly unknown[]): void {
     this.value = undefined;
-    for (const raw of branch) {
+    // Goal state is append-only. Find the newest set/legacy clear checkpoint and replay only
+    // the small suffix after it instead of scanning the whole transcript from the beginning.
+    let start = 0;
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const raw = branch[index];
+      if (!raw || typeof raw !== "object") continue;
+      const entry = raw as Record<string, unknown>;
+      if (entry.type !== "custom" || entry.customType !== GOAL_ENTRY || !entry.data || typeof entry.data !== "object") continue;
+      const data = entry.data as Record<string, unknown>;
+      if (data.op === "set" || data.op === "clear") { start = index; break; }
+    }
+    for (let index = start; index < branch.length; index++) {
+      const raw = branch[index];
       if (!raw || typeof raw !== "object") continue;
       const entry = raw as Record<string, unknown>;
       if (entry.type === "custom" && entry.customType === GOAL_ENTRY) this.apply(entry.data);
