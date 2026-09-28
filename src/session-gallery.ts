@@ -5,8 +5,8 @@ import { GOAL_ENTRY, GoalStore } from "./goals.ts";
 import { cleanText } from "./status.ts";
 
 export const RECENT_SESSIONS = 3;
-/** Larger session files are listed without goal/plan details. */
-const MAX_SCAN_BYTES = 8 * 1024 * 1024;
+/** Welcome metadata is decorative; never parse multi-megabyte old transcripts for it. */
+export const MAX_SCAN_BYTES = 512 * 1024;
 
 export interface RecentSession { path: string; title: string; modified: Date; messages: number; goal?: string; plan?: string }
 
