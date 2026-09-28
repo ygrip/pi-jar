@@ -81,7 +81,10 @@ export class GoalStore {
       const entry = raw as Record<string, unknown>;
       if (entry.type !== "custom" || entry.customType !== GOAL_ENTRY || !entry.data || typeof entry.data !== "object") continue;
       const data = entry.data as Record<string, unknown>;
-      if (data.op === "set" || data.op === "clear") { start = index; break; }
+      const validCheckpoint = data.op === "clear" && data.v === 1
+        || data.op === "set" && ((data.v === 1 && validGoal(data.text))
+          || (data.v === 2 && validId(data.id) && validGoal(data.text)));
+      if (validCheckpoint) { start = index; break; }
     }
     for (let index = start; index < branch.length; index++) {
       const raw = branch[index];
