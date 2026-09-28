@@ -331,6 +331,36 @@ test("Pi lifecycle keeps working UI static and event-driven in long sessions", a
   }
 });
 
+test("resumed sessions skip the animated welcome and recent-session scan", () => {
+  const events = new Map<string, Function>();
+  let welcomeInstalled = false;
+  const ctx = {
+    hasUI: true, mode: "tui", cwd: "/tmp/pi-jar", isIdle: () => true,
+    model: { provider: "test", id: "test-model" },
+    modelRegistry: { async getProviderAuth() { return undefined; } },
+    sessionManager: {
+      getBranch: () => [{ type: "custom", customType: "existing", data: {} }],
+      getSessionName: () => "Old session"
+    },
+    getContextUsage: () => ({ percent: 80 }),
+    ui: {
+      theme: { fg: (_color: string, text: string) => text },
+      setWorkingIndicator() {}, setWorkingMessage() {}, setFooter() {}, notify() {},
+      setWidget(key: string, factory?: unknown) {
+        if (key === "pi-jar.welcome" && factory) welcomeInstalled = true;
+      }
+    }
+  };
+  piJar({
+    on: (name: string, handler: Function) => { events.set(name, handler); },
+    getCommands: () => [],
+    registerCommand() {}
+  } as unknown as Parameters<typeof piJar>[0]);
+  events.get("session_start")?.({ reason: "startup" }, ctx);
+  assert.equal(welcomeInstalled, false);
+  events.get("session_shutdown")?.({}, ctx);
+});
+
 test("status provider failure renders a safe fallback", () => {
   let startup: Function | undefined;
   let component: { render(width: number): string[] } | undefined;
