@@ -74,9 +74,7 @@ export default function piJar(pi: ExtensionAPI): void {
   let footerSettings = visualSettings.footer;
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
-  let workingClock: ReturnType<typeof setInterval> | undefined;
   let workingIndicatorKey = "";
-  const stopWorkingClock = () => { if (workingClock) clearInterval(workingClock); workingClock = undefined; };
   let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
   let settingsOpen = false;
 
@@ -175,8 +173,6 @@ export default function piJar(pi: ExtensionAPI): void {
   };
 
   const applyWorking = (ctx: ExtensionContext) => {
-    const active = enabled && working.phase !== "idle";
-    if (!active || !ctx.hasUI || ctx.mode !== "tui") stopWorkingClock();
     if (!ctx.hasUI || ctx.mode !== "tui") return;
     composer.setActivity(enabled ? working.phase : "idle", animations);
     try {
@@ -192,7 +188,7 @@ export default function piJar(pi: ExtensionAPI): void {
         ctx.ui.setWorkingIndicator({ frames: [view.frames[0] ?? "✢"] });
         workingIndicatorKey = indicatorKey;
       }
-    } catch { stopWorkingClock(); /* Working decoration must never interrupt a Pi turn. */ }
+    } catch { /* Working decoration must never interrupt a Pi turn. */ }
   };
 
   const stopWelcome = (ctx?: ExtensionContext) => {
@@ -480,7 +476,6 @@ export default function piJar(pi: ExtensionAPI): void {
     footerSettings = visualSettings.footer;
     demo = false;
     composer.disable(ctx);
-    stopWorkingClock();
     workingIndicatorKey = "";
     working.end();
     quotaCache?.stop();
@@ -568,7 +563,6 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("session_shutdown", (_event, ctx) => {
     stopWelcome(ctx);
     composer.disable(ctx);
-    stopWorkingClock();
     workingIndicatorKey = "";
     working.end();
     try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
