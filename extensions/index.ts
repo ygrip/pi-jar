@@ -463,12 +463,12 @@ export default function piJar(pi: ExtensionAPI): void {
     const value = message.usage?.cost?.total;
     if (typeof value === "number" && Number.isFinite(value) && value >= 0) cost += value;
   };
-  const restoreTodos = (ctx: ExtensionContext) => {
-    try { todos?.restore(ctx.sessionManager.getBranch()); } catch { todos?.restore([]); }
+  const restoreTodos = (ctx: ExtensionContext, branch?: readonly unknown[]) => {
+    try { todos?.restore(branch ?? ctx.sessionManager.getBranch()); } catch { todos?.restore([]); }
     updateTaskWidget(ctx);
   };
-  const restoreGoal = (ctx: ExtensionContext) => {
-    try { goals?.restore(ctx.sessionManager.getBranch()); } catch { goals?.restore([]); }
+  const restoreGoal = (ctx: ExtensionContext, branch?: readonly unknown[]) => {
+    try { goals?.restore(branch ?? ctx.sessionManager.getBranch()); } catch { goals?.restore([]); }
     footerTui?.requestRender();
   };
   pi.on("session_start", (_event, ctx) => {
@@ -491,8 +491,10 @@ export default function piJar(pi: ExtensionAPI): void {
     shells = new ShellManager(onShellEvent);
     shells.onChange = () => footerTui?.requestRender();
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
-    restoreTodos(ctx);
-    restoreGoal(ctx);
+    let branch: readonly unknown[] = [];
+    try { branch = ctx.sessionManager.getBranch(); } catch { /* keep empty */ }
+    restoreTodos(ctx, branch);
+    restoreGoal(ctx, branch);
     // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
@@ -512,8 +514,7 @@ export default function piJar(pi: ExtensionAPI): void {
     if (visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
     // Resumed sessions already have a transcript to paint. Rebuilding the animated welcome and
     // scanning other session files competes with that expensive initial render for no real benefit.
-    const existing = (() => { try { return ctx.sessionManager.getBranch().length; } catch { return 0; } })();
-    if (existing === 0) showWelcome(ctx);
+    if (branch.length === 0) showWelcome(ctx);
   });
   // Any real prompt dismisses the welcome. Slash commands bypass `input`, so `agent_start` covers them.
   const dismissWelcome = (ctx: ExtensionContext) => {
@@ -552,7 +553,14 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("agent_before_settle", (event) => { if (event.outcome === "error") composer.flash("error"); });
   pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
-  pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); composer.refreshSession(ctx); });
+  pi.on("session_tree", (_event, ctx) => {
+    let branch: readonly unknown[] = [];
+    try { branch = ctx.sessionManager.getBranch(); } catch { /* keep empty */ }
+    restoreTodos(ctx, branch);
+    restoreGoal(ctx, branch);
+    updateCost(ctx);
+    composer.refreshSession(ctx);
+  });
   pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); });
   pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
