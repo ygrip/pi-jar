@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { ago, recentSessions, sessionWorkflow } from "../src/session-gallery.ts";
+import { ago, MAX_SCAN_BYTES, recentSessions, sessionWorkflow } from "../src/session-gallery.ts";
 import { welcomeHit, welcomeLines } from "../src/welcome.ts";
 
 const plain = (_color: string, text: string) => text;
@@ -28,6 +28,18 @@ test("recent sessions skip the current and empty ones, newest first", async () =
   const recent = await recentSessions([session("a", 1), session("b", 5, 3, "Named"), session("c", 9), session("d", 7, 0), session("e", 3)], "c", 3,
     async (path) => { if (!(path in files)) throw new Error("gone"); return files[path]!; }, async () => 10);
   assert.deepEqual(recent.map((item) => [item.path, item.title, item.plan]), [["b", "Named", "B plan"], ["e", "first e", undefined], ["a", "first a", undefined]]);
+});
+
+test("recent session cards never read large transcript files", async () => {
+  const session = { path: "large", id: "large", cwd: "/p", created: new Date(0), modified: new Date(),
+    messageCount: 1000, firstMessage: "large session", allMessagesText: "" };
+  let reads = 0;
+  const recent = await recentSessions([session], undefined, 3,
+    async () => { reads++; return "should not be read"; }, async () => MAX_SCAN_BYTES + 1);
+  assert.equal(reads, 0);
+  assert.equal(recent[0]?.title, "large session");
+  assert.equal(recent[0]?.goal, undefined);
+  assert.equal(recent[0]?.plan, undefined);
 });
 
 test("welcome lists recent sessions and a click on a row resumes it", () => {
