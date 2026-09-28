@@ -153,6 +153,12 @@ test("jar_todo writes the full list like Claude: statuses, one in progress, stab
   legacy.restore([{ type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "add", id: "x1", title: "Old" } },
     { type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "toggle", id: "x1", done: true } }]);
   assert.equal(legacy.get("x1")?.status, "completed");
+  const checkpointed = new TodoStore(() => {});
+  checkpointed.restore([
+    { type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "write", items: [{ id: "ok", title: "Keep", status: "pending" }] } },
+    { type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "write", items: [{ id: "bad id!", title: "Bad", status: "pending" }] } }
+  ]);
+  assert.equal(checkpointed.get("ok")?.title, "Keep", "malformed later writes do not shadow a valid checkpoint");
   // The rendered result is the checklist.
   const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
   const text = tool.renderResult({ details: { items: store.all() } }, { expanded: false, isPartial: false }, theme).render(80).join("\n");
