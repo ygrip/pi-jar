@@ -293,14 +293,16 @@ export class PlanMode {
   }
 
   private restoreFrom(branch: readonly unknown[]): PlanState | undefined {
-    let state: PlanState | undefined;
-    for (const raw of branch) {
+    // Only the newest persisted plan state matters. Walk backward so resuming a long session
+    // does not inspect every historical transcript entry.
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const raw = branch[index];
       if (!raw || typeof raw !== "object") continue;
       const entry = raw as Record<string, unknown>;
       if (entry.type !== "custom" || entry.customType !== PLAN_ENTRY || !entry.data || typeof entry.data !== "object") continue;
       const data = entry.data as Record<string, unknown>;
       if ((data.v !== 1 && data.v !== 2) || typeof data.enabled !== "boolean" || !Array.isArray(data.steps)) continue;
-      state = {
+      return {
         v: 2, enabled: data.enabled,
         steps: data.steps.filter((item): item is string => typeof item === "string").map((item) => cleanText(item, 240)).filter(Boolean).slice(0, 50),
         text: typeof data.text === "string" ? safePlanText(data.text) : "",
@@ -308,7 +310,7 @@ export class PlanMode {
         ...(typeof data.title === "string" ? { title: cleanText(data.title, 120) } : {})
       };
     }
-    return state;
+    return undefined;
   }
 
   private async restore(branch: readonly unknown[], ctx: ExtensionContext): Promise<void> {
