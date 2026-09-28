@@ -86,7 +86,18 @@ export class TodoStore {
   }
   restore(branch: readonly unknown[]): void {
     this.items.clear();
-    for (const raw of branch) {
+    // A full-list write is a checkpoint. Old sessions can contain thousands of unrelated
+    // transcript entries, so replay only from the newest checkpoint when one exists.
+    let start = 0;
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const raw = branch[index];
+      if (!raw || typeof raw !== "object") continue;
+      const entry = raw as Record<string, unknown>;
+      if (entry.type !== "custom" || entry.customType !== TASK_ENTRY || !entry.data || typeof entry.data !== "object") continue;
+      if ((entry.data as Record<string, unknown>).op === "write") { start = index; break; }
+    }
+    for (let index = start; index < branch.length; index++) {
+      const raw = branch[index];
       if (!raw || typeof raw !== "object") continue;
       const entry = raw as Record<string, unknown>;
       if (entry.type === "custom" && entry.customType === TASK_ENTRY) this.apply(entry.data);
