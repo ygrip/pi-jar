@@ -187,12 +187,10 @@ export default function piJar(pi: ExtensionAPI): void {
       ctx.ui.setWorkingMessage?.(view.message);
       const indicatorKey = `${working.phase}:${animations}`;
       if (indicatorKey !== workingIndicatorKey) {
-        ctx.ui.setWorkingIndicator({ frames: view.frames, intervalMs: 600 });
+        // Pi's normal streaming/tool lifecycle already causes renders. A static indicator avoids
+        // forcing the entire transcript to repaint on a timer in long sessions.
+        ctx.ui.setWorkingIndicator({ frames: [view.frames[0] ?? "✢"] });
         workingIndicatorKey = indicatorKey;
-      }
-      if (active && !workingClock) {
-        workingClock = setInterval(() => applyWorking(ctx), 1000);
-        workingClock.unref?.();
       }
     } catch { stopWorkingClock(); /* Working decoration must never interrupt a Pi turn. */ }
   };
@@ -358,31 +356,13 @@ export default function piJar(pi: ExtensionAPI): void {
         welcomeStatuses = () => footerData.getExtensionStatuses();
         welcomeBranch = () => footerData.getGitBranch();
         let frame = 0;
-        let memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
-        let memoryTimer: ReturnType<typeof setTimeout> | undefined;
-        const MEMORY_SAMPLE_MS = 10_000;
-        const sampleMemory = () => {
-          if (disposed) return;
-          const next = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
-          if (next !== memory) { memory = next; tui.requestRender(); }
-          memoryTimer = setTimeout(sampleMemory, MEMORY_SAMPLE_MS);
-          memoryTimer.unref?.();
-        };
-        if (footerSettings.memory) {
-          memoryTimer = setTimeout(sampleMemory, MEMORY_SAMPLE_MS);
-          memoryTimer.unref?.();
-        }
-        let timer: ReturnType<typeof setInterval> | undefined;
         let expiryTimer: ReturnType<typeof setTimeout> | undefined;
         let disposed = false;
         const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
         const dispose = () => {
           if (disposed) return;
           disposed = true;
-          if (memoryTimer) clearTimeout(memoryTimer);
-          if (timer) clearInterval(timer);
           if (expiryTimer) clearTimeout(expiryTimer);
-          timer = undefined;
           expiryTimer = undefined;
           if (footerTui === tui) { footerTui = undefined; welcomeStatuses = () => new Map<string, string>(); welcomeBranch = () => null; }
           unsubscribe();
@@ -402,11 +382,10 @@ export default function piJar(pi: ExtensionAPI): void {
               const nearest = demo ? undefined : roles.reduce<number | undefined>((min, role) =>
                 role.expiresAt != null ? Math.min(min ?? Infinity, role.expiresAt) : min, undefined);
               if (nearest != null) expiryTimer = setTimeout(() => tui.requestRender(), Math.max(1, nearest - now));
+              // Do not schedule cosmetic footer repaints. Role state still updates on Pi's native
+              // stream/tool renders, which keeps long transcripts responsive.
               const active = animations && footerSettings.roles && roles.some((role) => ACTIVE_STATES.has(role.state));
-              if (active && !timer) {
-                timer = setInterval(() => { frame += 1; tui.requestRender(); }, 600);
-                timer.unref?.();
-              } else if (!active && timer) { clearInterval(timer); timer = undefined; }
+              if (active) frame++;
               const usage = ctx.getContextUsage();
               const context = usage?.percent == null || !Number.isFinite(usage.percent)
                 ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
@@ -415,13 +394,12 @@ export default function piJar(pi: ExtensionAPI): void {
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: ctx.sessionManager?.getSessionName?.(),
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
-                context, goal: goalLoop.progress(), chips: footerChips(), memory, cost: formatCost(cost), quota, roles, extras: live.extras,
+                context, goal: goalLoop.progress(), chips: footerChips(),
+                memory: `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
             } catch {
-              if (timer) clearInterval(timer);
               if (expiryTimer) clearTimeout(expiryTimer);
-              timer = undefined;
               expiryTimer = undefined;
               return width > 0 ? ["pi-jar: UI unavailable (run /jar ui off)".slice(0, width)] : [];
             }
@@ -481,6 +459,10 @@ export default function piJar(pi: ExtensionAPI): void {
     try { cost = sessionCost(ctx); } catch { cost = 0; }
     footerTui?.requestRender();
   };
+  const addMessageCost = (message: { usage?: { cost?: { total?: number } } }) => {
+    const value = message.usage?.cost?.total;
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) cost += value;
+  };
   const restoreTodos = (ctx: ExtensionContext) => {
     try { todos?.restore(ctx.sessionManager.getBranch()); } catch { todos?.restore([]); }
     updateTaskWidget(ctx);
@@ -528,7 +510,10 @@ export default function piJar(pi: ExtensionAPI): void {
     if (visualSettings.composer && enabled) composer.enable(ctx);
     suggest.sync();
     if (visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
-    showWelcome(ctx);
+    // Resumed sessions already have a transcript to paint. Rebuilding the animated welcome and
+    // scanning other session files competes with that expensive initial render for no real benefit.
+    const existing = (() => { try { return ctx.sessionManager.getBranch().length; } catch { return 0; } })();
+    if (existing === 0) showWelcome(ctx);
   });
   // Any real prompt dismisses the welcome. Slash commands bypass `input`, so `agent_start` covers them.
   const dismissWelcome = (ctx: ExtensionContext) => {
@@ -553,7 +538,9 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("message_end", (event, ctx) => {
     if (event.message.role === "assistant") {
       working.reportOutputTokens(event.message.usage?.output ?? 0);
+      addMessageCost(event.message);
       applyWorking(ctx);
+      footerTui?.requestRender();
     }
   });
   pi.on("tool_execution_start", (event, ctx) => { working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx); });
@@ -561,7 +548,7 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("ui_prompt_start", (_event, ctx) => { working.prompt(true); applyWorking(ctx); });
   pi.on("ui_prompt_end", (_event, ctx) => { working.prompt(false); applyWorking(ctx); });
   // A request may span several tool turns; keep its elapsed time and reported tokens until agent_end.
-  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); updateCost(ctx); });
+  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); });
   pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("agent_before_settle", (event) => { if (event.outcome === "error") composer.flash("error"); });
   pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
