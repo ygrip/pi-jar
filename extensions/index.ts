@@ -37,6 +37,7 @@ import { ChangeTracker } from "../src/changes.ts";
 import { registerDelegate } from "../src/delegate.ts";
 import { collectPrompts, openPromptSearch } from "../src/prompt-search.ts";
 import { ago, recentSessions, type RecentSession } from "../src/session-gallery.ts";
+import { clearSessionBranchCache, sessionBranch } from "../src/session-branch.ts";
 import { registerChangeReview } from "../src/diff-view.ts";
 import { openShellsView, registerShells, SHELL_MESSAGE, shellEventMessage, ShellManager, type ShellEvent } from "../src/shells.ts";
 import { hopefulWelcomeMessage, welcomeHit, welcomeLines, type WelcomeAction } from "../src/welcome.ts";
@@ -480,11 +481,11 @@ export default function piJar(pi: ExtensionAPI): void {
     if (typeof value === "number" && Number.isFinite(value) && value >= 0) cost += value;
   };
   const restoreTodos = (ctx: ExtensionContext, branch?: readonly unknown[]) => {
-    try { todos?.restore(branch ?? ctx.sessionManager.getBranch()); } catch { todos?.restore([]); }
+    try { todos?.restore(branch ?? sessionBranch(ctx)); } catch { todos?.restore([]); }
     updateTaskWidget(ctx);
   };
   const restoreGoal = (ctx: ExtensionContext, branch?: readonly unknown[]) => {
-    try { goals?.restore(branch ?? ctx.sessionManager.getBranch()); } catch { goals?.restore([]); }
+    try { goals?.restore(branch ?? sessionBranch(ctx)); } catch { goals?.restore([]); }
     footerTui?.requestRender();
   };
   pi.on("session_start", (_event, ctx) => {
@@ -507,7 +508,7 @@ export default function piJar(pi: ExtensionAPI): void {
     shells.onChange = () => footerTui?.requestRender();
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
     let branch: readonly unknown[] = [];
-    try { branch = ctx.sessionManager.getBranch(); } catch { /* keep empty */ }
+    try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
     restoreTodos(ctx, branch);
     restoreGoal(ctx, branch);
     // Quota is enabled per session; no credentials or consent are persisted.
@@ -578,7 +579,7 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("session_tree", (_event, ctx) => {
     let branch: readonly unknown[] = [];
-    try { branch = ctx.sessionManager.getBranch(); } catch { /* keep empty */ }
+    try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
     restoreTodos(ctx, branch);
     restoreGoal(ctx, branch);
     updateCost(ctx);
@@ -589,6 +590,7 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); footerTui?.requestRender(); });
   pi.on("session_shutdown", (_event, ctx) => {
+    clearSessionBranchCache(ctx);
     stopWelcome(ctx);
     composer.disable(ctx);
     workingIndicatorKey = "";
