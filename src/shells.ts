@@ -13,6 +13,7 @@ const MAX_KEPT_SHELLS = 20;
 const MAX_LINES = 2000;
 const LINE_PRUNE_BATCH = 128;
 const MAX_LINE_CHARS = 2000;
+const MAX_RETAINED_CHARS = 1024 * 1024;
 const MAX_TOOL_OUTPUT_CHARS = 32 * 1024;
 const KILL_GRACE_MS = 3000;
 
@@ -46,6 +47,7 @@ const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 export class ShellManager {
   private jobs = new Map<string, { job: ShellJob; child?: ChildProcess; pattern?: RegExp; partial: string; timer?: ReturnType<typeof setTimeout> }>();
   private next = 1;
+  private lineChars = new Map<string, number>();
   private readonly onEvent: (event: ShellEvent) => void;
   private readonly spawnShell: typeof spawn;
   onChange?: () => void;
@@ -80,6 +82,7 @@ export class ShellManager {
       notify: options.notify ?? true, lines: [], dropped: 0, ...(options.watch ? { watch: options.watch } : {}) };
     const entry: { job: ShellJob; child?: ChildProcess; pattern?: RegExp; partial: string; timer?: ReturnType<typeof setTimeout> } = { job, partial: "", ...(pattern ? { pattern } : {}) };
     this.jobs.set(id, entry);
+    this.lineChars.set(id, 0);
     // Own process group so kill() stops the whole tree (dev servers spawn children).
     const child = this.spawnShell("/bin/sh", ["-c", command], { cwd: options.cwd, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], env: process.env });
     entry.child = child;
@@ -117,11 +120,16 @@ export class ShellManager {
     const line = raw.replace(ANSI, "").replace(/\r/g, "").slice(0, MAX_LINE_CHARS);
     const { job } = entry;
     job.lines.push(line);
-    // Batch front-pruning avoids O(n) array shifts on every single line once a noisy shell fills
-    // the ring buffer. Allow a small bounded cushion, then remove a batch at once.
-    if (job.lines.length > MAX_LINES + LINE_PRUNE_BATCH) {
-      job.lines.splice(0, LINE_PRUNE_BATCH);
-      job.dropped += LINE_PRUNE_BATCH;
+    this.lineChars.set(job.id, (this.lineChars.get(job.id) ?? 0) + line.length);
+    // Bound both line count and retained characters. A shell that prints very wide lines should
+    // not quietly reserve several MiB forever just because it has not reached MAX_LINES yet.
+    while (job.lines.length > MAX_LINES + LINE_PRUNE_BATCH || (this.lineChars.get(job.id) ?? 0) > MAX_RETAINED_CHARS) {
+      const removed = job.lines.splice(0, Math.min(LINE_PRUNE_BATCH, job.lines.length));
+      let removedChars = 0;
+      for (const item of removed) removedChars += item.length;
+      this.lineChars.set(job.id, Math.max(0, (this.lineChars.get(job.id) ?? 0) - removedChars));
+      job.dropped += removed.length;
+      if (!removed.length) break;
     }
     if (entry.pattern && !job.matched && entry.pattern.test(line)) {
       job.matched = line;
@@ -166,12 +174,16 @@ export class ShellManager {
   /** Forget finished jobs beyond the retention limit (oldest first). */
   private prune(): void {
     const finished = [...this.jobs.values()].filter(({ job }) => job.status !== "running");
-    for (const { job } of finished.slice(0, Math.max(0, this.jobs.size - MAX_KEPT_SHELLS + 1))) this.jobs.delete(job.id);
+    for (const { job } of finished.slice(0, Math.max(0, this.jobs.size - MAX_KEPT_SHELLS + 1))) {
+      this.jobs.delete(job.id);
+      this.lineChars.delete(job.id);
+    }
   }
 
   dispose(): void {
     for (const id of this.jobs.keys()) { try { this.kill(id); } catch { /* already gone */ } }
     this.jobs.clear();
+    this.lineChars.clear();
   }
 }
 
