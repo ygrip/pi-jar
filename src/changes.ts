@@ -100,7 +100,6 @@ export function diffRows(ops: readonly DiffOp[], context = 3): DiffRow[] {
 export class ChangeTracker {
   private baselines = new Map<string, string | null>();
   private dirty = new Set<string>();
-  private diffCache = new Map<string, FileChange>();
   private baselineBytes = 0;
   private readonly cwd: () => string;
   constructor(cwd: () => string) { this.cwd = cwd; }
@@ -111,7 +110,6 @@ export class ChangeTracker {
     if (this.baselines.has(target)) this.baselineBytes = Math.max(0, this.baselineBytes - this.bytes(this.baselines.get(target)!));
     this.baselines.delete(target);
     this.dirty.delete(target);
-    this.diffCache.delete(target);
   }
 
   /** Record the pre-change content once; returns false when the file cannot be tracked. */
@@ -132,20 +130,12 @@ export class ChangeTracker {
   }
 
   /**
-   * Mark one captured file after an edit/write completes. This performs only one cheap file read;
-   * no line diff is calculated until the review UI is opened.
+   * Mark one captured file after a successful edit/write. Do not synchronously re-read the file on
+   * every tool result; the review UI reconciles content lazily when /diff is actually opened.
    */
   markDirty(path: string): boolean {
     const target = this.absolute(path);
     if (!this.baselines.has(target)) return false;
-    const before = this.baselines.get(target)!;
-    const now = readText(target);
-    this.diffCache.delete(target);
-    if (now === undefined) { this.drop(target); return false; }
-    if (now === before) {
-      this.dirty.delete(target);
-      return false;
-    }
     this.dirty.add(target);
     return true;
   }
@@ -155,22 +145,24 @@ export class ChangeTracker {
     const result: FileChange[] = [];
     for (const path of [...this.dirty]) {
       const before = this.baselines.get(path);
-      if (before === undefined) { this.dirty.delete(path); this.diffCache.delete(path); continue; }
+      if (before === undefined) { this.dirty.delete(path); continue; }
       const now = readText(path);
       if (now === undefined) { this.drop(path); continue; }
-      if (now === before) { this.dirty.delete(path); this.diffCache.delete(path); continue; }
-      const cached = this.diffCache.get(path);
-      if (cached) { result.push(cached); continue; }
+      if (now === before) { this.dirty.delete(path); continue; }
       const ops = lineDiff(before ?? "", now ?? "");
-      const added = ops ? ops.filter((op) => op.op === "+").length : splitLines(now ?? "").length;
-      const removed = ops ? ops.filter((op) => op.op === "-").length : splitLines(before ?? "").length;
+      let added = 0, removed = 0;
+      if (ops) {
+        for (const op of ops) { if (op.op === "+") added++; else if (op.op === "-") removed++; }
+      } else {
+        added = splitLines(now ?? "").length;
+        removed = splitLines(before ?? "").length;
+      }
       const rel = relative(this.cwd(), path);
       const change: FileChange = {
         path, rel: rel && !rel.startsWith("..") ? rel : path,
         status: before === null ? "added" : now === null ? "deleted" : "modified",
         before: before ?? "", after: now ?? "", added, removed, diff: ops ?? null
       };
-      this.diffCache.set(path, change);
       result.push(change);
     }
     return result.sort((a, b) => a.rel.localeCompare(b.rel));
@@ -181,7 +173,7 @@ export class ChangeTracker {
   trackedBytes(): number { return this.baselineBytes; }
   /** Keep the current content: stop tracking the file. */
   accept(path: string): void { this.drop(this.absolute(path)); }
-  acceptAll(): void { this.baselines.clear(); this.dirty.clear(); this.diffCache.clear(); this.baselineBytes = 0; }
+  acceptAll(): void { this.baselines.clear(); this.dirty.clear(); this.baselineBytes = 0; }
   /** Restore the pre-change content (or remove a file the agent created). */
   revert(path: string): void {
     const target = this.absolute(path);
