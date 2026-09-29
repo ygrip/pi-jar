@@ -17,7 +17,7 @@ function harness(options: { enabled?: boolean } = {}) {
   } as unknown as ExtensionAPI;
   const state = new SuggestionState();
   const control = registerSuggestions(pi, state, { enabled: () => enabled });
-  const settle = (extra: object = {}) => events.get("agent_before_settle")!({ outcome: "completed", continue: false, entries: [], ...extra });
+  const settle = (extra: object = {}) => events.get("agent_before_settle")?.({ outcome: "completed", continue: false, entries: [], ...extra });
   return { events, state, control, settle, active: () => active, suggest: (text: string) => tool!.execute("id", { suggestion: text }),
     setEnabled: (value: boolean) => { enabled = value; } };
 }
@@ -37,6 +37,7 @@ test("jar_suggest stores one sanitized line and ends the turn", async () => {
 test("a finished turn never forces another provider turn just for a suggestion", () => {
   const h = harness();
   h.control.sync();
+  assert.equal(h.events.has("agent_before_settle"), false, "suggestions install no settle hook");
   assert.equal(h.settle(), undefined);
   h.events.get("input")!({ source: "interactive", text: "next" });
   assert.equal(h.settle({ outcome: "aborted" }), undefined);
