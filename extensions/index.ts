@@ -353,6 +353,11 @@ export default function piJar(pi: ExtensionAPI): void {
         welcomeBranch = () => footerData.getGitBranch();
         let frame = 0;
         let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+        let expiryAt: number | undefined;
+        let memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
+        let memorySampledAt = 0;
+        let context = "ctx ?";
+        let contextSampledAt = 0;
         let disposed = false;
         const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
         const dispose = () => {
@@ -360,6 +365,7 @@ export default function piJar(pi: ExtensionAPI): void {
           disposed = true;
           if (expiryTimer) clearTimeout(expiryTimer);
           expiryTimer = undefined;
+          expiryAt = undefined;
           if (footerTui === tui) { footerTui = undefined; welcomeStatuses = () => new Map<string, string>(); welcomeBranch = () => null; }
           unsubscribe();
         };
@@ -373,30 +379,44 @@ export default function piJar(pi: ExtensionAPI): void {
               const statuses = footerData.getExtensionStatuses();
               const live = collectStatuses(statuses, now);
               const roles: JarRole[] = demo ? createDemoRoles() : live.roles;
-              if (expiryTimer) clearTimeout(expiryTimer);
-              expiryTimer = undefined;
               const nearest = demo ? undefined : roles.reduce<number | undefined>((min, role) =>
                 role.expiresAt != null ? Math.min(min ?? Infinity, role.expiresAt) : min, undefined);
-              if (nearest != null) expiryTimer = setTimeout(() => tui.requestRender(), Math.max(1, nearest - now));
+              if (nearest !== expiryAt) {
+                if (expiryTimer) clearTimeout(expiryTimer);
+                expiryTimer = undefined;
+                expiryAt = nearest;
+                if (nearest != null) {
+                  expiryTimer = setTimeout(() => { expiryTimer = undefined; expiryAt = undefined; tui.requestRender(); }, Math.max(1, nearest - now));
+                  expiryTimer.unref?.();
+                }
+              }
               // Do not schedule cosmetic footer repaints. Role state still updates on Pi's native
               // stream/tool renders, which keeps long transcripts responsive.
               const active = animations && footerSettings.roles && roles.some((role) => ACTIVE_STATES.has(role.state));
               if (active) frame++;
-              const usage = ctx.getContextUsage();
-              const context = usage?.percent == null || !Number.isFinite(usage.percent)
-                ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
+              if (now - contextSampledAt >= 1000) {
+                const usage = ctx.getContextUsage();
+                context = usage?.percent == null || !Number.isFinite(usage.percent)
+                  ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
+                contextSampledAt = now;
+              }
+              if (now - memorySampledAt >= 5000) {
+                memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
+                memorySampledAt = now;
+              }
               const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, now) : undefined;
               return renderFooter({
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: ctx.sessionManager?.getSessionName?.(),
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
                 context, goal: goalLoop.progress(), chips: footerChips(),
-                memory: `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`, cost: formatCost(cost), quota, roles, extras: live.extras,
+                memory, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
             } catch {
               if (expiryTimer) clearTimeout(expiryTimer);
               expiryTimer = undefined;
+              expiryAt = undefined;
               return width > 0 ? ["pi-jar: UI unavailable (run /jar ui off)".slice(0, width)] : [];
             }
           }
