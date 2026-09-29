@@ -167,8 +167,8 @@ export function registerChangeReview(pi: ExtensionAPI, tracker: () => ChangeTrac
       }
     }
     if (!path) path = fallback.shift();
-    if (path) tracker()?.markDirty(path);
-    changed();
+    const failed = (event as { isError?: unknown }).isError === true;
+    if (path && !failed && tracker()?.markDirty(path)) changed();
   });
   const open = async (ctx: ExtensionContext) => {
     const current = tracker();
