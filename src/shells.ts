@@ -251,11 +251,18 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
       return new Text(text, 0, 0);
     },
     renderResult(result, { expanded }, theme) {
-      const text = result.content.map((part) => part.type === "text" ? part.text : "").join("\n");
-      const lines = text.split("\n");
-      const shown = expanded ? lines : lines.slice(0, 6);
+      const text = result.content.find((part) => part.type === "text")?.text ?? "";
+      if (expanded) {
+        const lines = text.split("\n");
+        return new Text(lines.map((line, index) => theme.fg(index ? "muted" : "accent", safeLine(line))).join("\n"), 0, 0);
+      }
+      // Historical shell cards are rebuilt on resume. Split only enough text to draw the collapsed
+      // card instead of counting every stored output line.
+      const sample = text.split("\n", 7);
+      const more = sample.length > 6;
+      const shown = sample.slice(0, 6);
       return new Text(shown.map((line, index) => theme.fg(index ? "muted" : "accent", safeLine(line))).join("\n")
-        + (shown.length < lines.length ? "\n" + theme.fg("dim", `… +${lines.length - shown.length} lines (expand)`) : ""), 0, 0);
+        + (more ? "\n" + theme.fg("dim", "… more lines (expand)") : ""), 0, 0);
     }
   });
 }
@@ -268,7 +275,7 @@ const SHELL_ACTIONS = [
 /** Overlay: shells on the left, the selected shell's live output on the right; k kills. */
 export async function openShellsView(ctx: ExtensionContext, manager: ShellManager): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
-  if (!manager.list().length) { ctx.ui.notify("pi-jar: no background shells (the agent starts them with jar_shell)", "info"); return; }
+  if (!manager.summaries().length) { ctx.ui.notify("pi-jar: no background shells (the agent starts them with jar_shell)", "info"); return; }
   await ctx.ui.custom<void>((tui, theme, _keys, done) => {
     let selected = 0;
     let follow = true;
@@ -278,14 +285,14 @@ export async function openShellsView(ctx: ExtensionContext, manager: ShellManage
     let layout = { top: 1, rows: 0, leftWidth: 0, bodyX: 2, footerTop: 0 };
     const fg = (color: string, text: string) => theme.fg(color as never, text);
     const previous = manager.onChange;
-    const timer = setInterval(() => tui.requestRender(), 500);
+    const timer = setInterval(() => tui.requestRender(), 1000);
     timer.unref?.();
     manager.onChange = () => { previous?.(); tui.requestRender(); };
     const close = () => { clearInterval(timer); manager.onChange = previous; done(); };
     const component = {
       invalidate() {},
       handleInput(data: string) {
-        const jobs = manager.list();
+        const jobs = manager.summaries();
         if (matchesKey(data, Key.escape) || data === "q") return close();
         if (matchesKey(data, Key.up) || data === "k") selected = Math.max(0, selected - 1);
         else if (matchesKey(data, Key.down) || data === "j") selected = Math.min(jobs.length - 1, selected + 1);
@@ -300,14 +307,14 @@ export async function openShellsView(ctx: ExtensionContext, manager: ShellManage
         if (event.type === "wheel" && event.wheelDelta) { follow = false; scroll = Math.max(0, scroll + Math.sign(event.wheelDelta) * 3); tui.requestRender(); return { handled: true }; }
         if (event.type !== "click" || event.button !== "left") return;
         if (event.y === 0 && event.x >= width - 3) { close(); return { handled: true }; }
-        if (row >= 0 && row < layout.rows && layout.leftWidth && event.x < layout.leftWidth + 3 && row < manager.list().length) { selected = row; follow = true; tui.requestRender(); return { handled: true, focus: true }; }
+        if (row >= 0 && row < layout.rows && layout.leftWidth && event.x < layout.leftWidth + 3 && row < manager.summaries().length) { selected = row; follow = true; tui.requestRender(); return { handled: true, focus: true }; }
         const action = SHELL_ACTIONS[event.y - layout.footerTop];
         if (action) { component.handleInput(action.key); return { handled: true }; }
       },
       render(available: number): string[] {
         width = Math.max(24, available);
         rows = contentRows(6 + SHELL_ACTIONS.length, 6);
-        const jobs = manager.list();
+        const jobs = manager.summaries();
         selected = Math.min(selected, Math.max(0, jobs.length - 1));
         const job = jobs[selected];
         const listWidth = sidebarWidth(width, 20, 34);
