@@ -260,18 +260,31 @@ export class GoalLoop {
       return { message: { customType: CONTEXT_TYPE, content: this.context(goal), display: false } };
     });
 
-    // Keep only the newest goal context and continuation so repeated rounds do not bloat the prompt.
+    // Keep only the newest goal context and continuation. Scan in place first and allocate a new
+    // message array only when stale pi-jar messages actually need pruning.
     this.pi.on("context", async (event) => {
       const goal = this.goal();
-      const seen = new Set<string>();
-      const messages = [...event.messages].reverse().filter((raw) => {
+      const active = !!goal && goal.status !== "complete";
+      let latestContext = -1;
+      let latestContinuation = -1;
+      let needsPrune = false;
+      for (let index = event.messages.length - 1; index >= 0; index--) {
+        const type = (event.messages[index] as { customType?: string }).customType;
+        if (type === CONTEXT_TYPE) {
+          if (!active || latestContext >= 0) needsPrune = true;
+          else latestContext = index;
+        } else if (type === CONTINUATION_TYPE) {
+          if (!active || latestContinuation >= 0) needsPrune = true;
+          else latestContinuation = index;
+        }
+      }
+      if (!needsPrune) return;
+      return { messages: event.messages.filter((raw, index) => {
         const type = (raw as { customType?: string }).customType;
-        if (type !== CONTEXT_TYPE && type !== CONTINUATION_TYPE) return true;
-        if (!goal || goal.status === "complete" || seen.has(type)) return false;
-        seen.add(type);
+        if (type === CONTEXT_TYPE) return active && index === latestContext;
+        if (type === CONTINUATION_TYPE) return active && index === latestContinuation;
         return true;
-      }).reverse();
-      return { messages };
+      }) };
     });
 
     this.pi.on("agent_before_settle", async (event, ctx) => {
