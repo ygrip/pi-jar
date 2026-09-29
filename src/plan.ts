@@ -9,6 +9,7 @@ import { type ModelRoleManager } from "./model-roles.ts";
 import { openPlanView } from "./plan-view.ts";
 import { extractApproachSteps, isSafePlanCommand, PLAN_TEMPLATE, planTextFromSteps, validatePlanDocument } from "./plan-utils.ts";
 import { cleanText } from "./status.ts";
+import { sessionBranch } from "./session-branch.ts";
 import { type TodoStore } from "./tasks.ts";
 
 export const PLAN_ENTRY = "pi-jar.plan";
@@ -461,8 +462,8 @@ export class PlanMode {
       if (this.enabled && this.pendingReview) await this.review(ctx);
     });
 
-    this.pi.on("session_start", async (_event, ctx) => { await this.restore(ctx.sessionManager.getBranch(), ctx); });
-    this.pi.on("session_tree", async (_event, ctx) => { await this.restore(ctx.sessionManager.getBranch(), ctx); });
+    this.pi.on("session_start", async (_event, ctx) => { await this.restore(sessionBranch(ctx), ctx); });
+    this.pi.on("session_tree", async (_event, ctx) => { await this.restore(sessionBranch(ctx), ctx); });
     this.pi.on("session_shutdown", async (_event, ctx) => { if (this.enabled) await this.leave(ctx, false); });
   }
 }
