@@ -157,8 +157,7 @@ export default function piJar(pi: ExtensionAPI): void {
   const suggestions = new SuggestionState();
   composer.attachSuggestions(suggestions);
   const suggest = registerSuggestions(pi, suggestions, {
-    enabled: () => enabled && visualSettings.composer && visualSettings.suggestions && composer.enabled,
-    skip: () => planMode.isEnabled() || !!goals?.isActive()
+    enabled: () => enabled && visualSettings.composer && visualSettings.suggestions && composer.enabled
   });
   let liveTui: { setCopyOnSelect?: (enabled: boolean) => void } | undefined;
   /** Pi's own settings (TUI mode, copy-on-select); written through Pi's SettingsManager. */
