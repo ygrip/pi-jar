@@ -4,8 +4,21 @@ import { cleanText } from "./status.ts";
 
 export interface PastPrompt { text: string; source: "this session" | "earlier session"; at?: number }
 
-const userText = (message: { content?: unknown }) => typeof message.content === "string" ? message.content
-  : Array.isArray(message.content) ? message.content.filter((part: { type?: string }) => part?.type === "text").map((part: { text?: string }) => part.text ?? "").join("\n") : "";
+const MAX_PROMPT_CHARS = 8000;
+const userText = (message: { content?: unknown }): string => {
+  if (typeof message.content === "string") return message.content.slice(0, MAX_PROMPT_CHARS + 1);
+  if (!Array.isArray(message.content)) return "";
+  let text = "";
+  for (const part of message.content as Array<{ type?: string; text?: string }>) {
+    if (part?.type !== "text" || typeof part.text !== "string") continue;
+    const separator = text ? "\n" : "";
+    const room = MAX_PROMPT_CHARS + 1 - text.length - separator.length;
+    if (room <= 0) break;
+    text += separator + part.text.slice(0, room);
+    if (part.text.length > room) break;
+  }
+  return text;
+};
 
 /**
  * Prompts newest first and deduplicated: every user message in this session file (all branches),
@@ -17,7 +30,7 @@ export function collectPrompts(entries: readonly unknown[], earlier: readonly { 
   const add = (text: string, source: PastPrompt["source"], at?: number) => {
     const value = text.trim();
     const key = value.replace(/\s+/g, " ");
-    if (!value || value.length > 8000 || seen.has(key)) return;
+    if (!value || value.length > MAX_PROMPT_CHARS || seen.has(key)) return;
     seen.add(key);
     result.push({ text: value, source, ...(at ? { at } : {}) });
   };
