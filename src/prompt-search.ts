@@ -21,9 +21,13 @@ export function collectPrompts(entries: readonly unknown[], earlier: readonly { 
     seen.add(key);
     result.push({ text: value, source, ...(at ? { at } : {}) });
   };
-  const own = entries.filter((raw): raw is { type: string; message: { role: string; content?: unknown }; timestamp?: string } =>
-    !!raw && typeof raw === "object" && (raw as { type?: string }).type === "message" && (raw as { message?: { role?: string } }).message?.role === "user");
-  for (const entry of [...own].reverse()) add(userText(entry.message), "this session", entry.timestamp ? Date.parse(entry.timestamp) : undefined);
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const raw = entries[index];
+    if (!raw || typeof raw !== "object") continue;
+    const entry = raw as { type?: string; message?: { role?: string; content?: unknown }; timestamp?: string };
+    if (entry.type !== "message" || entry.message?.role !== "user") continue;
+    add(userText(entry.message), "this session", entry.timestamp ? Date.parse(entry.timestamp) : undefined);
+  }
   for (const session of earlier) if (session.firstMessage) add(session.firstMessage, "earlier session", session.modified?.getTime());
   return result;
 }
