@@ -136,6 +136,7 @@ export class PlanMode {
     try { this.ensureDirectory(ctx); }
     catch (error) { ctx.ui.notify("Plan mode unavailable: cannot create plan directory: " + (error as Error).message, "error"); return; }
     this.enabled = true;
+    this.contextDirty = true;
     this.pendingReview = false;
     this.reminders = 0;
     this.toolsBefore = this.pi.getActiveTools();
@@ -150,6 +151,7 @@ export class PlanMode {
   private async leave(ctx: ExtensionContext, persist = true): Promise<void> {
     const wasEnabled = this.enabled;
     this.enabled = false;
+    this.contextDirty = true;
     this.compacting = false;
     this.pendingReview = false;
     this.compactGeneration++;
