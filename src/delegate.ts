@@ -172,14 +172,14 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, spaw
           } catch { /* status is decoration */ }
         }
       };
-      const details = () => ({ runs: runs.map((run) => ({ ...run })), write });
+      const details = (includeOutput = true) => ({ runs: runs.map((run) => includeOutput ? { ...run } : { ...run, output: "" }), write });
       let updateTimer: ReturnType<typeof setTimeout> | undefined;
       let lastUpdateAt = 0;
       const emitUpdate = () => {
         updateTimer = undefined;
         lastUpdateAt = Date.now();
         publish();
-        onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}`).join("\n") }], details: details() });
+        onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}`).join("\n") }], details: details(false) });
       };
       const update = () => {
         if (!onUpdate) { publish(); return; }
@@ -197,7 +197,6 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, spaw
       const refresh = setInterval(publish, STATUS_REFRESH_MS);
       refresh.unref?.();
       try {
-        emitUpdate();
         await Promise.all(runs.map((run) => runDelegate(run, delegateArgs(run.task, run.model, thinking(run.role), write), ctx.cwd, signal, update, spawnProcess)));
       } finally {
         clearInterval(refresh);
