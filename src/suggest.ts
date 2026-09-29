@@ -24,13 +24,10 @@ export class SuggestionState {
 
 export interface SuggestionOptions {
   enabled: () => boolean;
-  /** Skip enforcement while another workflow owns the next step (plan review, goal loop). */
-  skip: () => boolean;
 }
 
 /** Ask the agent for one next-prompt suggestion per finished request, like an inline autocomplete. */
 export function registerSuggestions(pi: ExtensionAPI, state: SuggestionState, options: SuggestionOptions): { sync(): void } {
-  let suggested = false;
   pi.registerTool?.({
     name: SUGGEST_TOOL,
     label: "suggest",
@@ -43,7 +40,6 @@ export function registerSuggestions(pi: ExtensionAPI, state: SuggestionState, op
     parameters: Type.Object({ suggestion: Type.String({ description: "The user's likely next prompt, one line." }) }),
     execute: async (_id, params) => {
       const ok = state.set(params.suggestion ?? "");
-      suggested ||= ok;
       return { content: [{ type: "text", text: ok ? "Suggestion shown to the user. End your turn now." : "Suggestion was empty; skipped." }], details: { suggestion: state.text }, terminate: true };
     },
     renderCall() { return new Text("", 0, 0); },
@@ -64,11 +60,10 @@ export function registerSuggestions(pi: ExtensionAPI, state: SuggestionState, op
 
   pi.on("input", (event) => {
     if (event.source !== "interactive") return;
-    suggested = false;
     state.clear();
   });
   pi.on("agent_start", () => { state.clear(); });
-  pi.on("session_start", () => { suggested = false; state.clear(); });
+  pi.on("session_start", () => { state.clear(); });
   pi.on("session_tree", () => { state.clear(); });
   // Do not force a second provider turn merely to manufacture ghost text. Older pi-jar versions
   // appended a hidden reminder here, which added one session entry and sometimes another model call
