@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import type { ModelRoleManager } from "./model-roles.ts";
 import { askRole, type SideUsage } from "./side-model.ts";
 import { ROLE_PREFIX } from "./status.ts";
+import { sessionBranch } from "./session-branch.ts";
 
 export const ADVISOR_TOOL = "jar_advisor";
 export const ADVISOR_MESSAGE = "pi-jar.advisor";
@@ -118,7 +119,7 @@ export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, optio
     busy++;
     status(ctx, request.trigger ?? request.question ?? "reviewing the current direction");
     try {
-      const conversation = transcript(ctx.sessionManager.getBranch() as readonly Entry[]);
+      const conversation = transcript(sessionBranch(ctx) as readonly Entry[]);
       return await askRole(ctx, roles, options.usage, "advisor", ADVISOR_SYSTEM, advisorPrompt(request, conversation, await gitState(ctx)), signal);
     } finally { if (--busy === 0) status(ctx); }
   };
