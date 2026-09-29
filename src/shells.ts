@@ -13,6 +13,7 @@ const MAX_KEPT_SHELLS = 20;
 const MAX_LINES = 2000;
 const LINE_PRUNE_BATCH = 128;
 const MAX_LINE_CHARS = 2000;
+const MAX_TOOL_OUTPUT_CHARS = 32 * 1024;
 const KILL_GRACE_MS = 3000;
 
 export type ShellStatus = "running" | "exited" | "killed" | "failed";
@@ -182,6 +183,20 @@ const elapsed = (job: ShellMeta | ShellJob, now = Date.now()) => {
 export const shellState = (job: ShellMeta | ShellJob) => job.status === "running" ? "running"
   : job.status === "exited" ? `exited ${job.exitCode ?? "?"}` : job.status === "failed" ? `failed: ${cleanText(job.error ?? "", 60)}` : "killed";
 const describe = (job: ShellMeta | ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
+const boundedTail = (lines: readonly string[], limit = MAX_TOOL_OUTPUT_CHARS): string => {
+  let size = 0;
+  const kept: string[] = [];
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index]!;
+    const cost = line.length + (kept.length ? 1 : 0);
+    if (size + cost > limit) break;
+    kept.push(line);
+    size += cost;
+  }
+  kept.reverse();
+  const omitted = lines.length - kept.length;
+  return (omitted ? `… ${omitted} earlier line(s) omitted\n` : "") + kept.join("\n");
+};
 
 /** The message that wakes the agent when a watched shell matches or ends. */
 export function shellEventMessage(event: ShellEvent): string {
@@ -217,7 +232,9 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
     parameters: Parameters,
     async execute(_id, params, _signal, _update, ctx) {
       const manager = shells();
-      const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: { jobs: manager?.summaries() ?? [] } });
+      const reply = (text: string) => ({ content: [{ type: "text" as const, text: text.slice(0, MAX_TOOL_OUTPUT_CHARS) }], details: {
+        jobs: (manager?.summaries() ?? []).map((job) => ({ id: job.id, name: job.name, status: job.status, pid: job.pid, exitCode: job.exitCode }))
+      } });
       if (!manager) return reply("Background shells are unavailable before a Pi session starts.");
       try {
         switch (params.action) {
@@ -229,7 +246,7 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
           case "output": {
             if (!params.id) return reply("output needs an id.");
             const lines = manager.output(params.id, params.lines ?? 40);
-            return reply(`${describe(manager.get(params.id)!)}\n${lines.length ? lines.join("\n") : "(no output yet)"}`);
+            return reply(`${describe(manager.get(params.id)!)}\n${lines.length ? boundedTail(lines) : "(no output yet)"}`);
           }
           case "kill":
             if (!params.id) return reply("kill needs an id.");
