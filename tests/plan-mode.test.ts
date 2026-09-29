@@ -192,6 +192,24 @@ test("hidden plan context names the plan directory and required template", async
   assert.match(injected.message.content, /jar_plan_submit/);
 });
 
+test("plan context pruning keeps only newest transient messages", async () => {
+  const h = harness();
+  await h.commands.get("plan")!("", h.ctx);
+  const context = h.events.get("context")!;
+  const messages = [
+    { customType: "keep", content: "normal" },
+    { customType: "pi-jar.plan-context", content: "old context" },
+    { customType: "pi-jar.plan-reminder", content: "old reminder" },
+    { customType: "pi-jar.plan-context", content: "new context" },
+    { customType: "pi-jar.plan-reminder", content: "new reminder" }
+  ];
+  const active = await context({ messages }, h.ctx);
+  assert.deepEqual(active.messages.map((item: any) => item.content), ["normal", "new context", "new reminder"]);
+  await h.commands.get("plan")!("stop", h.ctx);
+  const inactive = await context({ messages }, h.ctx);
+  assert.deepEqual(inactive.messages.map((item: any) => item.content), ["normal"]);
+});
+
 test("plan mode refuses a planted symlink as its plan directory", async () => {
   const base = mkdtempSync(join(root, "planted-"));
   const elsewhere = mkdtempSync(join(root, "elsewhere-"));
