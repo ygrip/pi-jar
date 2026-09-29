@@ -14,14 +14,25 @@ export function filterSessions(sessions: readonly SessionInfo[], query: string):
 
 export async function pickSession(ctx: ExtensionContext, sessions: readonly SessionInfo[], initial = ""): Promise<string | undefined> {
   if (!ctx.hasUI || ctx.mode !== "tui") return undefined;
+  const indexed = sessions.map((session) => ({
+    session,
+    haystack: `${session.name ?? ""} ${sessionDisplayName(session.name, session.id)} ${session.firstMessage}`.toLowerCase()
+  }));
+  const search = (query: string): SessionInfo[] => {
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return sessions.slice();
+    const rows: SessionInfo[] = [];
+    for (const item of indexed) if (terms.every((term) => item.haystack.includes(term))) rows.push(item.session);
+    return rows;
+  };
   return ctx.ui.custom<string | undefined>((tui, theme, _keys, done) => {
     let query = initial.slice(0, 100);
     let selected = 0;
     let first = 0;
     let width = 80;
-    let rows = filterSessions(sessions, query);
+    let rows = search(query);
     const pageSize = () => Math.max(2, Math.min(10, Math.floor(((process.stdout.rows ?? 24) - 7) / 2)));
-    const refresh = () => { rows = filterSessions(sessions, query); selected = 0; first = 0; tui.requestRender(); };
+    const refresh = () => { rows = search(query); selected = 0; first = 0; tui.requestRender(); };
     return {
       invalidate() {},
       handleInput(data: string) {
