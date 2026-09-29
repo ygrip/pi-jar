@@ -15,7 +15,8 @@ export const MAX_DELEGATES = 4;
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 const MAX_OUTPUT_CHARS = 12_000;
 const TIMEOUT_MS = 20 * 60_000;
-const STATUS_REFRESH_MS = 10_000;
+const STATUS_REFRESH_MS = 20_000;
+const LIVE_UPDATE_MS = 300;
 
 export type DelegateState = "queued" | "working" | "done" | "failed";
 export interface DelegateRun {
@@ -172,19 +173,36 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, spaw
         }
       };
       const details = () => ({ runs: runs.map((run) => ({ ...run })), write });
-      const update = () => {
+      let updateTimer: ReturnType<typeof setTimeout> | undefined;
+      let lastUpdateAt = 0;
+      const emitUpdate = () => {
+        updateTimer = undefined;
+        lastUpdateAt = Date.now();
         publish();
         onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}`).join("\n") }], details: details() });
+      };
+      const update = () => {
+        if (!onUpdate) { publish(); return; }
+        const wait = Math.max(0, LIVE_UPDATE_MS - (Date.now() - lastUpdateAt));
+        if (wait === 0) { if (updateTimer) { clearTimeout(updateTimer); updateTimer = undefined; } emitUpdate(); return; }
+        if (!updateTimer) {
+          updateTimer = setTimeout(emitUpdate, wait);
+          updateTimer.unref?.();
+        }
+      };
+      const flushUpdate = () => {
+        if (updateTimer) { clearTimeout(updateTimer); updateTimer = undefined; }
+        emitUpdate();
       };
       const refresh = setInterval(publish, STATUS_REFRESH_MS);
       refresh.unref?.();
       try {
-        update();
+        emitUpdate();
         await Promise.all(runs.map((run) => runDelegate(run, delegateArgs(run.task, run.model, thinking(run.role), write), ctx.cwd, signal, update, spawnProcess)));
       } finally {
         clearInterval(refresh);
         for (const run of runs) if (run.state !== "done") run.state = "failed";
-        publish();
+        flushUpdate();
       }
       const report = runs.map((run) => `## [${run.index}] ${run.name} (${run.role}${run.model ? " · " + run.model : ""}) — ${run.state}${run.error ? ": " + run.error : ""}\n${run.output || "(no report)"}`).join("\n\n");
       return { content: [{ type: "text", text: report }], details: details() };
