@@ -45,6 +45,7 @@ export class GoalLoop {
   private readonly pi: ExtensionAPI;
   private readonly options: GoalLoopOptions;
   private prompting = 0;
+  private contextDirty = true;
   private restoreRole: (() => Promise<void>) | undefined;
   private roleInUse: "implement" | "advisor" | undefined;
 
@@ -257,12 +258,14 @@ export class GoalLoop {
       const goal = this.goal();
       if (!goal || goal.status === "complete") return;
       if (goal.status === "active" && !this.options.planActive()) await this.useRole(goal.phase === "audit" ? "advisor" : "implement", ctx);
+      this.contextDirty = true;
       return { message: { customType: CONTEXT_TYPE, content: this.context(goal), display: false } };
     });
 
     // Keep only the newest goal context and continuation. Scan in place first and allocate a new
     // message array only when stale pi-jar messages actually need pruning.
     this.pi.on("context", async (event) => {
+      if (!this.contextDirty) return;
       const goal = this.goal();
       const active = !!goal && goal.status !== "complete";
       let latestContext = -1;
@@ -278,6 +281,7 @@ export class GoalLoop {
           else latestContinuation = index;
         }
       }
+      this.contextDirty = false;
       if (!needsPrune) return;
       return { messages: event.messages.filter((raw, index) => {
         const type = (raw as { customType?: string }).customType;
@@ -308,6 +312,7 @@ export class GoalLoop {
       store.setRound(round, audit ? "audit" : "implement");
       await this.useRole(audit ? "advisor" : "implement", ctx);
       this.options.changed?.(ctx);
+      this.contextDirty = true;
       return {
         entries: [{ type: "custom_message", customType: CONTINUATION_TYPE, display: false,
           content: audit ? this.auditMessage(goal, round) : this.implementMessage(goal, round) }],
@@ -321,6 +326,8 @@ export class GoalLoop {
       this.options.changed?.(ctx);
     });
 
+    this.pi.on("session_start", () => { this.contextDirty = true; });
+    this.pi.on("session_tree", () => { this.contextDirty = true; });
     this.pi.on("session_shutdown", async () => { await this.restore(); });
   }
 }
