@@ -55,12 +55,18 @@ function compactText(text: string, max = 72): string {
   return clean.length <= max ? clean : clean.slice(0, Math.max(0, max - 1)) + "…";
 }
 
+const bashCache = new WeakMap<object, { cwd: string; trusted: boolean; tool: ReturnType<typeof createBashToolDefinition> }>();
 function bashFor(ctx: ExtensionContext) {
-  const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
-  return createBashToolDefinition(ctx.cwd, {
+  const trusted = ctx.isProjectTrusted();
+  const hit = bashCache.get(ctx as object);
+  if (hit && hit.cwd === ctx.cwd && hit.trusted === trusted) return hit.tool;
+  const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: trusted });
+  const tool = createBashToolDefinition(ctx.cwd, {
     shellPath: settings.getShellPath(),
     commandPrefix: settings.getShellCommandPrefix()
   });
+  bashCache.set(ctx as object, { cwd: ctx.cwd, trusted, tool });
+  return tool;
 }
 
 /**
