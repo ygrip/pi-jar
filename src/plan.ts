@@ -417,17 +417,28 @@ export class PlanMode {
       return { message: { customType: "pi-jar.plan-context", content: this.context(), display: false } };
     });
 
+    // Keep plan-only prompt messages bounded. When plan mode is active, retain only the newest
+    // context and newest reminder; when it is off, remove all stale plan prompt messages.
     this.pi.on("context", async (event) => {
-      if (this.enabled) return;
-      let found = false;
-      for (const raw of event.messages) {
-        const type = (raw as { customType?: string }).customType;
-        if (type === "pi-jar.plan-context" || type === "pi-jar.plan-reminder") { found = true; break; }
+      let latestContext = -1;
+      let latestReminder = -1;
+      let needsPrune = false;
+      for (let index = event.messages.length - 1; index >= 0; index--) {
+        const type = (event.messages[index] as { customType?: string }).customType;
+        if (type === "pi-jar.plan-context") {
+          if (!this.enabled || latestContext >= 0) needsPrune = true;
+          else latestContext = index;
+        } else if (type === "pi-jar.plan-reminder") {
+          if (!this.enabled || latestReminder >= 0) needsPrune = true;
+          else latestReminder = index;
+        }
       }
-      if (!found) return;
-      return { messages: event.messages.filter((raw) => {
+      if (!needsPrune) return;
+      return { messages: event.messages.filter((raw, index) => {
         const type = (raw as { customType?: string }).customType;
-        return type !== "pi-jar.plan-context" && type !== "pi-jar.plan-reminder";
+        if (type === "pi-jar.plan-context") return this.enabled && index === latestContext;
+        if (type === "pi-jar.plan-reminder") return this.enabled && index === latestReminder;
+        return true;
       }) };
     });
 
