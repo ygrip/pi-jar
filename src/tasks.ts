@@ -96,22 +96,18 @@ export class TodoStore {
   }
   restore(branch: readonly unknown[]): void {
     this.items.clear();
-    // A full-list write is a checkpoint. Old sessions can contain thousands of unrelated
-    // transcript entries, so replay only from the newest checkpoint when one exists.
-    let start = 0;
+    // Walk the transcript once from newest to oldest, collecting only task events. A valid full
+    // write is a checkpoint, so everything before it is irrelevant.
+    const replay: unknown[] = [];
     for (let index = branch.length - 1; index >= 0; index--) {
       const raw = branch[index];
       if (!raw || typeof raw !== "object") continue;
       const entry = raw as Record<string, unknown>;
-      if (entry.type !== "custom" || entry.customType !== TASK_ENTRY || !entry.data || typeof entry.data !== "object") continue;
-      if (validWrite(entry.data as Record<string, unknown>)) { start = index; break; }
+      if (entry.type !== "custom" || entry.customType !== TASK_ENTRY) continue;
+      replay.push(entry.data);
+      if (entry.data && typeof entry.data === "object" && validWrite(entry.data as Record<string, unknown>)) break;
     }
-    for (let index = start; index < branch.length; index++) {
-      const raw = branch[index];
-      if (!raw || typeof raw !== "object") continue;
-      const entry = raw as Record<string, unknown>;
-      if (entry.type === "custom" && entry.customType === TASK_ENTRY) this.apply(entry.data);
-    }
+    for (let index = replay.length - 1; index >= 0; index--) this.apply(replay[index]);
   }
   private commit(event: TodoEvent): boolean {
     const before = new Map([...this.items].map(([id, item]) => [id, { ...item }]));
