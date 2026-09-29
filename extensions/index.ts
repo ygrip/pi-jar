@@ -565,7 +565,6 @@ export default function piJar(pi: ExtensionAPI): void {
       working.reportOutputTokens(event.message.usage?.output ?? 0);
       addMessageCost(event.message);
       applyWorking(ctx);
-      footerTui?.requestRender();
     }
   });
   pi.on("tool_execution_start", (event, ctx) => { working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx); });
@@ -626,7 +625,7 @@ export default function piJar(pi: ExtensionAPI): void {
         earlier = (await SessionManager.list(ctx.cwd)).filter((session) => session.path !== current)
           .sort((a, b) => b.modified.getTime() - a.modified.getTime()).slice(0, 50);
       } catch (error) { ctx.ui.notify("pi-jar: earlier sessions unavailable: " + String(error), "warning"); }
-      const picked = await openPromptSearch(ctx, collectPrompts(ctx.sessionManager.getEntries(), earlier));
+      const picked = await openPromptSearch(ctx, collectPrompts(sessionBranch(ctx), earlier));
       if (picked !== undefined) ctx.ui.setEditorText(picked);
     }
   });
