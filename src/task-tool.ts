@@ -22,14 +22,27 @@ const Parameters = Type.Object({
 
 interface TaskToolDetails {
   action: string;
+  /** Bounded preview only; the canonical list lives in TodoStore. */
   items: Todo[];
+  total: number;
+  done: number;
+  current?: string;
   changed?: string;
+  truncated?: boolean;
 }
 
+const stats = (items: readonly Todo[]) => {
+  let done = 0;
+  let current: Todo | undefined;
+  for (const item of items) {
+    if (item.done) done++;
+    if (!current && item.status === "in_progress") current = item;
+  }
+  return { total: items.length, done, current };
+};
 const summary = (items: readonly Todo[]) => {
-  const done = items.filter((item) => item.done).length;
-  const current = items.find((item) => item.status === "in_progress");
-  return `${done}/${items.length} done` + (current ? ` · now: ${current.title}` : "");
+  const value = stats(items);
+  return `${value.done}/${value.total} done` + (value.current ? ` · now: ${value.current.title}` : "");
 };
 
 const lines = (items: readonly Todo[]) => items.length
@@ -60,7 +73,7 @@ export function registerTaskTool(
       const current = store();
       const action = params.todos ? "write" : params.action ?? "list";
       if (!current) {
-        return { content: [{ type: "text", text: "Task tracking is unavailable before a Pi session starts." }], details: { action, items: [] } satisfies TaskToolDetails };
+        return { content: [{ type: "text", text: "Task tracking is unavailable before a Pi session starts." }], details: { action, items: [], total: 0, done: 0 } satisfies TaskToolDetails };
       }
       let changedId: string | undefined;
       let error: string | undefined;
@@ -94,12 +107,22 @@ export function registerTaskTool(
       }
       if (action !== "list" && !error) changed(ctx);
       const items = current.all();
+      const state = stats(items);
+      const changedItem = changedId ? items.find((item) => item.id === changedId) : undefined;
       const message = error
-        ? `Could not ${action} tasks: ${error}\n${lines(items)}`
-        : `${action === "list" ? "Tasks" : "Task list updated"} (${summary(items)}):\n${lines(items)}${action === "list" ? "" : "\n" + REMINDER}`;
+        ? `Could not ${action} tasks: ${error} (${summary(items)}).`
+        : action === "list"
+          ? `Tasks (${summary(items)}):\n${lines(items)}`
+          : `Task list updated (${summary(items)}).${changedItem ? `\n${todoMark(changedItem)} [${changedItem.status}] ${changedItem.title} (${changedItem.id})` : ""}\n${REMINDER}`;
+      const preview = items.slice(0, 8);
       return {
         content: [{ type: "text", text: message }],
-        details: { action, items, ...(changedId ? { changed: changedId } : {}) } satisfies TaskToolDetails
+        details: {
+          action, items: preview, total: state.total, done: state.done,
+          ...(state.current ? { current: state.current.title } : {}),
+          ...(preview.length < items.length ? { truncated: true } : {}),
+          ...(changedId ? { changed: changedId } : {})
+        } satisfies TaskToolDetails
       };
     },
     renderCall(args, theme) {
@@ -115,12 +138,13 @@ export function registerTaskTool(
       if (isPartial) return new Text(theme.fg("warning", "Updating tasks…"), 0, 0);
       const details = result.details as TaskToolDetails | undefined;
       const items = details?.items ?? [];
-      if (!items.length) return new Text(theme.fg("dim", "No tracked tasks."), 0, 0);
-      // Like Claude: the checklist itself is the result. Collapsed shows up to 8 rows.
+      const total = details?.total ?? items.length;
+      const done = details?.done ?? items.filter((item) => item.done).length;
+      if (!total) return new Text(theme.fg("dim", "No tracked tasks."), 0, 0);
       const shown = expanded ? items : items.slice(0, 8);
-      let text = theme.fg("dim", summary(items));
+      let text = theme.fg("dim", `${done}/${total} done${details?.current ? " · now: " + details.current : ""}`);
       for (const item of shown) text += "\n" + todoRow(item, (color, value) => theme.fg(color, value), (value) => theme.bold(value));
-      if (shown.length < items.length) text += "\n" + theme.fg("dim", `  … +${items.length - shown.length} more (expand)`);
+      if (details?.truncated || shown.length < total) text += "\n" + theme.fg("dim", `  … +${Math.max(0, total - shown.length)} more · /jar tasks`);
       return new Text(text, 0, 0);
     }
   });
