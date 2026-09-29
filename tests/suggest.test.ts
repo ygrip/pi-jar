@@ -3,12 +3,11 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerSuggestions, SUGGEST_TOOL, SuggestionState } from "../src/suggest.ts";
 
-function harness(options: { enabled?: boolean; skip?: boolean } = {}) {
+function harness(options: { enabled?: boolean } = {}) {
   const events = new Map<string, (...args: any[]) => any>();
   let tool: { execute: (...args: any[]) => Promise<any> } | undefined;
   let active = ["read"];
   let enabled = options.enabled ?? true;
-  let skip = options.skip ?? false;
   const pi = {
     on(name: string, handler: (...args: any[]) => any) { events.set(name, handler); },
     registerTool(definition: { name: string; execute: any }) { if (definition.name === SUGGEST_TOOL) tool = definition; },
@@ -17,10 +16,10 @@ function harness(options: { enabled?: boolean; skip?: boolean } = {}) {
     setActiveTools(names: string[]) { active = [...names]; }
   } as unknown as ExtensionAPI;
   const state = new SuggestionState();
-  const control = registerSuggestions(pi, state, { enabled: () => enabled, skip: () => skip });
+  const control = registerSuggestions(pi, state, { enabled: () => enabled });
   const settle = (extra: object = {}) => events.get("agent_before_settle")!({ outcome: "completed", continue: false, entries: [], ...extra });
   return { events, state, control, settle, active: () => active, suggest: (text: string) => tool!.execute("id", { suggestion: text }),
-    setEnabled: (value: boolean) => { enabled = value; }, setSkip: (value: boolean) => { skip = value; } };
+    setEnabled: (value: boolean) => { enabled = value; } };
 }
 
 test("jar_suggest stores one sanitized line and ends the turn", async () => {
@@ -35,18 +34,13 @@ test("jar_suggest stores one sanitized line and ends the turn", async () => {
   assert.equal(h.state.text, "Run the full test suite");
 });
 
-test("a finished turn without a suggestion gets exactly one hidden reminder", () => {
+test("a finished turn never forces another provider turn just for a suggestion", () => {
   const h = harness();
   h.control.sync();
-  const first = h.settle();
-  assert.equal(first.continue, true);
-  assert.equal(first.entries[0].display, false);
   assert.equal(h.settle(), undefined);
   h.events.get("input")!({ source: "interactive", text: "next" });
-  assert.equal(h.settle({ outcome: "aborted" }), undefined, "never after an interrupt");
-  assert.equal(h.settle({ continue: true }), undefined, "never stacks on another continuation");
-  h.setSkip(true);
-  assert.equal(h.settle(), undefined, "plan and goal workflows own the next step");
+  assert.equal(h.settle({ outcome: "aborted" }), undefined);
+  assert.equal(h.settle({ continue: true }), undefined);
 });
 
 test("suggestions clear on new input, new runs and branch changes; disabling removes the tool", async () => {
@@ -68,6 +62,5 @@ test("suggestions clear on new input, new runs and branch changes; disabling rem
   h.control.sync();
   assert.equal(h.active().includes(SUGGEST_TOOL), false);
   assert.equal(h.settle(), undefined);
-  const context = await h.events.get("context")!({ messages: [{ customType: "pi-jar.suggest-reminder" }, { role: "user" }] });
-  assert.deepEqual(context.messages, [{ role: "user" }], "reminders never pile up in context");
+  assert.equal(h.events.has("context"), false, "best-effort suggestions add no context-filter pass");
 });
