@@ -62,6 +62,8 @@ export function collectStatuses(statuses: ReadonlyMap<string, string>, now: numb
     const key = cleanText(rawKey, 48);
     if (!key || typeof rawValue !== "string") continue;
     if (rawKey.startsWith("pi-jar.quota.")) continue;
+    // SoL-Pi already announces each saving in its own notification; reprinting it here duplicates it.
+    if (rawKey.startsWith("sol-pi")) continue;
     if (!rawKey.startsWith(ROLE_PREFIX)) {
       const value = cleanText(rawValue);
       // pi-jar's own indicators (such as `role:default`) are already self-describing.

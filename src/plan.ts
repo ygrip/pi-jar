@@ -75,6 +75,7 @@ export class PlanMode {
   private reminders = 0;
   private reviewing = false;
   private compacting = false;
+  private contextDirty = true;
   private compactGeneration = 0;
   private executionRestore: (() => Promise<void>) | undefined;
   private executionRunning = false;

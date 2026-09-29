@@ -1,3 +1,4 @@
+import { icon } from "./icons.ts";
 import { cleanText } from "./status.ts";
 
 export type WorkingPhase = "idle" | "generating" | "tool" | "waiting";
@@ -54,7 +55,8 @@ export class WorkingState {
     const symbols = phase === "tool" ? ["◐", "◓", "◑", "◒"] : phase === "generating" ? ["✢", "✣", "✤", "✣"] : ["✢"];
     const frames = animations ? symbols.map((symbol) => fg(color, symbol)) : [fg(color, symbols[0] ?? "✢")];
     const details = phase === "idle" || this.startedAt === undefined ? "" :
-      ` (${duration(elapsed)}${this.outputTokens ? ` · ↓ ${tokenCount(this.outputTokens)} tokens` : ""}${effort && effort !== "off" ? ` · ${effort} effort` : ""})`;
+      ` (${duration(elapsed)}${this.outputTokens ? ` · ↓ ${tokenCount(this.outputTokens)} tokens` : ""}${effort && effort !== "off" ? ` · ${effort} effort` : ""}`
+      + `${phase === "waiting" ? "" : ` · ${icon("esc") === "esc" ? "esc" : icon("esc") + " esc"} to interrupt`})`;
     return { message: word ? fg(color, word) + fg("muted", details) : undefined, frames, color };
   }
 }

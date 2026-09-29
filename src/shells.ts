@@ -1,10 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, Text, truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { safeLine } from "./diff-view.ts";
 import { cleanText } from "./status.ts";
-import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
 
 export const SHELL_TOOL = "jar_shell";
 export const SHELL_MESSAGE = "pi-jar.shell";
@@ -188,13 +187,14 @@ export class ShellManager {
 }
 
 type ShellMeta = Omit<ShellJob, "lines">;
-const elapsed = (job: ShellMeta | ShellJob, now = Date.now()) => {
-  const seconds = Math.max(0, Math.round(((job.endedAt ?? now) - job.startedAt) / 1000));
+/** `12s` / `3m 4s` since `startedAt`, up to `endedAt` once finished. */
+export const elapsed = (span: { startedAt: number; endedAt?: number }, now = Date.now()) => {
+  const seconds = Math.max(0, Math.round(((span.endedAt ?? now) - span.startedAt) / 1000));
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 };
 export const shellState = (job: ShellMeta | ShellJob) => job.status === "running" ? "running"
   : job.status === "exited" ? `exited ${job.exitCode ?? "?"}` : job.status === "failed" ? `failed: ${cleanText(job.error ?? "", 60)}` : "killed";
-const describe = (job: ShellMeta | ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
+export const describe = (job: ShellMeta | ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
 const boundedTail = (lines: readonly string[], limit = MAX_TOOL_OUTPUT_CHARS): string => {
   let size = 0;
   const kept: string[] = [];
@@ -294,81 +294,4 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
         + (more ? "\n" + theme.fg("dim", "… more lines (expand)") : ""), 0, 0);
     }
   });
-}
-
-const SHELL_ACTIONS = [
-  { key: "x", label: "Kill the selected shell" },
-  { key: "f", label: "Follow the latest output" }
-] as const;
-
-/** Overlay: shells on the left, the selected shell's live output on the right; k kills. */
-export async function openShellsView(ctx: ExtensionContext, manager: ShellManager): Promise<void> {
-  if (!ctx.hasUI || ctx.mode !== "tui") return;
-  if (!manager.summaries().length) { ctx.ui.notify("pi-jar: no background shells (the agent starts them with jar_shell)", "info"); return; }
-  await ctx.ui.custom<void>((tui, theme, _keys, done) => {
-    let selected = 0;
-    let follow = true;
-    let scroll = 0;
-    let rows = 0;
-    let width = 80;
-    let layout = { top: 1, rows: 0, leftWidth: 0, bodyX: 2, footerTop: 0 };
-    const fg = (color: string, text: string) => theme.fg(color as never, text);
-    const previous = manager.onChange;
-    const timer = setInterval(() => tui.requestRender(), 1000);
-    timer.unref?.();
-    manager.onChange = () => { previous?.(); tui.requestRender(); };
-    const close = () => { clearInterval(timer); manager.onChange = previous; done(); };
-    const component = {
-      invalidate() {},
-      handleInput(data: string) {
-        const jobs = manager.summaries();
-        if (matchesKey(data, Key.escape) || data === "q") return close();
-        if (matchesKey(data, Key.up) || data === "k") selected = Math.max(0, selected - 1);
-        else if (matchesKey(data, Key.down) || data === "j") selected = Math.min(jobs.length - 1, selected + 1);
-        else if (data === "x" || data === "K") { const job = jobs[selected]; if (job) { try { manager.kill(job.id); } catch (error) { ctx.ui.notify("pi-jar: " + String(error), "error"); } } }
-        else if (matchesKey(data, Key.pageUp)) { follow = false; scroll = Math.max(0, scroll - Math.max(1, rows - 2)); }
-        else if (matchesKey(data, Key.pageDown)) scroll += Math.max(1, rows - 2);
-        else if (data === "f" || data === "G") follow = true;
-        tui.requestRender();
-      },
-      handleMouse(event: TuiMouseEvent) {
-        const row = event.y - layout.top;
-        if (event.type === "wheel" && event.wheelDelta) { follow = false; scroll = Math.max(0, scroll + Math.sign(event.wheelDelta) * 3); tui.requestRender(); return { handled: true }; }
-        if (event.type !== "click" || event.button !== "left") return;
-        if (event.y === 0 && event.x >= width - 3) { close(); return { handled: true }; }
-        if (row >= 0 && row < layout.rows && layout.leftWidth && event.x < layout.leftWidth + 3 && row < manager.summaries().length) { selected = row; follow = true; tui.requestRender(); return { handled: true, focus: true }; }
-        const action = SHELL_ACTIONS[event.y - layout.footerTop];
-        if (action) { component.handleInput(action.key); return { handled: true }; }
-      },
-      render(available: number): string[] {
-        width = Math.max(24, available);
-        rows = contentRows(6 + SHELL_ACTIONS.length, 6);
-        const jobs = manager.summaries();
-        selected = Math.min(selected, Math.max(0, jobs.length - 1));
-        const job = jobs[selected];
-        const listWidth = sidebarWidth(width, 20, 34);
-        const bodyWidth = listWidth ? width - listWidth - 6 : width - 4;
-        const output = job ? manager.output(job.id, 400) : [];
-        const maxScroll = Math.max(0, output.length - rows);
-        scroll = follow ? maxScroll : Math.min(scroll, maxScroll);
-        if (scroll >= maxScroll) follow = true;
-        const list = jobs.slice(0, rows).map((item, index) => {
-          const color = item.status === "running" ? "accent" : item.status === "exited" && item.exitCode === 0 ? "success" : item.status === "killed" ? "dim" : "error";
-          const glyph = item.status === "running" ? "●" : item.status === "exited" && item.exitCode === 0 ? "✔" : item.status === "killed" ? "■" : "✖";
-          return fg(index === selected ? "accent" : "muted", (index === selected ? "▌" : " ")) + fg(color, glyph + " ") + fg(index === selected ? "accent" : "muted", truncateToWidth(`${item.id} ${item.name}`, Math.max(4, listWidth - 4)));
-        });
-        const body = output.slice(scroll, scroll + rows).map((line) => fg("muted", truncateToWidth(safeLine(line), bodyWidth)));
-        if (job && !output.length) body.push(fg("dim", "(no output yet)"));
-        const title = `⚙ SHELLS · ${manager.running()} running` + (job ? ` · ${describe(job)}` : "");
-        const footer = [
-          ...optionList(theme, SHELL_ACTIONS.map((item) => item.label), -1, SHELL_ACTIONS.map((item) => item.key)),
-          fg("dim", (job ? "$ " + truncateToWidth(cleanText(job.command, 400), Math.max(8, width - 60)) + "   " : "") + "↑↓ shell · PgUp/PgDn scroll · Esc close")
-        ];
-        const split = splitFrame(theme, width, title, list, body, footer, rows, listWidth);
-        layout = split.layout;
-        return split.lines;
-      }
-    };
-    return component;
-  }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
 }

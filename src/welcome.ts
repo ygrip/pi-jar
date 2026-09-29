@@ -1,6 +1,7 @@
 import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { FLAME_RAMP, FLAME_WIDTH, flameFrame, rgb, supportsTruecolor } from "./flame.ts";
 import { cleanText } from "./status.ts";
+import { iconSet, withIcon } from "./icons.ts";
 
 export type WelcomeAction = "settings" | "refresh" | "roles" | "plan" | "goal" | `resume:${number}`;
 
@@ -89,8 +90,11 @@ const center = (line: string, width: number) => {
   const left = Math.floor(room / 2);
   return " ".repeat(left) + line + " ".repeat(room - left);
 };
+// truncateToWidth re-segments every grapheme even when a line already fits; visibleWidth is
+// memoized by Pi, so measure first and only truncate real overflow (same output either way).
+const fitTo = (line: string, width: number) => visibleWidth(line) <= width ? line : truncateToWidth(line, width);
 const fixedCell = (line: string, width: number) => {
-  const value = truncateToWidth(line, width);
+  const value = fitTo(line, width);
   return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
 };
 
@@ -157,12 +161,12 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
   const label = (name: string, value: string, color: WelcomeColor = "muted") =>
     fg("dim", name.padEnd(labelWidth)) + fg(color, cleanText(value, 120));
 
-  const header = [fg("accent", "pi-jar" + (info.version ? " " + info.version : "")),
-    info.model ? fg("muted", cleanText(info.model, 40)) : fg("dim", "no model"),
+  const header = [fg("accent", withIcon("pi", "pi-jar" + (info.version ? " " + info.version : ""))),
+    info.model ? fg("muted", withIcon("model", cleanText(info.model, 40))) : fg("dim", "no model"),
     info.effort && info.effort !== "off" ? fg("muted", info.effort) : "",
     info.activeRole ? fg("warning", "role:" + cleanText(info.activeRole, 16)) : ""].filter(Boolean).join(fg("dim", " · "));
 
-  const git = info.branch ? "git " + cleanText(info.branch, 24) + (info.dirty ? " · dirty" : "") : "git unavailable";
+  const git = info.branch ? withIcon("branch", cleanText(info.branch, 24)) + (info.dirty ? " · dirty" : "") : withIcon("branch", "unavailable");
   const quota = info.quota != null ? `quota ${Math.round(info.quota)}%` : `quota ${info.quotaEnabled ? "unavailable" : "off"}`;
   const plan = info.plan?.enabled ? "◆ planning" + (info.plan.title ? " · " + info.plan.title : "")
     : info.plan?.title ? "last · " + info.plan.title + ` (${info.plan.steps} steps)` : "none · /plan <idea>";
@@ -185,7 +189,7 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
     cell(center(fg("dim", "— welcome to ") + fg("accent", "pi-jar") + fg("dim", " —"), inner)),
     cell(""),
     divider,
-    cell(label("PROJECT", (info.project || "unavailable") + " · " + git, info.dirty ? "warning" : "muted")),
+    cell(label("PROJECT", withIcon("folder", info.project || "unavailable") + " · " + git, info.dirty ? "warning" : "muted")),
     cell(label("SESSION", [info.context ?? "ctx ?", quota, info.cost ?? ""].filter(Boolean).join(" · "))),
     divider,
     cell(label("PLAN", plan, info.plan?.enabled ? "warning" : "muted")),
@@ -201,6 +205,16 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
     ...actions.map(cell),
     fg("dim", "╰" + "─".repeat(w - 2) + "╯")
   ];
+}
+
+const CARD_COLORS: readonly WelcomeColor[] = ["accent", "warning", "error", "muted", "dim"];
+let cardCache: { key: string; lines: string[] } | undefined;
+
+/** The card only changes with its inputs and theme; the flame beside it repaints every tick. */
+function cachedCard(width: number, fg: Paint, info: WelcomeInfo): string[] {
+  const key = `${width}\0${supportsTruecolor()}\0${iconSet()}\0${CARD_COLORS.map((color) => fg(color, "x")).join("")}\0${JSON.stringify(info)}`;
+  if (cardCache?.key !== key) cardCache = { key, lines: card(width, fg, info) };
+  return cardCache.lines;
 }
 
 /** Which welcome action (if any) sits under a zero-based cell in the rendered lines. */
@@ -227,7 +241,7 @@ export function welcomeSettingsHit(lines: readonly string[], x: number, y: numbe
 
 export function welcomeLines(width: number, frame: number, fg: Paint, info: WelcomeInfo = {}): string[] {
   if (width <= 0) return [];
-  const fit = (line: string) => truncateToWidth(line, width);
+  const fit = (line: string) => fitTo(line, width);
   const seed = info.flameSeed ?? 1;
   const flame = flameFrame(frame, seed, (color, text) => fg(color, text));
   if (width < 32) {
@@ -242,19 +256,25 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
     ];
   }
   const wide = width >= 72;
-  const flameArt = flame.map((line) => center(fixedCell(line, FLAME_WIDTH), ART_WIDTH));
+  // FlameSim rows are exactly FLAME_WIDTH single-cell glyphs, so center them without measuring:
+  // re-measuring freshly colored rows every 150 ms tick was most of the welcome's render time.
+  const flameLeft = " ".repeat(Math.floor((ART_WIDTH - FLAME_WIDTH) / 2));
+  const flameRight = " ".repeat(ART_WIDTH - FLAME_WIDTH - flameLeft.length);
+  const flameArt = flame.map((line) => flameLeft + line + flameRight);
   if (!wide) {
-    const art = [...flame.slice(2).map((line) => center(fixedCell(line, FLAME_WIDTH), Math.min(width, ART_WIDTH))),
-      ...PI_COMPACT.map((line) => fg("accent", center(line, Math.min(width, ART_WIDTH))))];
-    return [...art.map(fit), ...card(width, fg, info).map(fit), ""];
+    // width >= 32 here, so ART_WIDTH-wide art rows always fit.
+    const art = [...flameArt.slice(2), ...PI_COMPACT.map((line) => fg("accent", center(line, ART_WIDTH)))];
+    return [...art, ...cachedCard(width, fg, info).map(fit), ""];
   }
   const art = [...flameArt, ...PI_LARGE.map((line) => fg("accent", center(fixedCell(line, 21), ART_WIDTH)))];
-  const details = card(width - ART_WIDTH - 2, fg, info);
+  const details = cachedCard(width - ART_WIDTH - 2, fg, info);
   const topPad = Math.max(0, Math.floor((details.length - art.length) / 2));
   const artRows = [...Array.from({ length: topPad }, () => " ".repeat(ART_WIDTH)), ...art];
   const merged = Array.from({ length: Math.max(artRows.length, details.length) }, (_, index) => {
     const left = artRows[index] ?? " ".repeat(ART_WIDTH);
-    return fit(left + "  " + (details[index] ?? ""));
+    const right = details[index] ?? "";
+    // Every art row is ART_WIDTH cells; the cached card rows hit Pi's width cache.
+    return ART_WIDTH + 2 + visibleWidth(right) <= width ? left + "  " + right : truncateToWidth(left + "  " + right, width);
   });
   return [...merged, "", ""];
 }

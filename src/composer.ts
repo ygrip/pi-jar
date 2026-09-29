@@ -4,6 +4,11 @@ import { Mascot, MASCOT_FACE_WIDTH, mascotFace, paintFace, paintTip, type Mascot
 import type { SuggestionState } from "./suggest.ts";
 import type { WorkingPhase } from "./working.ts";
 import { imageChip, imageInfo, imagePaths } from "./attachments.ts";
+// Aliased: roundedInput has a parameter named `icon`.
+import { icon as glyph, type IconKey } from "./icons.ts";
+
+/** `⏎ send`; ascii spells the key out (`enter send`). */
+const keyHint = (key: IconKey, action: string) => glyph(key) + " " + action;
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 type MouseEvent = Parameters<NonNullable<EditorComponent["handleMouse"]>>[0];
@@ -12,6 +17,8 @@ const PHASE_MOODS: Record<WorkingPhase, readonly MascotMood[]> = {
   idle: ["idle"], generating: ["happy", "thinking"], tool: ["tool"], waiting: ["waiting"]
 };
 export const COMPOSER_ACTIVE_INTERVAL_MS = 600;
+/** How long composer image chips trust a previous filesystem check for the same draft. */
+const ATTACHMENT_RECHECK_MS = 1000;
 /** Plain one-line face for a phase; every phase has the same width. */
 export function composerIcon(phase: WorkingPhase, frame = 0): string {
   const moods = PHASE_MOODS[phase];
@@ -95,7 +102,9 @@ export function roundedInput(lines: string[], width: number, focused: boolean, t
     if (index === 0 && options.ghost && row.includes(CURSOR)) {
       const base = row.replace(/ +$/, "");
       const room = inner - visibleWidth(base);
-      if (room > 2) row = base + dim(truncateToWidth(options.ghost + "   ⇥ tab", room, "…"));
+      // ascii's tab "icon" is already the word.
+      const tab = glyph("tab") === "tab" ? "tab" : keyHint("tab", "tab");
+      if (room > 2) row = base + dim(truncateToWidth(options.ghost + "   " + tab, room, "…"));
     }
     const fitted = truncateToWidth(row, inner);
     return border("│") + fitted + " ".repeat(Math.max(0, inner - visibleWidth(fitted))) + border("│");
@@ -159,7 +168,9 @@ class RoundedEditor extends CustomEditor {
 
   override render(width: number): string[] {
     const inner = this.renderTall(width < 8 ? width : width - 2);
-    const empty = this.getText() === "";
+    const text = this.getText();
+    const empty = text === "";
+    const below = this.decor.attachments(text);
     const ghost = empty && !this.isShowingAutocomplete() ? this.decor.ghost() : undefined;
     this.ghostShown = !!ghost;
     const visibleRows = (this as unknown as { renderedVisibleLineCount?: number }).renderedVisibleLineCount;
@@ -167,7 +178,7 @@ class RoundedEditor extends CustomEditor {
       ...(ghost ? { ghost } : {}), ...(this.decor.hint() ? { hint: this.decor.hint()! } : {}),
       ...(this.decor.paintedIcon() ? { paintedIcon: this.decor.paintedIcon()! } : {}),
       ...(visibleRows != null ? { visibleRows } : {}), dim: this.decor.dim,
-      ...(this.decor.attachments(this.getText()) ? { below: this.decor.attachments(this.getText())! } : {})
+      ...(below ? { below } : {})
     });
     const tip = width >= 8 ? this.decor.tip(width) : undefined;
     this.tipRows = tip ? 1 : 0;
@@ -230,10 +241,12 @@ class ThemedEditor implements EditorComponent {
   }
   invalidate() { this.base.invalidate(); }
   render(width: number): string[] {
-    const ghost = this.base.getText() === "" ? this.decor.ghost() : undefined;
+    const text = this.base.getText();
+    const ghost = text === "" ? this.decor.ghost() : undefined;
+    const below = this.decor.attachments(text);
     const framed = roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, this.decor.icon(), this.decor.session(), {
       ...(ghost ? { ghost } : {}), ...(this.decor.paintedIcon() ? { paintedIcon: this.decor.paintedIcon()! } : {}), dim: this.decor.dim,
-      ...(this.decor.attachments(this.base.getText()) ? { below: this.decor.attachments(this.base.getText())! } : {})
+      ...(below ? { below } : {})
     });
     const tip = width >= 8 ? this.decor.tip(width) : undefined;
     this.tipRows = tip ? 1 : 0;
@@ -269,6 +282,8 @@ export class ComposerStyle {
   private suggestions?: SuggestionState;
   private unsubscribe?: () => void;
   private colors?: { fg(color: string, text: string): string };
+  /** Chips for the last draft; image paths hit the filesystem, so reuse them briefly across repaints. */
+  private chips?: { text: string; cwd: string; at: number; chips: string[] };
 
   private readonly decor: ComposerDecor = {
     icon: () => this.mascotOn ? mascotFace(this.animations ? this.mascot.mood() : "idle") : "pi",
@@ -286,7 +301,9 @@ export class ComposerStyle {
     },
     session: () => this.session,
     ghost: () => this.suggestions?.text,
-    hint: () => this.suggestions?.text ? "⇥ accept · ⏎ send · ⇧⏎ newline" : "⏎ send · ⇧⏎ newline · /plan · /goal",
+    hint: () => this.suggestions?.text
+      ? `${keyHint("tab", "accept")} · ${keyHint("enter", "send")} · ${keyHint("shiftEnter", "newline")}`
+      : `${keyHint("enter", "send")} · ${keyHint("shiftEnter", "newline")} · /plan · /goal`,
     accept: () => {
       const text = this.suggestions?.text;
       if (text) this.suggestions!.clear();
@@ -297,9 +314,13 @@ export class ComposerStyle {
     dim: (text) => this.colors?.fg("dim", text) ?? `\x1b[2m${text}\x1b[22m`,
     attachments: (text) => {
       if (!/\.(png|jpe?g|gif|webp)\b/i.test(text)) return undefined;
-      const chips = imagePaths(text, this.cwd).map(imageInfo).filter((info) => !!info).map((info) => imageChip(info!));
-      if (!chips.length) return undefined;
-      return chips.map((chip) => this.colors?.fg("accent", chip) ?? chip).join(this.colors?.fg("dim", "   ") ?? "   ");
+      const now = Date.now();
+      if (this.chips?.text !== text || this.chips.cwd !== this.cwd || now - this.chips.at >= ATTACHMENT_RECHECK_MS) {
+        const chips = imagePaths(text, this.cwd).map(imageInfo).filter((info) => !!info).map((info) => imageChip(info!));
+        this.chips = { text, cwd: this.cwd, at: now, chips };
+      }
+      if (!this.chips.chips.length) return undefined;
+      return this.chips.chips.map((chip) => this.colors?.fg("accent", chip) ?? chip).join(this.colors?.fg("dim", "   ") ?? "   ");
     }
   };
 

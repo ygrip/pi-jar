@@ -132,7 +132,8 @@ watch matches  or  process exits  →  pi-jar.shell message  →  agent wakes (o
 - `jar_delegate` takes 1–4 tasks. Each runs `pi --mode json -p --no-session --model <role model> [--thinking <effort>] [--tools read,grep,find,ls] "<task>"` in the project directory, with `PI_JAR_CHILD=1`.
 - The model comes from the task's role (default `task`), falling back to `default` and then the current model.
 - Progress (tools used, turns, cost) streams into the tool card; each running subagent is published as a teammate for the welcome TEAM row and footer, and cleared when it ends.
-- Subagents time out after 20 minutes and stop when the turn is aborted. The result lists every report with its role, model and outcome. In goal mode, `write: true` needs an open task.
+- The activity view reads a live transcript per subagent (each tool call with its command, path or pattern, then the assistant's text; last 200 lines). It lives only in memory with the 8 most recent finished runs; the tool result saved in the session carries the reports, not the transcript.
+- Subagents time out after 20 minutes and stop when the turn is aborted; `x` in the activity view stops one without touching the rest of its batch (its report reads `failed: stopped`). The result lists every report with its role, model and outcome. In goal mode, `write: true` needs an open task.
 
 ## Sessions and prompt history
 

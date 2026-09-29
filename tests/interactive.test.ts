@@ -23,7 +23,7 @@ test("working wording follows observed events, sanitizes tool names and stops on
   assert.equal(state.view(true, paint).message, undefined);
   state.start();
   const generating = state.view(true, paint);
-  assert.match(generating.message ?? "", /^A spark remains… \(0s\)/);
+  assert.ok(generating.message?.includes("esc to interrupt"));
   assert.match(state.view(true, paint).message ?? "", /A spark remains…/);
   assert.ok(generating.frames.length > 1);
   state.toolStart("one", "\u001b[31mbash\u001b[0m");
@@ -42,7 +42,7 @@ test("working wording follows observed events, sanitizes tool names and stops on
   state.start(1_000);
   state.reportOutputTokens(1_700);
   assert.match(state.view(false, paint, 89_000, "medium").message ?? "",
-    /There is a way through… \(1m 28s · ↓ 1\.7k tokens · medium effort\)/);
+    /1m 28s · ↓ 1\.7k tokens · medium effort/);
   assert.match(state.view(false, paint, 126_000).message ?? "", /The horizon is clearer now…/);
   state.end();
   state.start(2_000);
@@ -182,7 +182,7 @@ test("jar_todo mutation results keep persisted previews bounded", async () => {
 test("working message shows the running task's active form", () => {
   const state = new WorkingState();
   state.start(0);
-  assert.match(state.view(false, (_c, t) => t, 1000, undefined, "Running the tests").message ?? "", /^Running the tests… \(1s\)/);
+  assert.match(state.view(false, (_c, t) => t, 1000, undefined, "Running the tests").message ?? "", /Running the tests….*1s.*esc to interrupt/);
   assert.match(state.view(false, (_c, t) => t, 1000).message ?? "", /A spark remains/);
 });
 

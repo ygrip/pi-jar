@@ -24,10 +24,10 @@ The showcase is captured from a real pi-jar terminal session: the torch-style `�
 | **Commit** | `/jar commit [note]` drafts a message for the staged changes with the `commit` role, lets you edit it, then commits (never pushes). |
 | **Tasks & questions** | A Claude-style `jar_todo` checklist the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
 | **Change review** | Every file the agent edits is remembered as it was; `/diff` (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) shows changed files next to a colored diff, with accept or revert per file or all at once. |
-| **Background shells** | `jar_shell` runs dev servers, watchers and long tests in the background; the agent is woken when a watch pattern matches or the process exits, so it never polls. `/jar shells` tails or kills them. |
-| **Subagents** | `jar_delegate` fans out up to four read-only (or opt-in editing) subagents in parallel on your model roles; they show up live as teammates on the welcome card and footer. |
+| **Background shells** | `jar_shell` runs dev servers, watchers and long tests in the background; the agent is woken when a watch pattern matches or the process exits, so it never polls. Running shells get a footer row; click it (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd>) to tail or kill them. |
+| **Subagents** | `jar_delegate` fans out up to four read-only (or opt-in editing) subagents in parallel on your model roles. Each gets a live footer row (current tool, tool count, elapsed); click it to open its transcript and report, or stop it. |
 | **Sessions & history** | Recent sessions (with their goal and plan) on the welcome card, one click from resuming; <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> searches earlier prompts; pasted images show as chips under the composer. |
-| **Footer & themes** | Responsive footer (model, effort, session, cwd, context, RAM, cost, quota, goal, roles, branch) and seven dark themes. |
+| **Footer & themes** | Responsive footer (model, effort, session, cwd, context, RAM, cost, quota, goal, roles, branch, live subagents and shells) with unicode, [Nerd Font](https://www.nerdfonts.com) or ascii icons, and seven dark themes. |
 
 ## Install
 
@@ -64,12 +64,12 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Human view/editor for the agent's checklist. |
 | `/jar history` | Read-only conversation timeline for the active branch. |
 | `/diff` | Review, accept or revert the files the agent changed. |
-| `/jar shells` | Background shells: live output, kill. |
+| `/jar activity` · `/jar shells` | Subagents and background shells: live transcript/output, stop or kill. |
 | `/jar resume [N]` | Resume recent session `N` from the welcome list, or pick one. |
-| `/jar sessions [query]` · `/jar name <title>` | Search/switch sessions; name the current one. |
+| `/jar sessions [query]` · `/jar name <title>` | Search sessions with a details pane (prompt, messages, goal, plan) and switch; name the current one. |
 | `/jar welcome` | Replay the welcome screen. |
 | `/jar ask [question]` | Answer a question in a dialog and insert the answer into the editor. |
-| `/jar accent [preset]` · `/jar footer` | Switch a loaded accent theme; toggle footer fields. |
+| `/jar accent [preset]` · `/jar footer` · `/jar icons [unicode\|nerd\|ascii]` | Switch a loaded accent theme; toggle footer fields; pick the icon set. |
 | `/jar composer on\|off` · `/jar animations on\|off` · `/jar ui on\|off` | Toggle the composer, motion, or all pi-jar UI. |
 | `/jar quota on\|off` | Session-only, read-only quota lookups for supported OAuth providers. |
 | `/jar hub` | Open an installed task or subagent manager command. |
@@ -78,6 +78,7 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | Shortcut | Action |
 | --- | --- |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> | Open pi-jar settings |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd> | Subagents and background shells (activity view) |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd> | Refresh the welcome (new message and flame), or show it again |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> | Toggle plan mode |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> | Cycle model roles (`cycleOrder`) |
@@ -219,8 +220,9 @@ The advisor is a second model (the `advisor` role; the current model if unassign
 - **`jar_todo`** — a Claude-style task list the agent keeps for any multi-step request. It writes the full list at once; each task is `pending`, `in_progress` (exactly one at a time) or `completed`, with an `activeForm` ("Running tests") that replaces the working spinner text while it runs. The live checklist above the composer shows `✔` struck-through done tasks, a bold `◼` current task and `☐` pending ones; a finished list stays until your next prompt. `/jar tasks` is your view/editor: `a` add, <kbd>Space</kbd>/<kbd>Enter</kbd> check, `e` edit, `d` delete, `f` filter.
 - **`jar_ask`** — structured questions: numbered options with descriptions, single or multi-select, *Type your own answer* (multi-line, paste-friendly) and *Chat about this* to discuss before choosing.
 - **`/diff`** — review what the agent changed since its first edit to each file: files with `+/−` counts on the left, a numbered, colored diff on the right. `a` accept (keep, stop tracking), `r` then `y` revert (restore the original, or remove a file it created), `A`/`R` for all. The footer shows `± N files · /diff` while anything is unreviewed. Only `edit`/`write` changes inside the project are tracked; shell-made changes are not.
-- **`jar_shell`** — `start` (with optional `name`, `watch` regex and `notify`), `list`, `output`, `kill`. Output is ANSI-stripped and bounded (2000 lines). When a watch matches or the process ends, a visible message wakes the agent (queued if it is busy). The footer shows `⚙ N shells`; `/jar shells` opens a live view (`x` kill, `f` follow). All shells stop when the session ends.
-- **`jar_delegate`** — up to four subagents run in parallel as separate one-shot Pi processes with a fresh context, on a role (default `task`, then `default`, then the current model). They are read-only (`read`, `grep`, `find`, `ls`) unless `write: true`; subagents cannot delegate further; aborting the turn stops them. Each shows as a working teammate until it finishes, and the tool result lists every report.
+- **`jar_shell`** — `start` (with optional `name`, `watch` regex and `notify`), `list`, `output`, `kill`. Output is ANSI-stripped and bounded (2000 lines). When a watch matches or the process ends, a visible message wakes the agent (queued if it is busy). Each running shell gets a footer row; the activity view (`/jar shells`, a click on the row) tails it live (`x` kill, `f` follow). All shells stop when the session ends.
+- **`jar_delegate`** — up to four subagents run in parallel as separate one-shot Pi processes with a fresh context, on a role (default `task`, then `default`, then the current model). They are read-only (`read`, `grep`, `find`, `ls`) unless `write: true`; subagents cannot delegate further; aborting the turn stops them. Each has a live footer row; the activity view (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd>, `/jar activity`, a click on the row) shows its task, live transcript and report, and `x` stops just that one. The tool result lists every report.
+- **Activity view** — one split view for subagents, background shells and other extensions' teammates: list on the left, live details on the right (auto-follows; scroll up to pause, `f` to follow again). Finished runs stay listed for review.
 - **`/jar history`** — separate, read-only timeline of the active branch (paging, search, expandable details). Pi's native transcript is untouched.
 - Pi's built-in read/shell/edit/write tool cards render compactly; the full output or diff stays one click or <kbd>Ctrl</kbd>+<kbd>O</kbd> away.
 
@@ -228,8 +230,8 @@ The advisor is a second model (the `advisor` role; the current model if unassign
 
 `/jar settings` (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd>, or the welcome's Settings action) has three tabs:
 
-- **Appearance** — accent, motion, rounded composer, Ember mascot, next-prompt suggestions, pi-jar UI.
-- **Footer** — field visibility.
+- **Appearance** — accent, motion, rounded composer, Ember mascot, next-prompt suggestions, pi-jar UI, icons (`unicode` default, `nerd` for a [Nerd Font](https://www.nerdfonts.com) terminal like omp's nerd preset, `ascii` for plain labels).
+- **Footer** — field visibility. In fullscreen mode the session name (or `sessions` for an unnamed session) opens the session picker and each subagent/shell row opens the activity view. SoL-Pi's savings status is not repeated in the footer (it already notifies).
 - **Pi** — mouse clicks (Pi fullscreen mode), copy on select, goal auto rounds, advisor, advisor gates.
 
 pi-jar preferences are saved in `pi-jar-settings.json` in Pi's agent directory; the Pi tab writes Pi's own settings.
@@ -258,8 +260,10 @@ pi-jar/
 │   ├── usage-view.ts     /usage; context-view.ts is /context; panel.ts frames both
 │   ├── split-view.ts     shared two-pane frame
 │   ├── changes.ts        change tracker and line diff; diff-view.ts is /diff
-│   ├── shells.ts         background shells, jar_shell and /jar shells
-│   ├── delegate.ts       jar_delegate subagents
+│   ├── shells.ts         background shells and jar_shell
+│   ├── delegate.ts       jar_delegate subagents and their live registry
+│   ├── activity-view.ts  subagent/shell details view
+│   ├── icons.ts          unicode / nerd / ascii glyph sets
 │   ├── attachments.ts    image chips; prompt-search.ts is prompt history
 │   ├── session-gallery.ts recent sessions for the welcome
 │   ├── welcome.ts        welcome layout and hit-testing

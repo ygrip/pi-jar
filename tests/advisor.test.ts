@@ -11,7 +11,7 @@ test("transcript keeps the newest messages within the cap and labels tool result
     { type: "custom" }
   ];
   const text = transcript(entries, 200);
-  assert.match(text, /### assistant\ntrying\n\[tool bash \{"command":"npm test"\}\]/);
+  assert.match(text, /### assistant\ntrying\n\[tool bash command=npm test\]/);
   assert.match(text, /### tool result \(bash, error\)\nboom/);
   assert.ok(text.length <= 260);
   assert.match(advisorPrompt({ question: "Q?", draft: "D", trigger: "loop" }, "conv", "## main"), /Automatic consultation: loop[\s\S]*Q\?[\s\S]*D[\s\S]*## main[\s\S]*conv/);

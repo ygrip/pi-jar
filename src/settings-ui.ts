@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { FOOTER_FIELDS, type FooterField } from "./footer-settings.ts";
+import { ICON_SETS } from "./icons.ts";
 import { GOAL_ROUND_CHOICES, type JarAccent, type JarVisualSettings } from "./settings.ts";
 
 const LABELS: Record<FooterField, string> = {
@@ -34,7 +35,7 @@ export async function openJarSettings(
     let width = 64;
     const accents: JarAccent[] = ["follow", ...availableAccents.filter((name): name is JarAccent =>
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
-    const fields = () => page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 5 : 6;
+    const fields = () => page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 5 : 7;
     const piError = (error: unknown) => ctx.ui.notify("Could not change Pi setting: " + (error as Error).message, "error");
     const pageSize = () => Math.min(fields(), Math.max(4, (process.stdout.rows ?? 24) - 9));
     const firstVisible = () => Math.min(Math.max(0, selected - pageSize() + 1), Math.max(0, fields() - pageSize()));
@@ -61,6 +62,7 @@ export async function openJarSettings(
       else if (index === 3) update({ ...state, mascot: !state.mascot });
       else if (index === 4) update({ ...state, suggestions: !state.suggestions });
       else if (index === 5) update({ ...state, ui: !state.ui });
+      else if (index === 6) update({ ...state, icons: ICON_SETS[(ICON_SETS.indexOf(state.icons) + 1) % ICON_SETS.length]! });
       tui.requestRender();
     };
     const row = (index: number, label: string, value: string, enabled: boolean) => {
@@ -137,7 +139,8 @@ export async function openJarSettings(
             row(2, "Rounded composer", state.composer ? "ON" : "OFF", state.composer),
             row(3, "Ember mascot", state.mascot ? "ON" : "OFF", state.mascot),
             row(4, "Next-prompt suggestions", state.suggestions ? "ON" : "OFF", state.suggestions),
-            row(5, "Pi-jar UI", state.ui ? "ON" : "OFF", state.ui)
+            row(5, "Pi-jar UI", state.ui ? "ON" : "OFF", state.ui),
+            row(6, "Icons (nerd needs a Nerd Font)", state.icons.toUpperCase(), state.icons !== "ascii")
           ];
         const start = firstVisible();
         const rows = allRows.slice(start, start + pageSize());

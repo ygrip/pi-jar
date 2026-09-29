@@ -37,6 +37,13 @@ export function sessionWorkflow(jsonl: string): { goal?: string; plan?: string }
     ...(plan ? { plan } : {}) };
 }
 
+/** Goal and plan recorded in one session file; empty for oversized or unreadable files. */
+export async function sessionDetails(path: string, read: (path: string) => Promise<string> = (file) => readFile(file, "utf8"),
+  size: (path: string) => Promise<number> = async (file) => (await stat(file)).size): Promise<{ goal?: string; plan?: string }> {
+  try { return await size(path) <= MAX_SCAN_BYTES ? sessionWorkflow(await read(path)) : {}; }
+  catch { return {}; }
+}
+
 /** Most recent sessions for the project other than the current one, with their goal and plan. */
 export async function recentSessions(sessions: readonly SessionInfo[], current: string | undefined, limit = RECENT_SESSIONS,
   read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"), size: (path: string) => Promise<number> = async (path) => (await stat(path)).size): Promise<RecentSession[]> {
@@ -44,9 +51,7 @@ export async function recentSessions(sessions: readonly SessionInfo[], current: 
     .sort((a, b) => b.modified.getTime() - a.modified.getTime()).slice(0, limit);
   return Promise.all(picked.map(async (session) => {
     const title = session.name ? cleanText(session.name, 60) : cleanText(session.firstMessage || sessionDisplayName(undefined, session.id), 60);
-    let workflow: { goal?: string; plan?: string } = {};
-    try { if (await size(session.path) <= MAX_SCAN_BYTES) workflow = sessionWorkflow(await read(session.path)); }
-    catch { /* unreadable session: show it without details */ }
+    const workflow = await sessionDetails(session.path, read, size);
     return { path: session.path, title, modified: session.modified, messages: session.messageCount, ...workflow };
   }));
 }

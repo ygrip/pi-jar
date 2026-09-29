@@ -56,11 +56,13 @@ Then check:
 
 - the welcome at 24, 40, 80 and 120+ columns; <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd> refresh; motion off (`/jar animations off`) freezes the flame;
 - the composer: typing `/pl` shows autocomplete below the frame; long drafts grow before scrolling; Ember changes mood while dialogs are open;
-- `/jar settings`: Tab through Appearance → Footer → Pi, toggle mouse mode and check Pi's `settings.json` in the temporary agent dir;
+- `/jar settings`: Tab through Appearance → Footer → Pi; cycle Unicode/Nerd Font/ASCII icons and toggle mouse mode in the temporary agent dir;
+- `/jar sessions`: search, move between rows, inspect the selected prompt/goal/plan, then resume; the footer session name or `sessions` indicator opens the same picker;
+- `/jar activity`: select a subagent or background shell, scroll its live transcript/output, pause and resume follow, and stop/kill only the selected run;
 - `/roles`: the split manager, `n` new role, `a` alias, `s` scope;
 - `/plan`: the status shows `◆ PLAN · read-only` and a directory appears under `$TMPDIR/pi-jar/plans/`.
 
-For pointer interaction start with `--tui-mode fullscreen` (or enable **Pi → Mouse clicks** and restart). Check that welcome actions fire once per press, that clicking composer text moves the cursor, that clicking Ember pokes it, that plan-view headings and actions respond to clicks and the wheel, and that selecting text anywhere still copies it.
+For pointer interaction start with `--tui-mode fullscreen` (or enable **Pi → Mouse clicks** and restart). Check that welcome actions fire once per press, that footer activity rows open their matching details, that the footer session indicator opens search, that clicking composer text moves the cursor, that clicking Ember pokes it, that plan-view headings and actions respond to clicks and the wheel, and that selecting text anywhere still copies it. In regular mode use `/jar activity` and `/jar sessions` instead.
 
 With a logged-in model, run end to end:
 

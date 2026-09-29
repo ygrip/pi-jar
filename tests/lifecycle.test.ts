@@ -55,7 +55,7 @@ test("quota waits for startup to settle, skips unsupported providers and can be 
   events.get("session_shutdown")?.({}, ctx);
 });
 
-test("idle has no timer; demo motion stops on toggle, reset and session shutdown", async () => {
+test("footer never schedules repaint timers, even in demo; motion toggles and shutdown stay clean", async () => {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
   const intervals = new Set<ReturnType<typeof setInterval>>();
@@ -112,7 +112,7 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
     const beforeEffort = renders;
     events.get("thinking_level_select")?.({ level: "high", previousLevel: "medium" }, ctx);
     assert.equal(renders, beforeEffort + 1);
-    assert.match(footer?.render(80).join(" ") ?? "", /model · high/);
+    assert.match(footer?.render(80).join(" ") ?? "", /model.*high/);
     sessionName = "Renamed session";
     assert.match(footer?.render(80).join(" ") ?? "", /Renamed session/);
     assert.equal(intervals.size, 0);
@@ -120,7 +120,7 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
     const command = commands.get("jar")!;
     await command("demo", ctx);
     assert.match(footer?.render(80).join(" ") ?? "", /DEMO/);
-    assert.equal(intervals.size, 1);
+    assert.equal(intervals.size, 0); // cosmetic motion rides Pi's own renders
     await command("animations off", ctx);
     assert.equal(intervals.size, 0);
     assert.deepEqual(indicator?.frames, ["✢"]);
@@ -135,7 +135,7 @@ test("idle has no timer; demo motion stops on toggle, reset and session shutdown
     assert.equal(intervals.size, 0); // still animation-off
     await command("animations on", ctx);
     footer?.render(80);
-    assert.equal(intervals.size, 1);
+    assert.equal(intervals.size, 0);
     events.get("session_shutdown")?.({}, ctx);
     assert.equal(intervals.size, 0);
     assert.equal(subscribed, 0);
@@ -309,7 +309,7 @@ test("Pi lifecycle keeps working UI static and event-driven in long sessions", a
     await command?.("animations on", ctx);
     assert.equal(intervals.size, 0);
     events.get("agent_start")?.({}, ctx);
-    assert.match(message ?? "", /A spark remains… \(0s\)/);
+    assert.match(message ?? "", /esc to interrupt/);
     assert.equal(frames.length, 1, "working indicator is static; native Pi renders drive updates");
     assert.equal(intervals.size, 0, "working state adds no repaint loop");
     events.get("message_end")?.({ message: { role: "assistant", usage: { output: 1700, cost: { total: 0.01 } } } }, ctx);
@@ -331,34 +331,39 @@ test("Pi lifecycle keeps working UI static and event-driven in long sessions", a
   }
 });
 
-test("resumed sessions skip the animated welcome and recent-session scan", () => {
-  const events = new Map<string, Function>();
-  let welcomeInstalled = false;
-  const ctx = {
-    hasUI: true, mode: "tui", cwd: "/tmp/pi-jar", isIdle: () => true,
-    model: { provider: "test", id: "test-model" },
-    modelRegistry: { async getProviderAuth() { return undefined; } },
-    sessionManager: {
-      getBranch: () => [{ type: "custom", customType: "existing", data: {} }],
-      getSessionName: () => "Old session"
-    },
-    getContextUsage: () => ({ percent: 80 }),
-    ui: {
-      theme: { fg: (_color: string, text: string) => text },
-      setWorkingIndicator() {}, setWorkingMessage() {}, setFooter() {}, notify() {},
-      setWidget(key: string, factory?: unknown) {
-        if (key === "pi-jar.welcome" && factory) welcomeInstalled = true;
+test("welcome shows for fresh sessions, including Pi's startup setup entries, and skips resumed ones", () => {
+  const cases: [string, unknown[], boolean][] = [
+    ["empty", [], true],
+    ["startup thinking level and model", [{ type: "thinking_level_change", thinkingLevel: "off" }, { type: "model_change" }], true],
+    ["resumed with state", [{ type: "thinking_level_change" }, { type: "custom", customType: "existing", data: {} }], false],
+    ["resumed with messages", [{ type: "message", message: { role: "user", content: "hi" } }], false]
+  ];
+  for (const [name, branch, expected] of cases) {
+    const events = new Map<string, Function>();
+    let welcomeInstalled = false;
+    const ctx = {
+      hasUI: true, mode: "tui", cwd: "/tmp/pi-jar", isIdle: () => true,
+      model: { provider: "test", id: "test-model" },
+      modelRegistry: { async getProviderAuth() { return undefined; } },
+      sessionManager: { getBranch: () => branch, getSessionName: () => "Old session" },
+      getContextUsage: () => ({ percent: 80 }),
+      ui: {
+        theme: { fg: (_color: string, text: string) => text },
+        setWorkingIndicator() {}, setWorkingMessage() {}, setFooter() {}, notify() {},
+        setWidget(key: string, factory?: unknown) {
+          if (key === "pi-jar.welcome" && factory) welcomeInstalled = true;
+        }
       }
-    }
-  };
-  piJar({
-    on: (name: string, handler: Function) => { events.set(name, handler); },
-    getCommands: () => [],
-    registerCommand() {}
-  } as unknown as Parameters<typeof piJar>[0]);
-  events.get("session_start")?.({ reason: "startup" }, ctx);
-  assert.equal(welcomeInstalled, false);
-  events.get("session_shutdown")?.({}, ctx);
+    };
+    piJar({
+      on: (event: string, handler: Function) => { events.set(event, handler); },
+      getCommands: () => [],
+      registerCommand() {}
+    } as unknown as Parameters<typeof piJar>[0]);
+    events.get("session_start")?.({ reason: "startup" }, ctx);
+    assert.equal(welcomeInstalled, expected, name);
+    events.get("session_shutdown")?.({}, ctx);
+  }
 });
 
 test("status provider failure renders a safe fallback", () => {

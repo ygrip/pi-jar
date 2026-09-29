@@ -2,6 +2,7 @@ import { existsSync, readFileSync, mkdirSync, renameSync, unlinkSync, writeFileS
 import { join } from "node:path";
 import { ACCENT_NAMES } from "./accent.ts";
 import { DEFAULT_FOOTER_SETTINGS, FOOTER_FIELDS, loadFooterSettings, type FooterSettings } from "./footer-settings.ts";
+import { ICON_SETS, type IconSet } from "./icons.ts";
 
 export type JarAccent = "follow" | "default" | (typeof ACCENT_NAMES)[number];
 export interface JarVisualSettings {
@@ -20,6 +21,8 @@ export interface JarVisualSettings {
   advisor: boolean;
   /** Consult the advisor automatically when the agent repeats a tool call or keeps failing. */
   advisorGates: boolean;
+  /** Glyph set for footer, composer and views: unicode, Nerd Font icons, or plain ascii. */
+  icons: IconSet;
   footer: FooterSettings;
 }
 
@@ -27,7 +30,7 @@ export const GOAL_ROUND_CHOICES = [4, 8, 12, 20] as const;
 
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, advisor: true, advisorGates: true, footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, advisor: true, advisorGates: true, icons: "unicode", footer: { ...footer } };
 }
 
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
@@ -59,6 +62,7 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
       ? value.goalRounds : fallback.goalRounds,
     advisor: typeof value.advisor === "boolean" ? value.advisor : fallback.advisor,
     advisorGates: typeof value.advisorGates === "boolean" ? value.advisorGates : fallback.advisorGates,
+    icons: ICON_SETS.some((set) => set === value.icons) ? value.icons as IconSet : fallback.icons,
     footer: Object.fromEntries(FOOTER_FIELDS.map((field) => [field,
       typeof footer[field] === "boolean" ? footer[field] : fallback.footer[field]])) as FooterSettings
   };

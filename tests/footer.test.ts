@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderFooter, type FooterView } from "../src/footer.ts";
+import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
+import { renderFooter, renderFooterLayout, type FooterView } from "../src/footer.ts";
 import { DEFAULT_FOOTER_SETTINGS } from "../src/footer-settings.ts";
 import { roleFrame } from "../src/animations.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { collectStatuses } from "../src/status.ts";
+import { icon, setIconSet } from "../src/icons.ts";
 
 const plain = { fg: (_color: string, text: string) => text };
 const base: FooterView = {
@@ -32,11 +33,11 @@ test("process RAM and quota display at usable widths and respect visibility", ()
   const view: FooterView = { ...base, memory: "ram 128 MiB", quota: { fiveHour: { used: 14 }, week: { used: 50 } } };
   for (const width of [32, 40, 60, 80, 120]) {
     const lines = renderFooter(view, width, plain);
-    assert.match(lines.join(" "), /ram 128 MiB/);
+    assert.match(lines.join(" "), /128 MiB/);
     assert.match(lines.join(" "), /5h 14%/);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
   }
-  assert.doesNotMatch(renderFooter({ ...view, settings: { ...DEFAULT_FOOTER_SETTINGS, memory: false } }, 120, plain).join(" "), /ram 128 MiB/);
+  assert.doesNotMatch(renderFooter({ ...view, settings: { ...DEFAULT_FOOTER_SETTINGS, memory: false } }, 120, plain).join(" "), /128 MiB/);
 });
 
 test("footer shows the session name, truncates it, and preserves narrow-screen priorities", () => {
@@ -46,11 +47,11 @@ test("footer shows the session name, truncates it, and preserves narrow-screen p
   assert.ok(wide[1]?.includes(name));
   const medium = renderFooter(named, 80, plain);
   assert.match(medium[1] ?? "", /A very long named session.*…/);
-  assert.match(medium[1] ?? "", /ctx 58%/);
+  assert.match(medium[1] ?? "", /58%/);
   const urgent = { ...named, roles: [{ id: "gareng", label: "GAR", name: "Gareng", state: "failed" as const }] };
   const compact = renderFooter(urgent, 40, plain);
   assert.match(compact[1] ?? "", /GAR ×/);
-  assert.match(compact[1] ?? "", /ctx 58%/);
+  assert.match(compact[1] ?? "", /58%/);
   assert.ok(compact.every((line) => visibleWidth(line) <= 40));
   const sanitized = renderFooter({ ...base, sessionName: "Work\n\x1b[31mred\x1b[0m" }, 80, plain);
   assert.match(sanitized[1] ?? "", /Work red/);
@@ -79,16 +80,16 @@ test("footer visibility toggles suppress fields and long CJK names and paths fit
     ...DEFAULT_FOOTER_SETTINGS, model: false, sessionName: false, cwd: false,
     cost: false, quota: false, roles: false, extras: false, branch: false, effort: false
   } }, 120, plain).join(" ");
-  assert.match(contextOnly, /ctx 58%/);
+  assert.match(contextOnly, /58%/);
   assert.doesNotMatch(contextOnly, /claude-sonnet|日本|project|\$1|ROL|advisor|git/);
   const narrow = renderFooter({ ...view, settings: { ...DEFAULT_FOOTER_SETTINGS, roles: false, extras: false } }, 24, plain).join(" ");
-  assert.match(narrow, /ctx 58%/);
+  assert.match(narrow, /58%/);
   assert.doesNotMatch(narrow, /ROL/);
   const branchOnly = renderFooter({ ...view, settings: {
     ...DEFAULT_FOOTER_SETTINGS, model: false, sessionName: false, cwd: false, context: false,
     cost: false, quota: false, roles: false, extras: false, effort: false
   } }, 80, plain).join(" ");
-  assert.match(branchOnly, /git feature\/testing/);
+  assert.match(branchOnly, /feature\/testing/);
 });
 
 test("footer omits empty jar branding and colorizes every live effort", () => {
@@ -99,10 +100,10 @@ test("footer omits empty jar branding and colorizes every live effort", () => {
   for (const [level, color] of Object.entries(palette)) {
     const used: string[] = [];
     const styled = renderFooter({ ...base, effort: level as FooterView["effort"] }, 80, {
-      fg: (key, text) => { if (text === level) used.push(key); return text; }
+      fg: (key, text) => { if (text.includes(level)) used.push(key); return text; }
     }).join(" ");
     assert.deepEqual(used, [color]);
-    assert.match(styled, new RegExp(`claude-sonnet · ${level}`));
+    assert.match(styled, /claude-sonnet/);
     assert.doesNotMatch(styled, /\beffort\b/);
     assert.doesNotMatch(styled, /\bjar claude-sonnet/);
   }
@@ -110,10 +111,10 @@ test("footer omits empty jar branding and colorizes every live effort", () => {
     { id: "x", name: "X", label: "ERR", state: "failed" }
   ] }, 40, plain).join(" ");
   assert.match(narrow, /ERR ×/);
-  assert.match(narrow, /ctx 58%/);
+  assert.match(narrow, /58%/);
   for (const width of [16, 24, 32, 40, 80]) {
     const line = renderFooter({ ...base, effort: "high" }, width, plain).join(" ");
-    assert.doesNotMatch(line, /·\s+(?:│|ctx|$)/, `${width}: no orphaned separator`);
+    assert.doesNotMatch(line, /·\s+(?:│|$)/, `${width}: no orphaned separator`);
     assert.ok(renderFooter({ ...base, effort: "high" }, width, plain).every((row) => visibleWidth(row) <= width));
   }
   const effortOnly = renderFooter({ ...base, effort: "high", settings: {
@@ -125,6 +126,44 @@ test("footer omits empty jar branding and colorizes every live effort", () => {
     ...DEFAULT_FOOTER_SETTINGS, effort: false
   } }, 80, plain).join(" ");
   assert.doesNotMatch(modelOnly, /· high|\beffort\b/);
+});
+
+test("footer activity rows and session name expose accurate click cells across icon sets", () => {
+  const view: FooterView = {
+    ...base, cwd: "/project", sessionName: "Research",
+    activity: [
+      { kind: "subagent", id: "delegate-1", name: "Explorer", state: "running", detail: "grep src", stats: "4 tools · 8s" },
+      { kind: "shell", id: "s1", name: "dev server", state: "running", detail: "npm run dev" },
+      { kind: "subagent", id: "delegate-2", name: "Reviewer", state: "done", detail: "reviewed" },
+      { kind: "shell", id: "s2", name: "lint", state: "done" }
+    ]
+  };
+  try {
+    for (const set of ["unicode", "nerd", "ascii"] as const) {
+      setIconSet(set);
+      const { lines, hits } = renderFooterLayout(view, 120, plain);
+      assert.ok(lines.every((line) => visibleWidth(line) === 120));
+      const session = hits.find((hit) => hit.target.kind === "session");
+      assert.ok(session);
+      assert.match(sliceByColumn(lines[session.y]!, session.x0, session.x1), /Research/);
+      const agent = hits.find((hit) => hit.target.kind === "subagent");
+      assert.ok(agent);
+      assert.match(sliceByColumn(lines[agent.y]!, agent.x0, agent.x1), /Explorer/);
+      assert.ok(hits.some((hit) => hit.target.kind === "shell" && hit.target.id === "s1"));
+      assert.ok(hits.some((hit) => hit.target.kind === "activity"), "overflow opens the whole activity view");
+      assert.ok(visibleWidth(icon("context")) <= 3);
+      const narrow = renderFooterLayout(view, 40, plain);
+      assert.ok(narrow.hits.some((hit) => hit.target.kind === "activity"), "narrow footer opens the activity view");
+      assert.ok(narrow.lines.every((line) => visibleWidth(line) <= 40));
+    }
+  } finally { setIconSet("unicode"); }
+});
+
+test("an unnamed session still has a clickable session picker entry", () => {
+  const { lines, hits } = renderFooterLayout({ ...base, cwd: "/project" }, 120, plain);
+  const session = hits.find((hit) => hit.target.kind === "session");
+  assert.ok(session);
+  assert.match(sliceByColumn(lines[session.y]!, session.x0, session.x1), /sessions/);
 });
 
 test("status contract rejects stale, malformed and unsafe input without inventing live roles", () => {
@@ -144,6 +183,15 @@ test("status contract rejects stale, malformed and unsafe input without inventin
   const expiredDone = new Map([["pi-jar.role.gareng", JSON.stringify({ name: "Gareng", state: "done", expiresAt: now - 1 })]]);
   assert.deepEqual(collectStatuses(expiredDone, now).roles, []);
   assert.deepEqual(collectStatuses(expiredDone, now).extras, ["gareng: unavailable"]);
+});
+
+test("SoL-Pi savings are not repeated in pi-jar status while other publishers remain visible", () => {
+  const statuses = collectStatuses(new Map([
+    ["sol-pi-savings", "$0.24 saved"],
+    ["sol-pi-other", "tracked"],
+    ["advisor", "consulting"]
+  ]), Date.now());
+  assert.deepEqual(statuses.extras, ["advisor: consulting"]);
 });
 
 test("live teammate names and labels are publisher-controlled; generic demo stays synthetic", () => {

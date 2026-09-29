@@ -1,4 +1,4 @@
-import { getAgentDir, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -9,7 +9,7 @@ import { ComposerStyle } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
 import { promptText } from "../src/dialogs.ts";
-import { renderFooter } from "../src/footer.ts";
+import { renderFooterLayout, type ActivityState, type FooterActivity, type FooterHit, type FooterTarget } from "../src/footer.ts";
 import { openJarHistory } from "../src/history-ui.ts";
 import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
 import { GoalLoop } from "../src/goal-loop.ts";
@@ -27,19 +27,21 @@ import { PlanMode } from "../src/plan.ts";
 import { openRolesUi } from "../src/roles-ui.ts";
 import { registerSuggestions, SuggestionState } from "../src/suggest.ts";
 import { createDemoRoles } from "../src/roles.ts";
-import { ACTIVE_STATES, collectStatuses, type JarRole } from "../src/status.ts";
+import { ACTIVE_STATES, cleanText, collectStatuses, type JarRole } from "../src/status.ts";
 import { manageTasks } from "../src/tasks-ui.ts";
 import { registerTaskTool, todoRow } from "../src/task-tool.ts";
 import { TASK_ENTRY, TodoStore } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
 import { ChangeTracker } from "../src/changes.ts";
-import { registerDelegate } from "../src/delegate.ts";
+import { DelegateRegistry, registerDelegate, type DelegateRun } from "../src/delegate.ts";
+import { openActivityView, type ActivityTarget } from "../src/activity-view.ts";
+import { ICON_SETS, setIconSet, withIcon } from "../src/icons.ts";
 import { collectPrompts, openPromptSearch } from "../src/prompt-search.ts";
-import { ago, recentSessions, type RecentSession } from "../src/session-gallery.ts";
+import { ago, recentSessions, sessionDetails, type RecentSession } from "../src/session-gallery.ts";
 import { clearSessionBranchCache, sessionBranch } from "../src/session-branch.ts";
 import { registerChangeReview } from "../src/diff-view.ts";
-import { openShellsView, registerShells, SHELL_MESSAGE, shellEventMessage, ShellManager, type ShellEvent } from "../src/shells.ts";
+import { registerShells, SHELL_MESSAGE, shellEventMessage, ShellManager, type ShellEvent, type ShellJob } from "../src/shells.ts";
 import { hopefulWelcomeMessage, welcomeHit, welcomeLines, type WelcomeAction } from "../src/welcome.ts";
 
 const WELCOME_KEY = "pi-jar.welcome";
@@ -50,6 +52,8 @@ const VERSION = (() => {
 /** Ignore the click Pi may synthesize right after a press we already acted on. */
 const WELCOME_CLICK_DEDUPE_MS = 400;
 const LARGE_SESSION_ENTRIES = 800;
+/** Entries Pi writes when a fresh session starts; a branch holding only these has no transcript yet. */
+const SESSION_SETUP_ENTRIES = new Set(["thinking_level_change", "model_change", "session_info"]);
 export default function piJar(pi: ExtensionAPI): void {
   installCompactBuiltinTools(pi);
   let demo = false;
@@ -131,12 +135,71 @@ export default function piJar(pi: ExtensionAPI): void {
         { triggerTurn: true, deliverAs: "followUp" });
     } catch (error) { console.error("pi-jar: could not deliver shell event", error); }
   };
-  /** Footer indicators owned by pi-jar. */
-  const footerChips = () => {
-    const running = shells?.running() ?? 0;
-    return [...(changeCount ? [`± ${changeCount} file${changeCount === 1 ? "" : "s"} · /diff`] : []),
-      ...(running ? [`⚙ ${running} shell${running === 1 ? "" : "s"}`] : [])];
+  /** Footer indicators owned by pi-jar; live subagents and shells get their own rows. */
+  const footerChips = () => changeCount ? [withIcon("changes", `${changeCount} file${changeCount === 1 ? "" : "s"} · /diff`)] : [];
+  const subagents = new DelegateRegistry();
+  subagents.subscribe(() => footerTui?.requestRender());
+  /** Finished work stays visible briefly so a quick run is not a flicker. */
+  const ACTIVITY_LINGER_MS = 5000;
+  const subagentState = (run: DelegateRun): ActivityState => run.state === "working" ? "running" : run.state === "queued" ? "queued"
+    : run.state === "done" ? "done" : run.error === "stopped" ? "stopped" : "failed";
+  const shellActivityState = (job: Omit<ShellJob, "lines">): ActivityState => job.status === "running" ? "running"
+    : job.status === "killed" ? "stopped" : job.status === "exited" && job.exitCode === 0 ? "done" : "failed";
+  const seconds = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; };
+  const footerActivity = (now: number): FooterActivity[] => {
+    const rows: FooterActivity[] = [];
+    for (const { key, run } of subagents.records()) {
+      if (run.endedAt && now - run.endedAt > ACTIVITY_LINGER_MS) continue;
+      rows.push({ kind: "subagent", id: key, name: run.name, state: subagentState(run),
+        detail: run.error ?? run.activity ?? cleanText(run.task, 120),
+        stats: [run.tools ? `${run.tools} tools` : "", run.startedAt ? seconds((run.endedAt ?? now) - run.startedAt) : ""].filter(Boolean).join(" · ") });
+    }
+    for (const job of shells?.summaries() ?? []) {
+      if (job.endedAt && now - job.endedAt > ACTIVITY_LINGER_MS) continue;
+      // Shell output does not repaint the footer, so show stable facts rather than a stale clock.
+      rows.push({ kind: "shell", id: job.id, name: `${job.id} ${job.name}`, state: shellActivityState(job), detail: job.command,
+        ...(job.watch ? { stats: `watch /${cleanText(job.watch, 20)}/` + (job.matched ? " ✓" : "") } : {}) });
+    }
+    return rows;
   };
+  let overlayOpen = false;
+  /** Subagents, shells and other extensions' roles in one live split view. */
+  const openActivity = async (ctx: ExtensionContext, initial?: ActivityTarget) => {
+    if (!ctx.hasUI || ctx.mode !== "tui" || overlayOpen) return;
+    overlayOpen = true;
+    try {
+      await openActivityView(ctx, {
+        subagents, ...(shells ? { shells } : {}),
+        roles: () => collectStatuses(welcomeStatuses(), Date.now()).roles.filter((role) => !role.id.startsWith("delegate-"))
+          .map((role) => ({ id: role.id, name: role.name, state: role.state, ...(role.task ? { task: role.task } : {}) }))
+      }, initial);
+    } finally { overlayOpen = false; }
+  };
+  /** Searchable project sessions with a details pane; Enter resumes the selected one. */
+  const openSessions = async (ctx: ExtensionContext | ExtensionCommandContext, query = "") => {
+    if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify("Session search requires the interactive TUI", "warning"); return; }
+    if (overlayOpen) return;
+    let sessions;
+    try { sessions = (await SessionManager.list(ctx.cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime()); }
+    catch (error) { ctx.ui.notify("Could not search sessions: " + String(error), "error"); return; }
+    if (!sessions.length) { ctx.ui.notify("No sessions found for this project", "info"); return; }
+    overlayOpen = true;
+    let selected: string | undefined;
+    try { selected = await pickSession(ctx, sessions, query, (session) => sessionDetails(session.path)); }
+    finally { overlayOpen = false; }
+    if (!selected || selected === ctx.sessionManager.getSessionFile()) return;
+    if (!("switchSession" in ctx)) {
+      // Clicks and shortcuts get a plain context; switching needs a command, so stage it.
+      ctx.ui.setEditorText(`/jar resume ${selected}`);
+      ctx.ui.notify("Press Enter to resume that session", "info");
+      return;
+    }
+    // Never access the old command context after a successful switch.
+    const result = await ctx.switchSession(selected);
+    if (result.cancelled) ctx.ui.notify("Session switch cancelled", "info");
+  };
+  const openFooterTarget = (ctx: ExtensionContext, target: FooterTarget) => target.kind === "session" ? openSessions(ctx)
+    : openActivity(ctx, target.kind === "activity" ? undefined : target);
   registerAskTool(pi);
   const modelRoles = new ModelRoleManager(pi);
   const sideUsage = new SideUsage();
@@ -144,7 +207,7 @@ export default function piJar(pi: ExtensionAPI): void {
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
   modelRoles.register((ctx) => openRolesUi(ctx, modelRoles));
-  registerDelegate(pi, modelRoles);
+  registerDelegate(pi, modelRoles, subagents);
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
   planMode.register();
   const goalLoop = new GoalLoop(pi, {
@@ -360,6 +423,8 @@ export default function piJar(pi: ExtensionAPI): void {
         let context = "ctx ?";
         let contextSampledAt = 0;
         let disposed = false;
+        let hits: FooterHit[] = [];
+        let pressed: { target: FooterTarget; at: number } | undefined;
         const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
         const dispose = () => {
           if (disposed) return;
@@ -374,12 +439,26 @@ export default function piJar(pi: ExtensionAPI): void {
         return {
           dispose,
           invalidate() {},
+          handleMouse(event: TuiMouseEvent) {
+            if (event.button !== "left") return;
+            const hit = hits.find((item) => item.y === event.y && event.x >= item.x0 && event.x < item.x1);
+            if (!hit) return;
+            if (event.type !== "press" && event.type !== "click") return { handled: true };
+            // Act on press (click synthesis is not guaranteed through multiplexers); drop the echo click.
+            const now = Date.now();
+            const same = pressed && JSON.stringify(pressed.target) === JSON.stringify(hit.target);
+            if (event.type === "click" && same && now - pressed!.at < WELCOME_CLICK_DEDUPE_MS) return { handled: true };
+            pressed = { target: hit.target, at: now };
+            queueMicrotask(() => { void openFooterTarget(ctx, hit.target).catch((error) => ctx.ui.notify("pi-jar: " + String(error), "error")); });
+            return { handled: true, capture: event.type === "press" };
+          },
           render(width: number): string[] {
             try {
               const now = Date.now();
               const statuses = footerData.getExtensionStatuses();
               const live = collectStatuses(statuses, now);
-              const roles: JarRole[] = demo ? createDemoRoles() : live.roles;
+              // jar_delegate runs get their own activity rows; other extensions' roles stay as chips.
+              const roles: JarRole[] = demo ? createDemoRoles() : live.roles.filter((role) => !role.id.startsWith("delegate-"));
               const nearest = demo ? undefined : roles.reduce<number | undefined>((min, role) =>
                 role.expiresAt != null ? Math.min(min ?? Infinity, role.expiresAt) : min, undefined);
               if (nearest !== expiryAt) {
@@ -406,15 +485,18 @@ export default function piJar(pi: ExtensionAPI): void {
                 memorySampledAt = now;
               }
               const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, now) : undefined;
-              return renderFooter({
+              const layout = renderFooterLayout({
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: ctx.sessionManager?.getSessionName?.(),
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
-                context, goal: goalLoop.progress(), chips: footerChips(),
+                context, goal: goalLoop.progress(), chips: footerChips(), activity: footerActivity(now),
                 memory, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
+              hits = layout.hits;
+              return layout.lines;
             } catch {
+              hits = [];
               if (expiryTimer) clearTimeout(expiryTimer);
               expiryTimer = undefined;
               expiryAt = undefined;
@@ -438,6 +520,7 @@ export default function piJar(pi: ExtensionAPI): void {
       return;
     }
     visualSettings = next;
+    setIconSet(next.icons);
     enabled = next.ui;
     animations = next.animations;
     if (footerSettings.quota && !next.footer.quota) quotaCache?.stop();
@@ -492,6 +575,7 @@ export default function piJar(pi: ExtensionAPI): void {
     sideUsage.clear();
     migrateLegacySettings(getAgentDir());
     visualSettings = loadVisualSettings(getAgentDir());
+    setIconSet(visualSettings.icons);
     animations = visualSettings.animations;
     enabled = visualSettings.ui;
     footerSettings = visualSettings.footer;
@@ -504,6 +588,7 @@ export default function piJar(pi: ExtensionAPI): void {
     changes = new ChangeTracker(() => ctx.cwd);
     changeCount = 0;
     shells?.dispose();
+    subagents.clear();
     shells = new ShellManager(onShellEvent);
     shells.onChange = () => footerTui?.requestRender();
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
@@ -538,7 +623,10 @@ export default function piJar(pi: ExtensionAPI): void {
     }
     // Resumed sessions already have a transcript to paint. Rebuilding the animated welcome and
     // scanning other session files competes with that expensive initial render for no real benefit.
-    if (branch.length === 0) showWelcome(ctx);
+    // A fresh session is not empty: Pi records the startup thinking level/model as entries.
+    const resumed = branch.some((entry) => !(typeof entry === "object" && entry !== null && "type" in entry
+      && typeof entry.type === "string" && SESSION_SETUP_ENTRIES.has(entry.type)));
+    if (!resumed) showWelcome(ctx);
   });
   // Any real prompt dismisses the welcome. Slash commands bypass `input`, so `agent_start` covers them.
   const dismissWelcome = (ctx: ExtensionContext) => {
@@ -602,6 +690,7 @@ export default function piJar(pi: ExtensionAPI): void {
     changeCount = 0;
     shells?.dispose();
     shells = undefined;
+    subagents.clear();
     goals = undefined;
     disposeFooter?.();
     disposeFooter = undefined;
@@ -633,6 +722,10 @@ export default function piJar(pi: ExtensionAPI): void {
     description: "Cycle pi-jar model roles",
     handler: async (ctx) => { await modelRoles.cycle(ctx); footerTui?.requestRender(); }
   });
+  pi.registerShortcut?.(Key.ctrlAlt("a"), {
+    description: "Subagents and background shells (pi-jar)",
+    handler: async (ctx) => { await openActivity(ctx); }
+  });
   pi.registerShortcut?.(Key.ctrlAlt("s"), {
     description: "Open pi-jar settings",
     handler: async (ctx) => {
@@ -656,25 +749,24 @@ export default function piJar(pi: ExtensionAPI): void {
       }
       // `/jar resume` without a number opens the same searchable picker.
       if (command === "sessions" || command.startsWith("sessions ") || command === "resume") {
-        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify("Session search requires the interactive TUI", "warning"); return; }
-        let sessions;
-        try { sessions = (await SessionManager.list(ctx.cwd)).sort((a, b) => b.modified.getTime() - a.modified.getTime()); }
-        catch (error) { ctx.ui.notify("Could not search sessions: " + String(error), "error"); return; }
-        if (!sessions.length) { ctx.ui.notify("No sessions found for this project", "info"); return; }
-        const selected = await pickSession(ctx, sessions, command === "resume" ? "" : args.trim().slice(8).trim());
-        if (selected && selected !== ctx.sessionManager.getSessionFile()) {
-          // Never access the old command context after a successful switch.
-          const result = await ctx.switchSession(selected);
-          if (result.cancelled) ctx.ui.notify("Session switch cancelled", "info");
-        }
+        await openSessions(ctx, command === "resume" ? "" : args.trim().slice(8).trim());
         return;
       }
       if (command.startsWith("resume ")) {
-        const index = Number(command.slice(7).trim());
+        const arg = args.trim().slice(7).trim();
+        const index = Number(arg);
         let recent = welcomeRecent;
-        try { if (!recent.length) recent = await loadRecent(ctx); } catch (error) { ctx.ui.notify("Could not list sessions: " + String(error), "error"); return; }
-        const target = Number.isInteger(index) && index >= 1 ? recent[index - 1] : undefined;
-        if (!target) { ctx.ui.notify(`No recent session ${command.slice(7).trim()}; try /jar sessions`, "warning"); return; }
+        let target: { path: string } | undefined;
+        try {
+          if (arg.endsWith(".jsonl")) {
+            // Clicks stage a path in the editor; restrict it to Pi's sessions for this project.
+            target = (await SessionManager.list(ctx.cwd)).find((session) => session.path === arg);
+          } else {
+            if (!recent.length) recent = await loadRecent(ctx);
+            target = Number.isInteger(index) && index >= 1 ? recent[index - 1] : undefined;
+          }
+        } catch (error) { ctx.ui.notify("Could not list sessions: " + String(error), "error"); return; }
+        if (!target) { ctx.ui.notify(`No recent session ${arg}; try /jar sessions`, "warning"); return; }
         const result = await ctx.switchSession(target.path);
         if (result.cancelled) ctx.ui.notify("Session switch cancelled", "info");
         return;
@@ -769,10 +861,23 @@ export default function piJar(pi: ExtensionAPI): void {
       }
       if (command === "welcome") { showWelcome(ctx); return; }
       if (command === "commit" || command.startsWith("commit ")) { await jarCommit(pi, ctx, modelRoles, sideUsage, args.trim().slice(6).trim()); return; }
-      if (command === "shells") {
-        if (!shells) return;
-        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify(shells.summaries().map((job) => `${job.id} ${job.name} ${job.status}`).join("\n") || "No background shells", "info"); return; }
-        await openShellsView(ctx, shells);
+      if (command === "shells" || command === "activity" || command === "agents") {
+        if (!ctx.hasUI || ctx.mode !== "tui") {
+          const lines = [...subagents.records().map(({ run }) => `${run.name} ${run.state}`), ...(shells?.summaries() ?? []).map((job) => `${job.id} ${job.name} ${job.status}`)];
+          ctx.ui.notify(lines.join("\n") || "Nothing running", "info");
+          return;
+        }
+        const shell = command === "shells" ? shells?.summaries().find((job) => job.status === "running") ?? shells?.summaries()[0] : undefined;
+        await openActivity(ctx, shell ? { kind: "shell", id: shell.id } : undefined);
+        return;
+      }
+      if (command === "icons" || command.startsWith("icons ")) {
+        const requested = command.slice(5).trim();
+        const next = ICON_SETS.find((set) => set === requested)
+          ?? (requested ? undefined : ICON_SETS[(ICON_SETS.indexOf(visualSettings.icons) + 1) % ICON_SETS.length]);
+        if (!next) { ctx.ui.notify(`Icons: ${ICON_SETS.join(" | ")} (nerd needs a Nerd Font)`, "error"); return; }
+        applyVisualSettings({ ...visualSettings, icons: next }, ctx);
+        ctx.ui.notify(`pi-jar icons: ${next}`, "info");
         return;
       }
       if (command === "demo") demo = true;
@@ -784,7 +889,7 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "quota on" && quotaCache) { quotaCache.enabled = true; quotaDisabledByUser = false; }
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaDisabledByUser = true; quotaCache.stop(); }
       else {
-        ctx.ui.notify("Usage: /jar [status|settings|commit [note]|sessions [search]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        ctx.ui.notify("Usage: /jar [status|settings|activity|shells|sessions [search]|icons [unicode|nerd|ascii]|commit [note]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
       }
       if (!["animations on", "animations off", "ui on", "ui off"].includes(command)) installUi(ctx);

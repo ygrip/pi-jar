@@ -53,9 +53,11 @@ export async function openPromptSearch(ctx: ExtensionContext, prompts: readonly 
     let query = "";
     let selected = 0;
     let first = 0;
-    let visible: PastPrompt[] = prompts.slice();
+    // pi-tui's fuzzyFilter takes a mutable array; copy once per overlay, not per keystroke.
+    const pool: PastPrompt[] = prompts.slice();
+    let visible: PastPrompt[] = pool;
     const rows = 10;
-    const filter = () => { visible = query ? fuzzyFilter(prompts, query, (item) => item.text) : prompts.slice(); selected = 0; first = 0; };
+    const filter = () => { visible = query ? fuzzyFilter(pool, query, (item) => item.text) : pool; selected = 0; first = 0; };
     return {
       invalidate() {},
       handleInput(data: string) {
