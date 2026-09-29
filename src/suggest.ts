@@ -31,7 +31,7 @@ export function registerSuggestions(pi: ExtensionAPI, state: SuggestionState, op
   pi.registerTool?.({
     name: SUGGEST_TOOL,
     label: "suggest",
-    description: "Offer the user one short next prompt. It appears as dimmed ghost text in their input box; Tab accepts it for editing. Call it once, last, when you finish a request.",
+    description: "Optionally offer one useful next prompt as ghost text in the input box; Tab accepts it for editing.",
     promptSnippet: "Optionally use jar_suggest at the end when one genuinely useful next prompt would help the user continue.",
     promptGuidelines: [
       "jar_suggest is best-effort, not mandatory. Use it only when there is one clear next action worth surfacing; skip it for routine completions.",
@@ -65,9 +65,6 @@ export function registerSuggestions(pi: ExtensionAPI, state: SuggestionState, op
   pi.on("agent_start", () => { state.clear(); });
   pi.on("session_start", () => { state.clear(); });
   pi.on("session_tree", () => { state.clear(); });
-  // Do not force a second provider turn merely to manufacture ghost text. Older pi-jar versions
-  // appended a hidden reminder here, which added one session entry and sometimes another model call
-  // to every request. Suggestions are intentionally best-effort now.
-  pi.on("agent_before_settle", () => undefined);
+  // No settle hook: suggestions must not add a provider turn or a hidden session entry.
   return { sync };
 }
