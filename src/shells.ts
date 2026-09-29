@@ -124,13 +124,13 @@ export class ShellManager {
     }
     if (entry.pattern && !job.matched && entry.pattern.test(line)) {
       job.matched = line;
-      this.onEvent({ kind: "match", job: { ...job, lines: [...job.lines] } });
+      this.onEvent({ kind: "match", job: { ...job, lines: job.lines.slice(-20) } });
     }
   }
 
   private finish(entry: { job: ShellJob; timer?: ReturnType<typeof setTimeout> }): void {
     if (entry.timer) clearTimeout(entry.timer);
-    this.onEvent({ kind: "exit", job: { ...entry.job, lines: [...entry.job.lines] } });
+    this.onEvent({ kind: "exit", job: { ...entry.job, lines: entry.job.lines.slice(-20) } });
     this.onChange?.();
   }
 
@@ -138,8 +138,10 @@ export class ShellManager {
   output(id: string, count = 40): string[] {
     const entry = this.jobs.get(id);
     if (!entry) throw new Error("no shell " + id);
-    const lines = [...entry.job.lines, ...(entry.partial ? [entry.partial] : [])];
-    return lines.slice(-Math.max(1, Math.min(400, Math.floor(count))));
+    const limit = Math.max(1, Math.min(400, Math.floor(count)));
+    if (!entry.partial) return entry.job.lines.slice(-limit);
+    if (limit === 1) return [entry.partial];
+    return [...entry.job.lines.slice(-(limit - 1)), entry.partial];
   }
 
   kill(id: string): boolean {
