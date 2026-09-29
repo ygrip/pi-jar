@@ -27,7 +27,10 @@ export function publishedQuota(statuses: ReadonlyMap<string, string>, provider: 
   const raw = statuses.get(QUOTA_PREFIX + provider);
   if (typeof raw !== "string" || raw.length > 2048) return undefined;
   const cached = publishedCache.get(provider);
-  if (cached?.raw === raw) return cached.expiresAt != null && cached.value && cached.expiresAt > now && cached.expiresAt <= now + QUOTA_TTL_MS ? cached.value : undefined;
+  if (cached?.raw === raw) {
+    const { expiresAt, value } = cached;
+    return value && expiresAt != null && expiresAt > now && expiresAt <= now + QUOTA_TTL_MS ? value : undefined;
+  }
   try {
     const data: unknown = JSON.parse(raw);
     if (!data || typeof data !== "object") { publishedCache.set(provider, { raw }); return undefined; }
