@@ -11,7 +11,10 @@ export const SHELL_MESSAGE = "pi-jar.shell";
 export const MAX_RUNNING_SHELLS = 8;
 const MAX_KEPT_SHELLS = 20;
 const MAX_LINES = 2000;
+const LINE_PRUNE_BATCH = 128;
 const MAX_LINE_CHARS = 2000;
+const MAX_RETAINED_CHARS = 1024 * 1024;
+const MAX_TOOL_OUTPUT_CHARS = 32 * 1024;
 const KILL_GRACE_MS = 3000;
 
 export type ShellStatus = "running" | "exited" | "killed" | "failed";
@@ -44,14 +47,25 @@ const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 export class ShellManager {
   private jobs = new Map<string, { job: ShellJob; child?: ChildProcess; pattern?: RegExp; partial: string; timer?: ReturnType<typeof setTimeout> }>();
   private next = 1;
+  private lineChars = new Map<string, number>();
   private readonly onEvent: (event: ShellEvent) => void;
   private readonly spawnShell: typeof spawn;
   onChange?: () => void;
   constructor(onEvent: (event: ShellEvent) => void, spawnShell: typeof spawn = spawn) { this.onEvent = onEvent; this.spawnShell = spawnShell; }
 
   list(): ShellJob[] { return [...this.jobs.values()].map(({ job }) => ({ ...job, lines: [...job.lines] })); }
+  summaries(): Array<Omit<ShellJob, "lines">> {
+    return [...this.jobs.values()].map(({ job }) => {
+      const { lines: _lines, ...summary } = job;
+      return { ...summary };
+    });
+  }
   get(id: string): ShellJob | undefined { const entry = this.jobs.get(id); return entry && { ...entry.job, lines: [...entry.job.lines] }; }
-  running(): number { return [...this.jobs.values()].filter(({ job }) => job.status === "running").length; }
+  running(): number {
+    let count = 0;
+    for (const { job } of this.jobs.values()) if (job.status === "running") count++;
+    return count;
+  }
 
   start(options: StartOptions): ShellJob {
     const command = options.command.trim();
@@ -68,6 +82,7 @@ export class ShellManager {
       notify: options.notify ?? true, lines: [], dropped: 0, ...(options.watch ? { watch: options.watch } : {}) };
     const entry: { job: ShellJob; child?: ChildProcess; pattern?: RegExp; partial: string; timer?: ReturnType<typeof setTimeout> } = { job, partial: "", ...(pattern ? { pattern } : {}) };
     this.jobs.set(id, entry);
+    this.lineChars.set(id, 0);
     // Own process group so kill() stops the whole tree (dev servers spawn children).
     const child = this.spawnShell("/bin/sh", ["-c", command], { cwd: options.cwd, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], env: process.env });
     entry.child = child;
@@ -105,16 +120,26 @@ export class ShellManager {
     const line = raw.replace(ANSI, "").replace(/\r/g, "").slice(0, MAX_LINE_CHARS);
     const { job } = entry;
     job.lines.push(line);
-    if (job.lines.length > MAX_LINES) { job.lines.splice(0, job.lines.length - MAX_LINES); job.dropped++; }
+    this.lineChars.set(job.id, (this.lineChars.get(job.id) ?? 0) + line.length);
+    // Bound both line count and retained characters. A shell that prints very wide lines should
+    // not quietly reserve several MiB forever just because it has not reached MAX_LINES yet.
+    while (job.lines.length > MAX_LINES + LINE_PRUNE_BATCH || (this.lineChars.get(job.id) ?? 0) > MAX_RETAINED_CHARS) {
+      const removed = job.lines.splice(0, Math.min(LINE_PRUNE_BATCH, job.lines.length));
+      let removedChars = 0;
+      for (const item of removed) removedChars += item.length;
+      this.lineChars.set(job.id, Math.max(0, (this.lineChars.get(job.id) ?? 0) - removedChars));
+      job.dropped += removed.length;
+      if (!removed.length) break;
+    }
     if (entry.pattern && !job.matched && entry.pattern.test(line)) {
       job.matched = line;
-      this.onEvent({ kind: "match", job: { ...job, lines: [...job.lines] } });
+      this.onEvent({ kind: "match", job: { ...job, lines: job.lines.slice(-20) } });
     }
   }
 
   private finish(entry: { job: ShellJob; timer?: ReturnType<typeof setTimeout> }): void {
     if (entry.timer) clearTimeout(entry.timer);
-    this.onEvent({ kind: "exit", job: { ...entry.job, lines: [...entry.job.lines] } });
+    this.onEvent({ kind: "exit", job: { ...entry.job, lines: entry.job.lines.slice(-20) } });
     this.onChange?.();
   }
 
@@ -122,8 +147,10 @@ export class ShellManager {
   output(id: string, count = 40): string[] {
     const entry = this.jobs.get(id);
     if (!entry) throw new Error("no shell " + id);
-    const lines = [...entry.job.lines, ...(entry.partial ? [entry.partial] : [])];
-    return lines.slice(-Math.max(1, Math.min(400, Math.floor(count))));
+    const limit = Math.max(1, Math.min(400, Math.floor(count)));
+    if (!entry.partial) return entry.job.lines.slice(-limit);
+    if (limit === 1) return [entry.partial];
+    return [...entry.job.lines.slice(-(limit - 1)), entry.partial];
   }
 
   kill(id: string): boolean {
@@ -147,22 +174,41 @@ export class ShellManager {
   /** Forget finished jobs beyond the retention limit (oldest first). */
   private prune(): void {
     const finished = [...this.jobs.values()].filter(({ job }) => job.status !== "running");
-    for (const { job } of finished.slice(0, Math.max(0, this.jobs.size - MAX_KEPT_SHELLS + 1))) this.jobs.delete(job.id);
+    for (const { job } of finished.slice(0, Math.max(0, this.jobs.size - MAX_KEPT_SHELLS + 1))) {
+      this.jobs.delete(job.id);
+      this.lineChars.delete(job.id);
+    }
   }
 
   dispose(): void {
     for (const id of this.jobs.keys()) { try { this.kill(id); } catch { /* already gone */ } }
     this.jobs.clear();
+    this.lineChars.clear();
   }
 }
 
-const elapsed = (job: ShellJob, now = Date.now()) => {
+type ShellMeta = Omit<ShellJob, "lines">;
+const elapsed = (job: ShellMeta | ShellJob, now = Date.now()) => {
   const seconds = Math.max(0, Math.round(((job.endedAt ?? now) - job.startedAt) / 1000));
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 };
-export const shellState = (job: ShellJob) => job.status === "running" ? "running"
+export const shellState = (job: ShellMeta | ShellJob) => job.status === "running" ? "running"
   : job.status === "exited" ? `exited ${job.exitCode ?? "?"}` : job.status === "failed" ? `failed: ${cleanText(job.error ?? "", 60)}` : "killed";
-const describe = (job: ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
+const describe = (job: ShellMeta | ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
+const boundedTail = (lines: readonly string[], limit = MAX_TOOL_OUTPUT_CHARS): string => {
+  let size = 0;
+  const kept: string[] = [];
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index]!;
+    const cost = line.length + (kept.length ? 1 : 0);
+    if (size + cost > limit) break;
+    kept.push(line);
+    size += cost;
+  }
+  kept.reverse();
+  const omitted = lines.length - kept.length;
+  return (omitted ? `… ${omitted} earlier line(s) omitted\n` : "") + kept.join("\n");
+};
 
 /** The message that wakes the agent when a watched shell matches or ends. */
 export function shellEventMessage(event: ShellEvent): string {
@@ -198,7 +244,9 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
     parameters: Parameters,
     async execute(_id, params, _signal, _update, ctx) {
       const manager = shells();
-      const reply = (text: string, jobs: ShellJob[] = manager?.list() ?? []) => ({ content: [{ type: "text" as const, text }], details: { jobs } });
+      const reply = (text: string) => ({ content: [{ type: "text" as const, text: text.slice(0, MAX_TOOL_OUTPUT_CHARS) }], details: {
+        jobs: (manager?.summaries() ?? []).map((job) => ({ id: job.id, name: job.name, status: job.status, pid: job.pid, exitCode: job.exitCode }))
+      } });
       if (!manager) return reply("Background shells are unavailable before a Pi session starts.");
       try {
         switch (params.action) {
@@ -210,14 +258,14 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
           case "output": {
             if (!params.id) return reply("output needs an id.");
             const lines = manager.output(params.id, params.lines ?? 40);
-            return reply(`${describe(manager.get(params.id)!)}\n${lines.length ? lines.join("\n") : "(no output yet)"}`);
+            return reply(`${describe(manager.get(params.id)!)}\n${lines.length ? boundedTail(lines) : "(no output yet)"}`);
           }
           case "kill":
             if (!params.id) return reply("kill needs an id.");
             return reply(manager.kill(params.id) ? `Stopping ${params.id}.` : `${params.id} is not running.`);
           default: {
-            const jobs = manager.list();
-            return reply(jobs.length ? jobs.map(describe).join("\n") : "No background shells.", jobs);
+            const jobs = manager.summaries();
+            return reply(jobs.length ? jobs.map(describe).join("\n") : "No background shells.");
           }
         }
       } catch (error) {
@@ -232,11 +280,18 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
       return new Text(text, 0, 0);
     },
     renderResult(result, { expanded }, theme) {
-      const text = result.content.map((part) => part.type === "text" ? part.text : "").join("\n");
-      const lines = text.split("\n");
-      const shown = expanded ? lines : lines.slice(0, 6);
+      const text = result.content.find((part) => part.type === "text")?.text ?? "";
+      if (expanded) {
+        const lines = text.split("\n");
+        return new Text(lines.map((line, index) => theme.fg(index ? "muted" : "accent", safeLine(line))).join("\n"), 0, 0);
+      }
+      // Historical shell cards are rebuilt on resume. Split only enough text to draw the collapsed
+      // card instead of counting every stored output line.
+      const sample = text.split("\n", 7);
+      const more = sample.length > 6;
+      const shown = sample.slice(0, 6);
       return new Text(shown.map((line, index) => theme.fg(index ? "muted" : "accent", safeLine(line))).join("\n")
-        + (shown.length < lines.length ? "\n" + theme.fg("dim", `… +${lines.length - shown.length} lines (expand)`) : ""), 0, 0);
+        + (more ? "\n" + theme.fg("dim", "… more lines (expand)") : ""), 0, 0);
     }
   });
 }
@@ -249,7 +304,7 @@ const SHELL_ACTIONS = [
 /** Overlay: shells on the left, the selected shell's live output on the right; k kills. */
 export async function openShellsView(ctx: ExtensionContext, manager: ShellManager): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
-  if (!manager.list().length) { ctx.ui.notify("pi-jar: no background shells (the agent starts them with jar_shell)", "info"); return; }
+  if (!manager.summaries().length) { ctx.ui.notify("pi-jar: no background shells (the agent starts them with jar_shell)", "info"); return; }
   await ctx.ui.custom<void>((tui, theme, _keys, done) => {
     let selected = 0;
     let follow = true;
@@ -259,14 +314,14 @@ export async function openShellsView(ctx: ExtensionContext, manager: ShellManage
     let layout = { top: 1, rows: 0, leftWidth: 0, bodyX: 2, footerTop: 0 };
     const fg = (color: string, text: string) => theme.fg(color as never, text);
     const previous = manager.onChange;
-    const timer = setInterval(() => tui.requestRender(), 500);
+    const timer = setInterval(() => tui.requestRender(), 1000);
     timer.unref?.();
     manager.onChange = () => { previous?.(); tui.requestRender(); };
     const close = () => { clearInterval(timer); manager.onChange = previous; done(); };
     const component = {
       invalidate() {},
       handleInput(data: string) {
-        const jobs = manager.list();
+        const jobs = manager.summaries();
         if (matchesKey(data, Key.escape) || data === "q") return close();
         if (matchesKey(data, Key.up) || data === "k") selected = Math.max(0, selected - 1);
         else if (matchesKey(data, Key.down) || data === "j") selected = Math.min(jobs.length - 1, selected + 1);
@@ -281,14 +336,14 @@ export async function openShellsView(ctx: ExtensionContext, manager: ShellManage
         if (event.type === "wheel" && event.wheelDelta) { follow = false; scroll = Math.max(0, scroll + Math.sign(event.wheelDelta) * 3); tui.requestRender(); return { handled: true }; }
         if (event.type !== "click" || event.button !== "left") return;
         if (event.y === 0 && event.x >= width - 3) { close(); return { handled: true }; }
-        if (row >= 0 && row < layout.rows && layout.leftWidth && event.x < layout.leftWidth + 3 && row < manager.list().length) { selected = row; follow = true; tui.requestRender(); return { handled: true, focus: true }; }
+        if (row >= 0 && row < layout.rows && layout.leftWidth && event.x < layout.leftWidth + 3 && row < manager.summaries().length) { selected = row; follow = true; tui.requestRender(); return { handled: true, focus: true }; }
         const action = SHELL_ACTIONS[event.y - layout.footerTop];
         if (action) { component.handleInput(action.key); return { handled: true }; }
       },
       render(available: number): string[] {
         width = Math.max(24, available);
         rows = contentRows(6 + SHELL_ACTIONS.length, 6);
-        const jobs = manager.list();
+        const jobs = manager.summaries();
         selected = Math.min(selected, Math.max(0, jobs.length - 1));
         const job = jobs[selected];
         const listWidth = sidebarWidth(width, 20, 34);

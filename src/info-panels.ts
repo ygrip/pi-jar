@@ -4,6 +4,7 @@ import { openPanel, type PanelTab } from "./panel.ts";
 import type { Quota } from "./quota.ts";
 import type { SideUsage } from "./side-model.ts";
 import { collectUsage, usageLines } from "./usage-view.ts";
+import { sessionBranch } from "./session-branch.ts";
 
 /** Pi's default compaction reserve, used when its settings cannot be read. */
 const DEFAULT_RESERVE = 16_384;
@@ -52,14 +53,25 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
   });
   pi.on("session_start", () => { parts = undefined; });
   const tabs = (ctx: ExtensionContext): PanelTab[] => {
-    const context = contextFor(pi, ctx, parts);
+    // These panels can scan a large branch/projection. Snapshot each expensive view once per
+    // panel open, lazily on first render, so scrolling/resizing does not repeat O(history) work.
+    let usage: ReturnType<typeof collectUsage> | undefined;
+    let context: ReturnType<typeof contextFor> | undefined;
     return [
-      { name: "Usage", render: (width, fg) => usageLines({
-        stats: collectUsage(ctx.sessionManager.getBranch() as never, deps.side.all()),
-        ...(ctx.model?.provider ? { provider: ctx.model.provider } : {}),
-        ...(deps.quota(ctx) ? { quota: deps.quota(ctx)! } : {}),
-        quotaEnabled: deps.quotaEnabled(), now: Date.now() }, width, fg) },
-      { name: "Context", render: (width, fg) => contextLines(context, width, fg) }
+      { name: "Usage", render: (width, fg) => {
+        usage ??= collectUsage(sessionBranch(ctx) as never, deps.side.all());
+        const quota = deps.quota(ctx);
+        return usageLines({
+          stats: usage,
+          ...(ctx.model?.provider ? { provider: ctx.model.provider } : {}),
+          ...(quota ? { quota } : {}),
+          quotaEnabled: deps.quotaEnabled(), now: Date.now()
+        }, width, fg);
+      } },
+      { name: "Context", render: (width, fg) => {
+        context ??= contextFor(pi, ctx, parts);
+        return contextLines(context, width, fg);
+      } }
     ];
   };
   const plain = (_color: string, text: string) => text;

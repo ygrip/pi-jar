@@ -1,12 +1,13 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { createHistorySnapshot, historyChunk, historyPage, safeHistoryText, type HistoryItem } from "./history.ts";
+import { sessionBranch } from "./session-branch.ts";
 
 /** Separate, read-only view. Pi's native transcript and session file are never modified. */
 export async function openJarHistory(ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
   // Capture the active branch ONCE on open. Paging and search operate on this snapshot.
-  const snapshot = createHistorySnapshot(ctx.sessionManager.getBranch());
+  const snapshot = createHistorySnapshot(sessionBranch(ctx) as ReturnType<typeof ctx.sessionManager.getBranch>);
   await ctx.ui.custom<void>((tui, theme, _keys, done) => {
     let current = historyPage(snapshot);
     let selected = Math.max(0, current.items.length - 1);

@@ -15,7 +15,9 @@ export const MAX_DELEGATES = 4;
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 const MAX_OUTPUT_CHARS = 12_000;
 const TIMEOUT_MS = 20 * 60_000;
-const STATUS_REFRESH_MS = 10_000;
+const STATUS_REFRESH_MS = 20_000;
+const LIVE_UPDATE_MS = 1000;
+const MAX_EVENT_TEXT = 16_000;
 
 export type DelegateState = "queued" | "working" | "done" | "failed";
 export interface DelegateRun {
@@ -56,9 +58,20 @@ export function delegateArgs(task: string, model: string | undefined, thinking: 
   return args;
 }
 
-const textOf = (message: { content?: unknown }) => Array.isArray(message.content)
-  ? message.content.filter((part: { type?: string }) => part?.type === "text").map((part: { text?: string }) => part.text ?? "").join("\n")
-  : typeof message.content === "string" ? message.content : "";
+const textOf = (message: { content?: unknown }, limit = MAX_EVENT_TEXT): string => {
+  if (typeof message.content === "string") return message.content.slice(0, limit);
+  if (!Array.isArray(message.content)) return "";
+  let out = "";
+  for (const part of message.content as Array<{ type?: string; text?: string }>) {
+    if (part?.type !== "text" || typeof part.text !== "string" || !part.text) continue;
+    const separator = out ? "\n" : "";
+    const room = limit - out.length - separator.length;
+    if (room <= 0) break;
+    out += separator + part.text.slice(0, room);
+    if (part.text.length > room) break;
+  }
+  return out;
+};
 
 /** Run one child Pi, feeding progress into `run` and calling `update` on every change. */
 export function runDelegate(run: DelegateRun, args: string[], cwd: string, signal: AbortSignal | undefined, update: () => void, spawnProcess: Spawn = spawn as Spawn): Promise<void> {
@@ -171,20 +184,36 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, spaw
           } catch { /* status is decoration */ }
         }
       };
-      const details = () => ({ runs: runs.map((run) => ({ ...run })), write });
-      const update = () => {
+      const details = (includeOutput = true) => ({ runs: runs.map((run) => includeOutput ? { ...run } : { ...run, output: "" }), write });
+      let updateTimer: ReturnType<typeof setTimeout> | undefined;
+      let lastUpdateAt = 0;
+      const emitUpdate = () => {
+        updateTimer = undefined;
+        lastUpdateAt = Date.now();
         publish();
-        onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}`).join("\n") }], details: details() });
+        onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}`).join("\n") }], details: details(false) });
+      };
+      const update = () => {
+        if (!onUpdate) { publish(); return; }
+        const wait = Math.max(0, LIVE_UPDATE_MS - (Date.now() - lastUpdateAt));
+        if (wait === 0) { if (updateTimer) { clearTimeout(updateTimer); updateTimer = undefined; } emitUpdate(); return; }
+        if (!updateTimer) {
+          updateTimer = setTimeout(emitUpdate, wait);
+          updateTimer.unref?.();
+        }
+      };
+      const flushUpdate = () => {
+        if (updateTimer) { clearTimeout(updateTimer); updateTimer = undefined; }
+        emitUpdate();
       };
       const refresh = setInterval(publish, STATUS_REFRESH_MS);
       refresh.unref?.();
       try {
-        update();
         await Promise.all(runs.map((run) => runDelegate(run, delegateArgs(run.task, run.model, thinking(run.role), write), ctx.cwd, signal, update, spawnProcess)));
       } finally {
         clearInterval(refresh);
         for (const run of runs) if (run.state !== "done") run.state = "failed";
-        publish();
+        flushUpdate();
       }
       const report = runs.map((run) => `## [${run.index}] ${run.name} (${run.role}${run.model ? " · " + run.model : ""}) — ${run.state}${run.error ? ": " + run.error : ""}\n${run.output || "(no report)"}`).join("\n\n");
       return { content: [{ type: "text", text: report }], details: details() };

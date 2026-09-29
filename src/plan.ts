@@ -9,6 +9,7 @@ import { type ModelRoleManager } from "./model-roles.ts";
 import { openPlanView } from "./plan-view.ts";
 import { extractApproachSteps, isSafePlanCommand, PLAN_TEMPLATE, planTextFromSteps, validatePlanDocument } from "./plan-utils.ts";
 import { cleanText } from "./status.ts";
+import { sessionBranch } from "./session-branch.ts";
 import { type TodoStore } from "./tasks.ts";
 
 export const PLAN_ENTRY = "pi-jar.plan";
@@ -135,6 +136,7 @@ export class PlanMode {
     try { this.ensureDirectory(ctx); }
     catch (error) { ctx.ui.notify("Plan mode unavailable: cannot create plan directory: " + (error as Error).message, "error"); return; }
     this.enabled = true;
+    this.contextDirty = true;
     this.pendingReview = false;
     this.reminders = 0;
     this.toolsBefore = this.pi.getActiveTools();
@@ -149,6 +151,7 @@ export class PlanMode {
   private async leave(ctx: ExtensionContext, persist = true): Promise<void> {
     const wasEnabled = this.enabled;
     this.enabled = false;
+    this.contextDirty = true;
     this.compacting = false;
     this.pendingReview = false;
     this.compactGeneration++;
@@ -293,14 +296,16 @@ export class PlanMode {
   }
 
   private restoreFrom(branch: readonly unknown[]): PlanState | undefined {
-    let state: PlanState | undefined;
-    for (const raw of branch) {
+    // Only the newest persisted plan state matters. Walk backward so resuming a long session
+    // does not inspect every historical transcript entry.
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const raw = branch[index];
       if (!raw || typeof raw !== "object") continue;
       const entry = raw as Record<string, unknown>;
       if (entry.type !== "custom" || entry.customType !== PLAN_ENTRY || !entry.data || typeof entry.data !== "object") continue;
       const data = entry.data as Record<string, unknown>;
       if ((data.v !== 1 && data.v !== 2) || typeof data.enabled !== "boolean" || !Array.isArray(data.steps)) continue;
-      state = {
+      return {
         v: 2, enabled: data.enabled,
         steps: data.steps.filter((item): item is string => typeof item === "string").map((item) => cleanText(item, 240)).filter(Boolean).slice(0, 50),
         text: typeof data.text === "string" ? safePlanText(data.text) : "",
@@ -308,7 +313,7 @@ export class PlanMode {
         ...(typeof data.title === "string" ? { title: cleanText(data.title, 120) } : {})
       };
     }
-    return state;
+    return undefined;
   }
 
   private async restore(branch: readonly unknown[], ctx: ExtensionContext): Promise<void> {
@@ -411,14 +416,34 @@ export class PlanMode {
 
     this.pi.on("before_agent_start", async () => {
       if (!this.enabled) return;
+      this.contextDirty = true;
       return { message: { customType: "pi-jar.plan-context", content: this.context(), display: false } };
     });
 
+    // Keep plan-only prompt messages bounded. When plan mode is active, retain only the newest
+    // context and newest reminder; when it is off, remove all stale plan prompt messages.
     this.pi.on("context", async (event) => {
-      if (this.enabled) return;
-      return { messages: event.messages.filter((raw) => {
-        const message = raw as { customType?: string };
-        return message.customType !== "pi-jar.plan-context" && message.customType !== "pi-jar.plan-reminder";
+      if (!this.contextDirty) return;
+      let latestContext = -1;
+      let latestReminder = -1;
+      let needsPrune = false;
+      for (let index = event.messages.length - 1; index >= 0; index--) {
+        const type = (event.messages[index] as { customType?: string }).customType;
+        if (type === "pi-jar.plan-context") {
+          if (!this.enabled || latestContext >= 0) needsPrune = true;
+          else latestContext = index;
+        } else if (type === "pi-jar.plan-reminder") {
+          if (!this.enabled || latestReminder >= 0) needsPrune = true;
+          else latestReminder = index;
+        }
+      }
+      this.contextDirty = false;
+      if (!needsPrune) return;
+      return { messages: event.messages.filter((raw, index) => {
+        const type = (raw as { customType?: string }).customType;
+        if (type === "pi-jar.plan-context") return this.enabled && index === latestContext;
+        if (type === "pi-jar.plan-reminder") return this.enabled && index === latestReminder;
+        return true;
       }) };
     });
 
@@ -434,6 +459,7 @@ export class PlanMode {
         return;
       }
       this.reminders++;
+      this.contextDirty = true;
       return {
         entries: [{ type: "custom_message", customType: "pi-jar.plan-reminder", display: false,
           content: `[PI-JAR PLAN MODE] You ended the turn without ${PLAN_SUBMIT_TOOL}. If the plan is ready, write it to the plan directory and call ${PLAN_SUBMIT_TOOL}. If you need a decision from the user, use jar_ask. Do not ask for approval in chat.` }],
@@ -453,8 +479,8 @@ export class PlanMode {
       if (this.enabled && this.pendingReview) await this.review(ctx);
     });
 
-    this.pi.on("session_start", async (_event, ctx) => { await this.restore(ctx.sessionManager.getBranch(), ctx); });
-    this.pi.on("session_tree", async (_event, ctx) => { await this.restore(ctx.sessionManager.getBranch(), ctx); });
+    this.pi.on("session_start", async (_event, ctx) => { this.contextDirty = true; await this.restore(sessionBranch(ctx), ctx); });
+    this.pi.on("session_tree", async (_event, ctx) => { this.contextDirty = true; await this.restore(sessionBranch(ctx), ctx); });
     this.pi.on("session_shutdown", async (_event, ctx) => { if (this.enabled) await this.leave(ctx, false); });
   }
 }

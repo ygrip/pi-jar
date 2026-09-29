@@ -38,6 +38,11 @@ test("goal state replays v1 entries and ignores malformed or foreign ones", () =
   ]);
   assert.equal(store.text(), "valid goal");
   assert.equal(store.current()?.status, "active");
+  store.restore([
+    entry({ v: 1, op: "set", text: "survives malformed checkpoint" }),
+    entry({ v: 2, op: "set", id: "bad id!", text: "invalid later set" })
+  ]);
+  assert.equal(store.text(), "survives malformed checkpoint");
   store.restore([entry({ v: 1, op: "set", text: "a" }), entry({ v: 1, op: "clear" })]);
   assert.equal(store.current(), undefined);
 });

@@ -14,18 +14,28 @@ export function filterSessions(sessions: readonly SessionInfo[], query: string):
 
 export async function pickSession(ctx: ExtensionContext, sessions: readonly SessionInfo[], initial = ""): Promise<string | undefined> {
   if (!ctx.hasUI || ctx.mode !== "tui") return undefined;
+  const indexed = sessions.map((session) => ({
+    session,
+    haystack: `${session.name ?? ""} ${sessionDisplayName(session.name, session.id)} ${session.firstMessage}`.toLowerCase()
+  }));
+  const search = (query: string): SessionInfo[] => {
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return sessions.slice();
+    const rows: SessionInfo[] = [];
+    for (const item of indexed) if (terms.every((term) => item.haystack.includes(term))) rows.push(item.session);
+    return rows;
+  };
   return ctx.ui.custom<string | undefined>((tui, theme, _keys, done) => {
     let query = initial.slice(0, 100);
     let selected = 0;
     let first = 0;
     let width = 80;
+    let rows = search(query);
     const pageSize = () => Math.max(2, Math.min(10, Math.floor(((process.stdout.rows ?? 24) - 7) / 2)));
-    const matches = () => filterSessions(sessions, query);
-    const refresh = () => { selected = 0; first = 0; tui.requestRender(); };
+    const refresh = () => { rows = search(query); selected = 0; first = 0; tui.requestRender(); };
     return {
       invalidate() {},
       handleInput(data: string) {
-        const rows = matches();
         if (matchesKey(data, Key.escape)) return done(undefined);
         if (matchesKey(data, Key.enter)) return done(rows[selected]?.path);
         if (matchesKey(data, Key.up)) selected = Math.max(0, selected - 1);
@@ -39,13 +49,13 @@ export async function pickSession(ctx: ExtensionContext, sessions: readonly Sess
       },
       handleMouse(event: TuiMouseEvent) {
         if (event.type === "wheel" && event.wheelDelta) {
-          selected = Math.max(0, Math.min(matches().length - 1, selected + Math.sign(event.wheelDelta)));
+          selected = Math.max(0, Math.min(rows.length - 1, selected + Math.sign(event.wheelDelta)));
           first = Math.max(0, Math.min(selected, first), selected - pageSize() + 1);
           tui.requestRender(); return { handled: true };
         }
         if (event.type !== "click" || event.button !== "left" || event.x >= width) return;
         const index = first + Math.floor((event.y - 2) / 2);
-        const row = matches()[index];
+        const row = rows[index];
         if (event.y >= 2 && event.y < 2 + 2 * pageSize() && row) {
           selected = index; done(row.path); return { handled: true };
         }
@@ -53,7 +63,6 @@ export async function pickSession(ctx: ExtensionContext, sessions: readonly Sess
       render(available: number): string[] {
         width = Math.max(0, available);
         const fit = (line: string) => truncateToWidth(line, width);
-        const rows = matches();
         selected = Math.max(0, Math.min(selected, rows.length - 1));
         const lines = [
           fit(theme.fg("accent", `╭─ SESSIONS · ${rows.length}/${sessions.length} ─`)),

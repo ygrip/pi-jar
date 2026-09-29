@@ -24,6 +24,36 @@ export interface JarStatus {
   extras: string[];
 }
 
+const ROLE_CACHE_LIMIT = 64;
+const roleCache = new Map<string, JarRole | null>();
+
+function cachedRole(id: string, rawValue: string): JarRole | undefined {
+  const cacheKey = id + "\0" + rawValue;
+  if (roleCache.has(cacheKey)) return roleCache.get(cacheKey) ?? undefined;
+  let parsed: JarRole | undefined;
+  try {
+    if (rawValue.length > 4096) throw new Error("oversized status");
+    const data: unknown = JSON.parse(rawValue);
+    if (!data || typeof data !== "object") throw new Error("invalid status");
+    const role = data as Record<string, unknown>;
+    if (typeof role.name !== "string" || typeof role.state !== "string" || !STATES.has(role.state as RoleState)) throw new Error("invalid role");
+    const expiresAt = role.expiresAt;
+    if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) throw new Error("invalid expiry");
+    const name = cleanText(role.name, 32) || id;
+    parsed = {
+      id,
+      name,
+      label: cleanText(typeof role.label === "string" ? role.label : name, 12) || id,
+      state: role.state as RoleState,
+      task: typeof role.task === "string" ? cleanText(role.task, 48) : undefined,
+      expiresAt
+    };
+  } catch { parsed = undefined; }
+  roleCache.set(cacheKey, parsed ?? null);
+  if (roleCache.size > ROLE_CACHE_LIMIT) roleCache.delete(roleCache.keys().next().value!);
+  return parsed;
+}
+
 /** Explicit opt-in contract; never guess teammate state from arbitrary status prose. */
 export function collectStatuses(statuses: ReadonlyMap<string, string>, now: number): JarStatus {
   const roles: JarRole[] = [];
@@ -40,32 +70,12 @@ export function collectStatuses(statuses: ReadonlyMap<string, string>, now: numb
     }
     const id = rawKey.slice(ROLE_PREFIX.length);
     if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(id)) continue;
-    try {
-      if (rawValue.length > 4096) throw new Error("oversized status");
-      const data: unknown = JSON.parse(rawValue);
-      if (!data || typeof data !== "object") throw new Error("invalid status");
-      const role = data as Record<string, unknown>;
-      if (typeof role.name !== "string" || typeof role.state !== "string" || !STATES.has(role.state as RoleState)) {
-        throw new Error("invalid role");
-      }
-      const state = role.state as RoleState;
-      const expiresAt = role.expiresAt;
-      if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || expiresAt <= now || expiresAt > now + ROLE_TTL_MS) {
-        extras.push(`${id}: unavailable`);
-        continue;
-      }
-      const name = cleanText(role.name, 32) || id;
-      roles.push({
-        id,
-        name,
-        label: cleanText(typeof role.label === "string" ? role.label : name, 12) || id,
-        state,
-        task: typeof role.task === "string" ? cleanText(role.task, 48) : undefined,
-        expiresAt: typeof expiresAt === "number" ? expiresAt : undefined
-      });
-    } catch {
+    const role = cachedRole(id, rawValue);
+    if (!role || role.expiresAt == null || role.expiresAt <= now || role.expiresAt > now + ROLE_TTL_MS) {
       extras.push(`${id}: unavailable`);
+      continue;
     }
+    roles.push(role);
   }
   return { roles: roles.slice(0, 16), extras: extras.slice(0, 16) };
 }

@@ -22,6 +22,18 @@ export type TodoEvent =
 const validId = (id: unknown): id is string => typeof id === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(id);
 const validTitle = (title: unknown): title is string => typeof title === "string" && title.length <= 256 && !!cleanText(title, 120);
 const validStatus = (status: unknown): status is TodoStatus => TODO_STATUSES.includes(status as TodoStatus);
+const validWrite = (event: Record<string, unknown>): boolean => {
+  if (event.v !== 1 || event.op !== "write" || !Array.isArray(event.items) || event.items.length > MAX_TODOS) return false;
+  const ids = new Set<string>();
+  let running = 0;
+  for (const raw of event.items as unknown[]) {
+    const item = raw as Record<string, unknown> | null;
+    if (!item || !validId(item.id) || !validTitle(item.title) || !validStatus(item.status) || ids.has(item.id)) return false;
+    ids.add(item.id);
+    if (item.status === "in_progress" && ++running > 1) return false;
+  }
+  return true;
+};
 const make = (id: string, title: string, status: TodoStatus, activeForm?: unknown, details?: unknown): Todo => ({
   id, title: cleanText(title, 120), status, done: status === "completed",
   ...(typeof activeForm === "string" && cleanText(activeForm, 80) ? { activeForm: cleanText(activeForm, 80) } : {}),
@@ -50,14 +62,12 @@ export class TodoStore {
     const event = raw as Record<string, unknown>;
     if (event.v !== 1) return false;
     if (event.op === "write") {
-      if (!Array.isArray(event.items) || event.items.length > MAX_TODOS) return false;
+      if (!validWrite(event)) return false;
       const next = new Map<string, Todo>();
       for (const raw of event.items as unknown[]) {
-        const item = raw as Record<string, unknown> | null;
-        if (!item || !validId(item.id) || !validTitle(item.title) || !validStatus(item.status) || next.has(item.id)) return false;
-        next.set(item.id, make(item.id, item.title, item.status, item.activeForm, this.items.get(item.id)?.details));
+        const item = raw as Record<string, unknown>;
+        next.set(item.id as string, make(item.id as string, item.title as string, item.status as TodoStatus, item.activeForm, this.items.get(item.id as string)?.details));
       }
-      if ([...next.values()].filter((item) => item.status === "in_progress").length > 1) return false;
       this.items = next;
       return true;
     }
@@ -86,11 +96,18 @@ export class TodoStore {
   }
   restore(branch: readonly unknown[]): void {
     this.items.clear();
-    for (const raw of branch) {
+    // Walk the transcript once from newest to oldest, collecting only task events. A valid full
+    // write is a checkpoint, so everything before it is irrelevant.
+    const replay: unknown[] = [];
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const raw = branch[index];
       if (!raw || typeof raw !== "object") continue;
       const entry = raw as Record<string, unknown>;
-      if (entry.type === "custom" && entry.customType === TASK_ENTRY) this.apply(entry.data);
+      if (entry.type !== "custom" || entry.customType !== TASK_ENTRY) continue;
+      replay.push(entry.data);
+      if (entry.data && typeof entry.data === "object" && validWrite(entry.data as Record<string, unknown>)) break;
     }
+    for (let index = replay.length - 1; index >= 0; index--) this.apply(replay[index]);
   }
   private commit(event: TodoEvent): boolean {
     const before = new Map([...this.items].map(([id, item]) => [id, { ...item }]));

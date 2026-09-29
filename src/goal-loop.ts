@@ -45,6 +45,7 @@ export class GoalLoop {
   private readonly pi: ExtensionAPI;
   private readonly options: GoalLoopOptions;
   private prompting = 0;
+  private contextDirty = true;
   private restoreRole: (() => Promise<void>) | undefined;
   private roleInUse: "implement" | "advisor" | undefined;
 
@@ -63,6 +64,7 @@ export class GoalLoop {
     const store = this.options.goals();
     if (!store?.isActive()) return;
     store.setStatus("paused", { reason });
+    this.contextDirty = true;
     if (ctx) { ctx.ui.notify("◎ Goal paused · " + reason + " · /goal resume", "info"); this.options.changed?.(ctx); }
   }
 
@@ -127,6 +129,7 @@ export class GoalLoop {
     if (goal.phase !== "audit") return { ok: false, message: "Cannot complete yet: finish your turn; pi-jar runs an audit pass before a goal can be completed." };
     if (!evidence.trim()) return { ok: false, message: "Provide concrete evidence (commands run, results, files) to complete the goal." };
     if (!store.setStatus("complete", { evidence })) return { ok: false, message: "Could not record goal completion." };
+    this.contextDirty = true;
     ctx.ui.notify("◎ Goal complete · " + goal.text, "info");
     this.options.changed?.(ctx);
     this.options.completed?.(ctx, { ...goal, status: "complete", evidence });
@@ -138,6 +141,7 @@ export class GoalLoop {
     const store = this.options.goals();
     if (!store) { ctx.ui.notify("Goal state is unavailable before the session starts", "warning"); return; }
     if (!store.set(text)) { ctx.ui.notify("Could not set goal; keep it concise and plain-text", "error"); return; }
+    this.contextDirty = true;
     this.options.changed?.(ctx);
     ctx.ui.notify("◎ Goal active · " + store.current()!.text, "info");
     if (this.options.planActive()) { this.pause(ctx, "plan mode is on"); return; }
@@ -174,6 +178,7 @@ export class GoalLoop {
           if (!goal || goal.status !== "active") return { content: [{ type: "text", text: "No active goal." }], details: { action: "block", ok: false } };
           const reason = (params.reason ?? "").trim() || "needs user input";
           this.options.goals()?.setStatus("paused", { reason });
+          this.contextDirty = true;
           ctx.ui.notify("◎ Goal blocked · " + reason, "warning");
           this.options.changed?.(ctx);
           return { content: [{ type: "text", text: "Goal paused for the user: " + reason }], details: { action: "block", ok: true }, terminate: true };
@@ -198,7 +203,7 @@ export class GoalLoop {
         const verb = raw.toLowerCase();
         if (/^(?:clear|off|none|drop)$/.test(verb)) {
           await this.restore();
-          if (store.clear()) { this.options.changed?.(ctx); ctx.ui.notify("Goal cleared", "info"); }
+          if (store.clear()) { this.contextDirty = true; this.options.changed?.(ctx); ctx.ui.notify("Goal cleared", "info"); }
           return;
         }
         if (verb === "pause") { this.pause(ctx, "paused by you"); return; }
@@ -208,6 +213,7 @@ export class GoalLoop {
           if (this.options.planActive()) { ctx.ui.notify("Leave plan mode before resuming the goal", "warning"); return; }
           store.setStatus("active");
           store.setRound(0, goal.phase);
+          this.contextDirty = true;
           this.options.changed?.(ctx);
           this.pi.sendUserMessage("Resume work on the active goal: " + goal.text, { deliverAs: "followUp" });
           return;
@@ -257,21 +263,37 @@ export class GoalLoop {
       const goal = this.goal();
       if (!goal || goal.status === "complete") return;
       if (goal.status === "active" && !this.options.planActive()) await this.useRole(goal.phase === "audit" ? "advisor" : "implement", ctx);
+      this.contextDirty = true;
       return { message: { customType: CONTEXT_TYPE, content: this.context(goal), display: false } };
     });
 
-    // Keep only the newest goal context and continuation so repeated rounds do not bloat the prompt.
+    // Keep only the newest goal context and continuation. Scan in place first and allocate a new
+    // message array only when stale pi-jar messages actually need pruning.
     this.pi.on("context", async (event) => {
+      if (!this.contextDirty) return;
       const goal = this.goal();
-      const seen = new Set<string>();
-      const messages = [...event.messages].reverse().filter((raw) => {
+      const active = !!goal && goal.status !== "complete";
+      let latestContext = -1;
+      let latestContinuation = -1;
+      let needsPrune = false;
+      for (let index = event.messages.length - 1; index >= 0; index--) {
+        const type = (event.messages[index] as { customType?: string }).customType;
+        if (type === CONTEXT_TYPE) {
+          if (!active || latestContext >= 0) needsPrune = true;
+          else latestContext = index;
+        } else if (type === CONTINUATION_TYPE) {
+          if (!active || latestContinuation >= 0) needsPrune = true;
+          else latestContinuation = index;
+        }
+      }
+      this.contextDirty = false;
+      if (!needsPrune) return;
+      return { messages: event.messages.filter((raw, index) => {
         const type = (raw as { customType?: string }).customType;
-        if (type !== CONTEXT_TYPE && type !== CONTINUATION_TYPE) return true;
-        if (!goal || goal.status === "complete" || seen.has(type)) return false;
-        seen.add(type);
+        if (type === CONTEXT_TYPE) return active && index === latestContext;
+        if (type === CONTINUATION_TYPE) return active && index === latestContinuation;
         return true;
-      }).reverse();
-      return { messages };
+      }) };
     });
 
     this.pi.on("agent_before_settle", async (event, ctx) => {
@@ -295,6 +317,7 @@ export class GoalLoop {
       store.setRound(round, audit ? "audit" : "implement");
       await this.useRole(audit ? "advisor" : "implement", ctx);
       this.options.changed?.(ctx);
+      this.contextDirty = true;
       return {
         entries: [{ type: "custom_message", customType: CONTINUATION_TYPE, display: false,
           content: audit ? this.auditMessage(goal, round) : this.implementMessage(goal, round) }],
@@ -308,6 +331,8 @@ export class GoalLoop {
       this.options.changed?.(ctx);
     });
 
+    this.pi.on("session_start", () => { this.contextDirty = true; });
+    this.pi.on("session_tree", () => { this.contextDirty = true; });
     this.pi.on("session_shutdown", async () => { await this.restore(); });
   }
 }

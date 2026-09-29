@@ -37,6 +37,7 @@ import { ChangeTracker } from "../src/changes.ts";
 import { registerDelegate } from "../src/delegate.ts";
 import { collectPrompts, openPromptSearch } from "../src/prompt-search.ts";
 import { ago, recentSessions, type RecentSession } from "../src/session-gallery.ts";
+import { clearSessionBranchCache, sessionBranch } from "../src/session-branch.ts";
 import { registerChangeReview } from "../src/diff-view.ts";
 import { openShellsView, registerShells, SHELL_MESSAGE, shellEventMessage, ShellManager, type ShellEvent } from "../src/shells.ts";
 import { hopefulWelcomeMessage, welcomeHit, welcomeLines, type WelcomeAction } from "../src/welcome.ts";
@@ -48,6 +49,7 @@ const VERSION = (() => {
 })();
 /** Ignore the click Pi may synthesize right after a press we already acted on. */
 const WELCOME_CLICK_DEDUPE_MS = 400;
+const LARGE_SESSION_ENTRIES = 800;
 export default function piJar(pi: ExtensionAPI): void {
   installCompactBuiltinTools(pi);
   let demo = false;
@@ -74,9 +76,7 @@ export default function piJar(pi: ExtensionAPI): void {
   let footerSettings = visualSettings.footer;
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
-  let workingClock: ReturnType<typeof setInterval> | undefined;
   let workingIndicatorKey = "";
-  const stopWorkingClock = () => { if (workingClock) clearInterval(workingClock); workingClock = undefined; };
   let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
   let settingsOpen = false;
 
@@ -158,8 +158,7 @@ export default function piJar(pi: ExtensionAPI): void {
   const suggestions = new SuggestionState();
   composer.attachSuggestions(suggestions);
   const suggest = registerSuggestions(pi, suggestions, {
-    enabled: () => enabled && visualSettings.composer && visualSettings.suggestions && composer.enabled,
-    skip: () => planMode.isEnabled() || !!goals?.isActive()
+    enabled: () => enabled && visualSettings.composer && visualSettings.suggestions && composer.enabled
   });
   let liveTui: { setCopyOnSelect?: (enabled: boolean) => void } | undefined;
   /** Pi's own settings (TUI mode, copy-on-select); written through Pi's SettingsManager. */
@@ -175,8 +174,6 @@ export default function piJar(pi: ExtensionAPI): void {
   };
 
   const applyWorking = (ctx: ExtensionContext) => {
-    const active = enabled && working.phase !== "idle";
-    if (!active || !ctx.hasUI || ctx.mode !== "tui") stopWorkingClock();
     if (!ctx.hasUI || ctx.mode !== "tui") return;
     composer.setActivity(enabled ? working.phase : "idle", animations);
     try {
@@ -187,14 +184,12 @@ export default function piJar(pi: ExtensionAPI): void {
       ctx.ui.setWorkingMessage?.(view.message);
       const indicatorKey = `${working.phase}:${animations}`;
       if (indicatorKey !== workingIndicatorKey) {
-        ctx.ui.setWorkingIndicator({ frames: view.frames, intervalMs: 600 });
+        // Pi's normal streaming/tool lifecycle already causes renders. A static indicator avoids
+        // forcing the entire transcript to repaint on a timer in long sessions.
+        ctx.ui.setWorkingIndicator({ frames: [view.frames[0] ?? "✢"] });
         workingIndicatorKey = indicatorKey;
       }
-      if (active && !workingClock) {
-        workingClock = setInterval(() => applyWorking(ctx), 1000);
-        workingClock.unref?.();
-      }
-    } catch { stopWorkingClock(); /* Working decoration must never interrupt a Pi turn. */ }
+    } catch { /* Working decoration must never interrupt a Pi turn. */ }
   };
 
   const stopWelcome = (ctx?: ExtensionContext) => {
@@ -358,32 +353,20 @@ export default function piJar(pi: ExtensionAPI): void {
         welcomeStatuses = () => footerData.getExtensionStatuses();
         welcomeBranch = () => footerData.getGitBranch();
         let frame = 0;
-        let memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
-        let memoryTimer: ReturnType<typeof setTimeout> | undefined;
-        const MEMORY_SAMPLE_MS = 10_000;
-        const sampleMemory = () => {
-          if (disposed) return;
-          const next = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
-          if (next !== memory) { memory = next; tui.requestRender(); }
-          memoryTimer = setTimeout(sampleMemory, MEMORY_SAMPLE_MS);
-          memoryTimer.unref?.();
-        };
-        if (footerSettings.memory) {
-          memoryTimer = setTimeout(sampleMemory, MEMORY_SAMPLE_MS);
-          memoryTimer.unref?.();
-        }
-        let timer: ReturnType<typeof setInterval> | undefined;
         let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+        let expiryAt: number | undefined;
+        let memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
+        let memorySampledAt = 0;
+        let context = "ctx ?";
+        let contextSampledAt = 0;
         let disposed = false;
         const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
         const dispose = () => {
           if (disposed) return;
           disposed = true;
-          if (memoryTimer) clearTimeout(memoryTimer);
-          if (timer) clearInterval(timer);
           if (expiryTimer) clearTimeout(expiryTimer);
-          timer = undefined;
           expiryTimer = undefined;
+          expiryAt = undefined;
           if (footerTui === tui) { footerTui = undefined; welcomeStatuses = () => new Map<string, string>(); welcomeBranch = () => null; }
           unsubscribe();
         };
@@ -397,32 +380,44 @@ export default function piJar(pi: ExtensionAPI): void {
               const statuses = footerData.getExtensionStatuses();
               const live = collectStatuses(statuses, now);
               const roles: JarRole[] = demo ? createDemoRoles() : live.roles;
-              if (expiryTimer) clearTimeout(expiryTimer);
-              expiryTimer = undefined;
               const nearest = demo ? undefined : roles.reduce<number | undefined>((min, role) =>
                 role.expiresAt != null ? Math.min(min ?? Infinity, role.expiresAt) : min, undefined);
-              if (nearest != null) expiryTimer = setTimeout(() => tui.requestRender(), Math.max(1, nearest - now));
+              if (nearest !== expiryAt) {
+                if (expiryTimer) clearTimeout(expiryTimer);
+                expiryTimer = undefined;
+                expiryAt = nearest;
+                if (nearest != null) {
+                  expiryTimer = setTimeout(() => { expiryTimer = undefined; expiryAt = undefined; tui.requestRender(); }, Math.max(1, nearest - now));
+                  expiryTimer.unref?.();
+                }
+              }
+              // Do not schedule cosmetic footer repaints. Role state still updates on Pi's native
+              // stream/tool renders, which keeps long transcripts responsive.
               const active = animations && footerSettings.roles && roles.some((role) => ACTIVE_STATES.has(role.state));
-              if (active && !timer) {
-                timer = setInterval(() => { frame += 1; tui.requestRender(); }, 600);
-                timer.unref?.();
-              } else if (!active && timer) { clearInterval(timer); timer = undefined; }
-              const usage = ctx.getContextUsage();
-              const context = usage?.percent == null || !Number.isFinite(usage.percent)
-                ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
+              if (active) frame++;
+              if (now - contextSampledAt >= 1000) {
+                const usage = ctx.getContextUsage();
+                context = usage?.percent == null || !Number.isFinite(usage.percent)
+                  ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
+                contextSampledAt = now;
+              }
+              if (now - memorySampledAt >= 5000) {
+                memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
+                memorySampledAt = now;
+              }
               const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, now) : undefined;
               return renderFooter({
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: ctx.sessionManager?.getSessionName?.(),
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
-                context, goal: goalLoop.progress(), chips: footerChips(), memory, cost: formatCost(cost), quota, roles, extras: live.extras,
+                context, goal: goalLoop.progress(), chips: footerChips(),
+                memory, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
             } catch {
-              if (timer) clearInterval(timer);
               if (expiryTimer) clearTimeout(expiryTimer);
-              timer = undefined;
               expiryTimer = undefined;
+              expiryAt = undefined;
               return width > 0 ? ["pi-jar: UI unavailable (run /jar ui off)".slice(0, width)] : [];
             }
           }
@@ -481,12 +476,16 @@ export default function piJar(pi: ExtensionAPI): void {
     try { cost = sessionCost(ctx); } catch { cost = 0; }
     footerTui?.requestRender();
   };
-  const restoreTodos = (ctx: ExtensionContext) => {
-    try { todos?.restore(ctx.sessionManager.getBranch()); } catch { todos?.restore([]); }
+  const addMessageCost = (message: { usage?: { cost?: { total?: number } } }) => {
+    const value = message.usage?.cost?.total;
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) cost += value;
+  };
+  const restoreTodos = (ctx: ExtensionContext, branch?: readonly unknown[]) => {
+    try { todos?.restore(branch ?? sessionBranch(ctx)); } catch { todos?.restore([]); }
     updateTaskWidget(ctx);
   };
-  const restoreGoal = (ctx: ExtensionContext) => {
-    try { goals?.restore(ctx.sessionManager.getBranch()); } catch { goals?.restore([]); }
+  const restoreGoal = (ctx: ExtensionContext, branch?: readonly unknown[]) => {
+    try { goals?.restore(branch ?? sessionBranch(ctx)); } catch { goals?.restore([]); }
     footerTui?.requestRender();
   };
   pi.on("session_start", (_event, ctx) => {
@@ -498,7 +497,6 @@ export default function piJar(pi: ExtensionAPI): void {
     footerSettings = visualSettings.footer;
     demo = false;
     composer.disable(ctx);
-    stopWorkingClock();
     workingIndicatorKey = "";
     working.end();
     quotaCache?.stop();
@@ -509,8 +507,10 @@ export default function piJar(pi: ExtensionAPI): void {
     shells = new ShellManager(onShellEvent);
     shells.onChange = () => footerTui?.requestRender();
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
-    restoreTodos(ctx);
-    restoreGoal(ctx);
+    let branch: readonly unknown[] = [];
+    try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
+    restoreTodos(ctx, branch);
+    restoreGoal(ctx, branch);
     // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
@@ -528,7 +528,17 @@ export default function piJar(pi: ExtensionAPI): void {
     if (visualSettings.composer && enabled) composer.enable(ctx);
     suggest.sync();
     if (visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
-    showWelcome(ctx);
+    if (branch.length >= LARGE_SESSION_ENTRIES) {
+      try {
+        const prefs = piPreferences(ctx)?.get();
+        if (prefs && !prefs.fullscreen) {
+          ctx.ui.notify(`Large session (${branch.length} entries): regular TUI redraw cost grows with history. Enable Fullscreen in /jar settings for smoother rendering.`, "warning");
+        }
+      } catch { /* Performance hint is optional. */ }
+    }
+    // Resumed sessions already have a transcript to paint. Rebuilding the animated welcome and
+    // scanning other session files competes with that expensive initial render for no real benefit.
+    if (branch.length === 0) showWelcome(ctx);
   });
   // Any real prompt dismisses the welcome. Slash commands bypass `input`, so `agent_start` covers them.
   const dismissWelcome = (ctx: ExtensionContext) => {
@@ -553,6 +563,7 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("message_end", (event, ctx) => {
     if (event.message.role === "assistant") {
       working.reportOutputTokens(event.message.usage?.output ?? 0);
+      addMessageCost(event.message);
       applyWorking(ctx);
     }
   });
@@ -561,19 +572,26 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("ui_prompt_start", (_event, ctx) => { working.prompt(true); applyWorking(ctx); });
   pi.on("ui_prompt_end", (_event, ctx) => { working.prompt(false); applyWorking(ctx); });
   // A request may span several tool turns; keep its elapsed time and reported tokens until agent_end.
-  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); updateCost(ctx); });
+  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); });
   pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
   pi.on("agent_before_settle", (event) => { if (event.outcome === "error") composer.flash("error"); });
   pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
-  pi.on("session_tree", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); composer.refreshSession(ctx); });
+  pi.on("session_tree", (_event, ctx) => {
+    let branch: readonly unknown[] = [];
+    try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
+    restoreTodos(ctx, branch);
+    restoreGoal(ctx, branch);
+    updateCost(ctx);
+    composer.refreshSession(ctx);
+  });
   pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); });
   pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); footerTui?.requestRender(); });
   pi.on("session_shutdown", (_event, ctx) => {
+    clearSessionBranchCache(ctx);
     stopWelcome(ctx);
     composer.disable(ctx);
-    stopWorkingClock();
     workingIndicatorKey = "";
     working.end();
     try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
@@ -607,7 +625,7 @@ export default function piJar(pi: ExtensionAPI): void {
         earlier = (await SessionManager.list(ctx.cwd)).filter((session) => session.path !== current)
           .sort((a, b) => b.modified.getTime() - a.modified.getTime()).slice(0, 50);
       } catch (error) { ctx.ui.notify("pi-jar: earlier sessions unavailable: " + String(error), "warning"); }
-      const picked = await openPromptSearch(ctx, collectPrompts(ctx.sessionManager.getEntries(), earlier));
+      const picked = await openPromptSearch(ctx, collectPrompts(sessionBranch(ctx), earlier));
       if (picked !== undefined) ctx.ui.setEditorText(picked);
     }
   });
@@ -753,7 +771,7 @@ export default function piJar(pi: ExtensionAPI): void {
       if (command === "commit" || command.startsWith("commit ")) { await jarCommit(pi, ctx, modelRoles, sideUsage, args.trim().slice(6).trim()); return; }
       if (command === "shells") {
         if (!shells) return;
-        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify(shells.list().map((job) => `${job.id} ${job.name} ${job.status}`).join("\n") || "No background shells", "info"); return; }
+        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify(shells.summaries().map((job) => `${job.id} ${job.name} ${job.status}`).join("\n") || "No background shells", "info"); return; }
         await openShellsView(ctx, shells);
         return;
       }

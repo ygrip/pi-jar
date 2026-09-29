@@ -280,7 +280,8 @@ export class ComposerStyle {
     tip: (width) => {
       if (!this.mascotOn || width < 40) return undefined;
       const mood = this.animations ? this.mascot.mood() : "idle";
-      const tip = this.animations ? this.mascot.tip(Date.now(), this.frame) : this.mascot.tip(0, 0);
+      const animationFrame = this.phase === "idle" ? this.frame : Math.floor(Date.now() / COMPOSER_ACTIVE_INTERVAL_MS);
+      const tip = this.animations ? this.mascot.tip(Date.now(), animationFrame) : this.mascot.tip(0, 0);
       return " ".repeat(3) + paintTip(tip, mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined);
     },
     session: () => this.session,
@@ -335,8 +336,9 @@ export class ComposerStyle {
   }
 
   /**
-   * Active motion ticks at a modest 600 ms. Idle motion has no polling loop at all: it sleeps
-   * until the mascot's next blink/sleep/flash deadline, then schedules the following deadline.
+   * Pi's own streaming/tool updates already repaint active sessions. Never add another active
+   * animation loop: active frames derive from wall time when Pi naturally renders. Idle only
+   * schedules exact blink/sleep/flash transitions.
    */
   private restartTimer(): void {
     this.stopTimer();
@@ -346,8 +348,7 @@ export class ComposerStyle {
   }
   private scheduleTimer(): void {
     if (!this.enabled || !this.animations || !this.mascotOn || this.timer) return;
-    const active = this.phase === "generating" || this.phase === "tool" || this.phase === "waiting";
-    const delay = active ? COMPOSER_ACTIVE_INTERVAL_MS : this.mascot.nextTransitionDelay(Date.now());
+    const delay = this.mascot.nextTransitionDelay(Date.now());
     if (delay === undefined) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;

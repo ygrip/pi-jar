@@ -72,11 +72,22 @@ export class GoalStore {
 
   restore(branch: readonly unknown[]): void {
     this.value = undefined;
-    for (const raw of branch) {
+    // Collect only goal events while walking backward; stop at the newest valid set/clear
+    // checkpoint, then replay that tiny list forward.
+    const replay: unknown[] = [];
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const raw = branch[index];
       if (!raw || typeof raw !== "object") continue;
       const entry = raw as Record<string, unknown>;
-      if (entry.type === "custom" && entry.customType === GOAL_ENTRY) this.apply(entry.data);
+      if (entry.type !== "custom" || entry.customType !== GOAL_ENTRY || !entry.data || typeof entry.data !== "object") continue;
+      const data = entry.data as Record<string, unknown>;
+      replay.push(data);
+      const validCheckpoint = data.op === "clear" && data.v === 1
+        || data.op === "set" && ((data.v === 1 && validGoal(data.text))
+          || (data.v === 2 && validId(data.id) && validGoal(data.text)));
+      if (validCheckpoint) break;
     }
+    for (let index = replay.length - 1; index >= 0; index--) this.apply(replay[index]);
   }
 
   private commit(event: GoalEvent): boolean {

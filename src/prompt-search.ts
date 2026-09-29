@@ -4,8 +4,21 @@ import { cleanText } from "./status.ts";
 
 export interface PastPrompt { text: string; source: "this session" | "earlier session"; at?: number }
 
-const userText = (message: { content?: unknown }) => typeof message.content === "string" ? message.content
-  : Array.isArray(message.content) ? message.content.filter((part: { type?: string }) => part?.type === "text").map((part: { text?: string }) => part.text ?? "").join("\n") : "";
+const MAX_PROMPT_CHARS = 8000;
+const userText = (message: { content?: unknown }): string => {
+  if (typeof message.content === "string") return message.content.slice(0, MAX_PROMPT_CHARS + 1);
+  if (!Array.isArray(message.content)) return "";
+  let text = "";
+  for (const part of message.content as Array<{ type?: string; text?: string }>) {
+    if (part?.type !== "text" || typeof part.text !== "string") continue;
+    const separator = text ? "\n" : "";
+    const room = MAX_PROMPT_CHARS + 1 - text.length - separator.length;
+    if (room <= 0) break;
+    text += separator + part.text.slice(0, room);
+    if (part.text.length > room) break;
+  }
+  return text;
+};
 
 /**
  * Prompts newest first and deduplicated: every user message in this session file (all branches),
@@ -17,13 +30,17 @@ export function collectPrompts(entries: readonly unknown[], earlier: readonly { 
   const add = (text: string, source: PastPrompt["source"], at?: number) => {
     const value = text.trim();
     const key = value.replace(/\s+/g, " ");
-    if (!value || value.length > 8000 || seen.has(key)) return;
+    if (!value || value.length > MAX_PROMPT_CHARS || seen.has(key)) return;
     seen.add(key);
     result.push({ text: value, source, ...(at ? { at } : {}) });
   };
-  const own = entries.filter((raw): raw is { type: string; message: { role: string; content?: unknown }; timestamp?: string } =>
-    !!raw && typeof raw === "object" && (raw as { type?: string }).type === "message" && (raw as { message?: { role?: string } }).message?.role === "user");
-  for (const entry of [...own].reverse()) add(userText(entry.message), "this session", entry.timestamp ? Date.parse(entry.timestamp) : undefined);
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const raw = entries[index];
+    if (!raw || typeof raw !== "object") continue;
+    const entry = raw as { type?: string; message?: { role?: string; content?: unknown }; timestamp?: string };
+    if (entry.type !== "message" || entry.message?.role !== "user") continue;
+    add(userText(entry.message), "this session", entry.timestamp ? Date.parse(entry.timestamp) : undefined);
+  }
   for (const session of earlier) if (session.firstMessage) add(session.firstMessage, "earlier session", session.modified?.getTime());
   return result;
 }
@@ -36,9 +53,9 @@ export async function openPromptSearch(ctx: ExtensionContext, prompts: readonly 
     let query = "";
     let selected = 0;
     let first = 0;
-    let visible: PastPrompt[] = [...prompts];
+    let visible: PastPrompt[] = prompts.slice();
     const rows = 10;
-    const filter = () => { visible = query ? fuzzyFilter([...prompts], query, (item) => item.text) : [...prompts]; selected = 0; first = 0; };
+    const filter = () => { visible = query ? fuzzyFilter(prompts, query, (item) => item.text) : prompts.slice(); selected = 0; first = 0; };
     return {
       invalidate() {},
       handleInput(data: string) {

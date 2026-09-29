@@ -153,12 +153,30 @@ test("jar_todo writes the full list like Claude: statuses, one in progress, stab
   legacy.restore([{ type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "add", id: "x1", title: "Old" } },
     { type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "toggle", id: "x1", done: true } }]);
   assert.equal(legacy.get("x1")?.status, "completed");
+  const checkpointed = new TodoStore(() => {});
+  checkpointed.restore([
+    { type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "write", items: [{ id: "ok", title: "Keep", status: "pending" }] } },
+    { type: "custom", customType: TASK_ENTRY, data: { v: 1, op: "write", items: [{ id: "bad id!", title: "Bad", status: "pending" }] } }
+  ]);
+  assert.equal(checkpointed.get("ok")?.title, "Keep", "malformed later writes do not shadow a valid checkpoint");
   // The rendered result is the checklist.
   const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
   const text = tool.renderResult({ details: { items: store.all() } }, { expanded: false, isPartial: false }, theme).render(80).join("\n");
   assert.match(text, /✔ .*Inspect repo/);
   assert.match(text, /◼ Run tests/);
   assert.match(text, /☐ Fix bug/);
+});
+
+test("jar_todo mutation results keep persisted previews bounded", async () => {
+  let tool: any;
+  const store = new TodoStore(() => {});
+  registerTaskTool({ registerTool(definition: unknown) { tool = definition; } } as never, () => store, () => {});
+  const todos = Array.from({ length: 12 }, (_, index) => ({ content: "Task " + index, status: index === 0 ? "in_progress" : "pending" }));
+  const result = await tool.execute("w", { todos }, undefined, undefined, {} as never);
+  assert.equal(result.details.total, 12);
+  assert.equal(result.details.items.length, 8);
+  assert.equal(result.details.truncated, true);
+  assert.doesNotMatch(result.content[0].text, /Task 11/, "mutation result does not duplicate the full task list into session history");
 });
 
 test("working message shows the running task's active form", () => {
@@ -252,6 +270,14 @@ test("default Pi tools keep native metadata while collapsed cards stay brief", (
   const writeCollapsed = write.renderCall({ path: "pet.ts", content: "one\ntwo" }, colors, { expanded: false }).render(120).join("\n");
   assert.match(writeCollapsed, /2 lines/);
   assert.doesNotMatch(writeCollapsed, /two/);
+
+  const huge = { content: [{ type: "text", text: ("line\n").repeat(20_000) }] };
+  const hugeCollapsed = bash.renderResult(huge, { expanded: false, isPartial: false }, colors, {}).render(120).join("\n");
+  assert.match(hugeCollapsed, /\d+\+ lines/, "large historical outputs use a bounded summary");
+  assert.ok(hugeCollapsed.length < 200);
+  const hugeEdit = edit.renderResult({ content: [{ type: "text", text: "Applied" }], details: { diff: ("+x\n").repeat(30_000) } },
+    { expanded: false, isPartial: false }, colors, {}).render(120).join("\n");
+  assert.match(hugeEdit, /large diff/);
 });
 
 test("rounded input fits, shows the ember face and exposes a human session label", () => {
@@ -419,8 +445,9 @@ test("composer face tracks observed phases, refreshes session title, honors moti
   style.refreshSession(ctx as never);
   assert.ok(title().includes("session Flame pass"));
   style.setActivity("generating", true);
-  await new Promise((resolve) => setTimeout(resolve, 520));
-  assert.ok(redraws > 0, "flame tips flicker while generating");
+  const generatingRedraws = redraws;
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.equal(redraws, generatingRedraws, "active mascot piggybacks on Pi renders instead of scheduling its own");
   assert.match(title(), /\((\^ᴗ\^|°ᴗ°)\)/);
   style.setActivity("tool", false);
   assert.ok(title().includes("(•ᴗ•)"), "motion-off shows a calm face");

@@ -12,12 +12,42 @@ import { Text } from "@earendil-works/pi-tui";
 
 type ToolResult = { content: Array<{ type: string; text?: string }>; details?: unknown };
 
-const outputText = (result: ToolResult): string => result.content
-  .filter((item) => item.type === "text" && typeof item.text === "string")
-  .map((item) => item.text!)
-  .join("\n");
+const SUMMARY_SCAN_CHARS = 32 * 1024;
+const DIFF_SCAN_CHARS = 64 * 1024;
+const resultSummaryCache = new WeakMap<object, { sample: string; lines: number; truncated: boolean }>();
+const writeCountCache = new WeakMap<object, { lines: number; truncated: boolean }>();
 
-const nonEmptyLines = (text: string): string[] => text.split("\n").filter((line) => line.trim().length > 0);
+function summarizeResult(result: ToolResult): { sample: string; lines: number; truncated: boolean } {
+  if (result && typeof result === "object") {
+    const cached = resultSummaryCache.get(result as object);
+    if (cached) return cached;
+  }
+  let sample = "";
+  let truncated = false;
+  let textParts = 0;
+  for (const item of result.content) {
+    if (item.type !== "text" || typeof item.text !== "string") continue;
+    if (textParts++ && sample.length < SUMMARY_SCAN_CHARS) sample += "\n";
+    const room = SUMMARY_SCAN_CHARS - sample.length;
+    if (room <= 0) { truncated = true; break; }
+    sample += item.text.slice(0, room);
+    if (item.text.length > room) { truncated = true; break; }
+  }
+  const value = { sample, lines: sample ? sample.split("\n").length : 0, truncated };
+  if (result && typeof result === "object") resultSummaryCache.set(result as object, value);
+  return value;
+}
+
+function firstNonEmpty(text: string): string {
+  for (const line of text.split("\n")) if (line.trim()) return line;
+  return "";
+}
+
+function boundedLineCount(text: string, limit = SUMMARY_SCAN_CHARS): { lines: number; truncated: boolean } {
+  const sample = text.slice(0, limit);
+  return { lines: sample ? sample.split("\n").length : 0, truncated: text.length > limit };
+}
+
 const expandHint = " · [ expand ] Ctrl+O";
 
 function compactText(text: string, max = 72): string {
@@ -25,12 +55,18 @@ function compactText(text: string, max = 72): string {
   return clean.length <= max ? clean : clean.slice(0, Math.max(0, max - 1)) + "…";
 }
 
+const bashCache = new WeakMap<object, { cwd: string; trusted: boolean; tool: ReturnType<typeof createBashToolDefinition> }>();
 function bashFor(ctx: ExtensionContext) {
-  const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
-  return createBashToolDefinition(ctx.cwd, {
+  const trusted = ctx.isProjectTrusted();
+  const hit = bashCache.get(ctx as object);
+  if (hit && hit.cwd === ctx.cwd && hit.trusted === trusted) return hit.tool;
+  const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: trusted });
+  const tool = createBashToolDefinition(ctx.cwd, {
     shellPath: settings.getShellPath(),
     commandPrefix: settings.getShellCommandPrefix()
   });
+  bashCache.set(ctx as object, { cwd: ctx.cwd, trusted, tool });
+  return tool;
 }
 
 /**
@@ -58,9 +94,9 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     renderResult(result, options, theme, context) {
       if (options.expanded && read.renderResult) return read.renderResult(result, options, theme, context);
       if (options.isPartial) return new Text(theme.fg("warning", "reading…"), 0, 0);
-      const text = outputText(result);
-      const count = text ? text.split("\n").length : 0;
-      return new Text(theme.fg("muted", `${count} line${count === 1 ? "" : "s"}${expandHint}`), 0, 0);
+      const summary = summarizeResult(result);
+      const count = `${summary.lines}${summary.truncated ? "+" : ""}`;
+      return new Text(theme.fg("muted", `${count} line${summary.lines === 1 && !summary.truncated ? "" : "s"}${expandHint}`), 0, 0);
     }
   });
 
@@ -75,12 +111,13 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     },
     renderResult(result, options, theme, context) {
       if (options.expanded && bash.renderResult) return bash.renderResult(result as Parameters<NonNullable<typeof bash.renderResult>>[0], options, theme, context);
-      const text = outputText(result);
-      const lines = nonEmptyLines(text);
-      const preview = lines[0] ? ` · ${compactText(lines[0], 56)}` : "";
+      const summary = summarizeResult(result);
+      const first = firstNonEmpty(summary.sample);
+      const preview = first ? ` · ${compactText(first, 56)}` : "";
+      const count = `${summary.lines}${summary.truncated ? "+" : ""}`;
       const label = options.isPartial ? "running" : "done";
       return new Text(theme.fg(options.isPartial ? "warning" : "muted",
-        `${label} · ${lines.length} line${lines.length === 1 ? "" : "s"}${preview}${expandHint}`), 0, 0);
+        `${label} · ${count} line${summary.lines === 1 && !summary.truncated ? "" : "s"}${preview}${expandHint}`), 0, 0);
     }
   });
 
@@ -96,9 +133,11 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
       const details = result.details as { diff?: string } | undefined;
       const diff = details?.diff ?? "";
       if (!diff) {
-        const text = outputText(result);
+        const summary = summarizeResult(result);
+        const text = summary.sample;
         return new Text(theme.fg(text.startsWith("Error") ? "error" : "success", compactText(text || "applied", 96)), 0, 0);
       }
+      if (diff.length > DIFF_SCAN_CHARS) return new Text(theme.fg("muted", `large diff${expandHint}`), 0, 0);
       let additions = 0;
       let removals = 0;
       for (const line of diff.split("\n")) {
@@ -114,14 +153,19 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     ...write,
     renderCall(args, theme, context) {
       if (context.expanded && write.renderCall) return write.renderCall(args, theme, context);
-      const count = args.content.split("\n").length;
+      let count = args && typeof args === "object" ? writeCountCache.get(args as object) : undefined;
+      if (!count) {
+        count = boundedLineCount(args.content);
+        if (args && typeof args === "object") writeCountCache.set(args as object, count);
+      }
       return new Text(theme.fg("toolTitle", theme.bold("write ")) + theme.fg("accent", args.path)
-        + theme.fg("dim", ` · ${count} lines`), 0, 0);
+        + theme.fg("dim", ` · ${count.lines}${count.truncated ? "+" : ""} lines`), 0, 0);
     },
     renderResult(result, options, theme, context) {
       if (options.expanded && write.renderResult) return write.renderResult(result, options, theme, context);
       if (options.isPartial) return new Text(theme.fg("warning", "writing…"), 0, 0);
-      const text = outputText(result);
+      const summary = summarizeResult(result);
+      const text = summary.sample;
       return new Text(theme.fg(text.startsWith("Error") ? "error" : "success", compactText(text || "written", 96))
         + theme.fg("dim", text ? expandHint : ""), 0, 0);
     }

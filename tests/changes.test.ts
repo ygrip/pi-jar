@@ -115,6 +115,9 @@ test("review overlay accepts, confirms reverts and closes when nothing is left; 
     assert.equal(tracker.count(), 1, "only the completed edit is marked dirty");
     events.get("tool_result")!({ toolName: "write", toolCallId: "b" });
     assert.equal(tracker.count(), 2);
+    events.get("tool_call")!({ toolName: "edit", toolCallId: "failed", input: { path: "a.ts" } });
+    events.get("tool_result")!({ toolName: "edit", toolCallId: "failed", isError: true });
+    assert.equal(tracker.count(), 2, "failed edits do not add dirty work");
     let component: any;
     let closed = false;
     const ctx = { hasUI: true, mode: "tui", ui: { notify() {}, custom(factory: Function) {
