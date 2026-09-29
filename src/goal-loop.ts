@@ -64,6 +64,7 @@ export class GoalLoop {
     const store = this.options.goals();
     if (!store?.isActive()) return;
     store.setStatus("paused", { reason });
+    this.contextDirty = true;
     if (ctx) { ctx.ui.notify("◎ Goal paused · " + reason + " · /goal resume", "info"); this.options.changed?.(ctx); }
   }
 
@@ -128,6 +129,7 @@ export class GoalLoop {
     if (goal.phase !== "audit") return { ok: false, message: "Cannot complete yet: finish your turn; pi-jar runs an audit pass before a goal can be completed." };
     if (!evidence.trim()) return { ok: false, message: "Provide concrete evidence (commands run, results, files) to complete the goal." };
     if (!store.setStatus("complete", { evidence })) return { ok: false, message: "Could not record goal completion." };
+    this.contextDirty = true;
     ctx.ui.notify("◎ Goal complete · " + goal.text, "info");
     this.options.changed?.(ctx);
     this.options.completed?.(ctx, { ...goal, status: "complete", evidence });
@@ -139,6 +141,7 @@ export class GoalLoop {
     const store = this.options.goals();
     if (!store) { ctx.ui.notify("Goal state is unavailable before the session starts", "warning"); return; }
     if (!store.set(text)) { ctx.ui.notify("Could not set goal; keep it concise and plain-text", "error"); return; }
+    this.contextDirty = true;
     this.options.changed?.(ctx);
     ctx.ui.notify("◎ Goal active · " + store.current()!.text, "info");
     if (this.options.planActive()) { this.pause(ctx, "plan mode is on"); return; }
@@ -175,6 +178,7 @@ export class GoalLoop {
           if (!goal || goal.status !== "active") return { content: [{ type: "text", text: "No active goal." }], details: { action: "block", ok: false } };
           const reason = (params.reason ?? "").trim() || "needs user input";
           this.options.goals()?.setStatus("paused", { reason });
+          this.contextDirty = true;
           ctx.ui.notify("◎ Goal blocked · " + reason, "warning");
           this.options.changed?.(ctx);
           return { content: [{ type: "text", text: "Goal paused for the user: " + reason }], details: { action: "block", ok: true }, terminate: true };
@@ -199,7 +203,7 @@ export class GoalLoop {
         const verb = raw.toLowerCase();
         if (/^(?:clear|off|none|drop)$/.test(verb)) {
           await this.restore();
-          if (store.clear()) { this.options.changed?.(ctx); ctx.ui.notify("Goal cleared", "info"); }
+          if (store.clear()) { this.contextDirty = true; this.options.changed?.(ctx); ctx.ui.notify("Goal cleared", "info"); }
           return;
         }
         if (verb === "pause") { this.pause(ctx, "paused by you"); return; }
@@ -209,6 +213,7 @@ export class GoalLoop {
           if (this.options.planActive()) { ctx.ui.notify("Leave plan mode before resuming the goal", "warning"); return; }
           store.setStatus("active");
           store.setRound(0, goal.phase);
+          this.contextDirty = true;
           this.options.changed?.(ctx);
           this.pi.sendUserMessage("Resume work on the active goal: " + goal.text, { deliverAs: "followUp" });
           return;
