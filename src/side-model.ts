@@ -16,7 +16,10 @@ export interface SideCall {
 /** Session-scoped record of side calls, so /usage can show what they cost. */
 export class SideUsage {
   private calls: SideCall[] = [];
-  add(call: SideCall): void { this.calls.push(call); if (this.calls.length > 500) this.calls.shift(); }
+  add(call: SideCall): void {
+    this.calls.push(call);
+    if (this.calls.length > 512) this.calls.splice(0, 64);
+  }
   all(): readonly SideCall[] { return this.calls; }
   clear(): void { this.calls = []; }
 }
@@ -42,7 +45,16 @@ export async function askRole(ctx: ExtensionContext, roles: ModelRoleManager, us
   usage?.add({ role, model: name, input: result.usage?.input ?? 0, output: result.usage?.output ?? 0, cacheRead: result.usage?.cacheRead ?? 0,
     cacheWrite: result.usage?.cacheWrite ?? 0, cost: Number.isFinite(cost) ? cost! : 0, at: Date.now() });
   if (result.stopReason === "error" || result.stopReason === "aborted") throw new Error(result.errorMessage || `${name} ${result.stopReason}`);
-  const text = result.content.filter((part) => part.type === "text").map((part) => (part as { text: string }).text).join("").trim();
+  const MAX_ANSWER_CHARS = 32 * 1024;
+  let text = "";
+  for (const part of result.content) {
+    if (part.type !== "text") continue;
+    const value = (part as { text: string }).text;
+    const room = MAX_ANSWER_CHARS - text.length;
+    if (room <= 0) break;
+    text += value.slice(0, room);
+  }
+  text = text.trim();
   if (!text) throw new Error(`${name} returned an empty answer`);
   return { text, model: name };
 }
