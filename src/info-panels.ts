@@ -4,6 +4,7 @@ import { openPanel, type PanelTab } from "./panel.ts";
 import type { Quota } from "./quota.ts";
 import type { SideUsage } from "./side-model.ts";
 import { collectUsage, usageLines } from "./usage-view.ts";
+import { sessionBranch } from "./session-branch.ts";
 
 /** Pi's default compaction reserve, used when its settings cannot be read. */
 const DEFAULT_RESERVE = 16_384;
@@ -55,7 +56,7 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
     const context = contextFor(pi, ctx, parts);
     return [
       { name: "Usage", render: (width, fg) => usageLines({
-        stats: collectUsage(ctx.sessionManager.getBranch() as never, deps.side.all()),
+        stats: collectUsage(sessionBranch(ctx) as never, deps.side.all()),
         ...(ctx.model?.provider ? { provider: ctx.model.provider } : {}),
         ...(deps.quota(ctx) ? { quota: deps.quota(ctx)! } : {}),
         quotaEnabled: deps.quotaEnabled(), now: Date.now() }, width, fg) },
