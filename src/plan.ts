@@ -418,9 +418,15 @@ export class PlanMode {
 
     this.pi.on("context", async (event) => {
       if (this.enabled) return;
+      let found = false;
+      for (const raw of event.messages) {
+        const type = (raw as { customType?: string }).customType;
+        if (type === "pi-jar.plan-context" || type === "pi-jar.plan-reminder") { found = true; break; }
+      }
+      if (!found) return;
       return { messages: event.messages.filter((raw) => {
-        const message = raw as { customType?: string };
-        return message.customType !== "pi-jar.plan-context" && message.customType !== "pi-jar.plan-reminder";
+        const type = (raw as { customType?: string }).customType;
+        return type !== "pi-jar.plan-context" && type !== "pi-jar.plan-reminder";
       }) };
     });
 
