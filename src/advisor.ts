@@ -27,10 +27,33 @@ export const ADVISOR_SYSTEM = [
 
 type Entry = { type: string; message?: { role?: string; content?: unknown; toolName?: string; isError?: boolean; customType?: string } };
 
-const textOf = (content: unknown): string => typeof content === "string" ? content
-  : Array.isArray(content) ? content.map((part: { type?: string; text?: string; name?: string; arguments?: unknown }) =>
-    part.type === "text" ? part.text ?? "" : part.type === "toolCall" ? `[tool ${part.name} ${JSON.stringify(part.arguments ?? {}).slice(0, 300)}]` : "").filter(Boolean).join("\n")
-    : "";
+const toolHint = (args: unknown): string => {
+  if (!args || typeof args !== "object") return "";
+  const object = args as Record<string, unknown>;
+  const keys = ["command", "path", "file_path", "query", "id"];
+  for (const key of keys) {
+    const value = object[key];
+    if (typeof value === "string" && value) return `${key}=${value.slice(0, 240)}`;
+  }
+  return "";
+};
+
+const textOf = (content: unknown, limit = 4_000): string => {
+  if (typeof content === "string") return content.slice(0, limit);
+  if (!Array.isArray(content)) return "";
+  let out = "";
+  for (const part of content as Array<{ type?: string; text?: string; name?: string; arguments?: unknown }>) {
+    const piece = part.type === "text" ? part.text ?? ""
+      : part.type === "toolCall" ? `[tool ${part.name ?? "?"}${toolHint(part.arguments) ? " " + toolHint(part.arguments) : ""}]` : "";
+    if (!piece) continue;
+    const separator = out ? "\n" : "";
+    const room = limit - out.length - separator.length;
+    if (room <= 0) break;
+    out += separator + piece.slice(0, room);
+    if (piece.length > room) break;
+  }
+  return out;
+};
 
 /** The most recent conversation, newest last, capped to `limit` characters. */
 export function transcript(entries: readonly Entry[], limit = TRANSCRIPT_LIMIT): string {
@@ -39,7 +62,7 @@ export function transcript(entries: readonly Entry[], limit = TRANSCRIPT_LIMIT):
   for (let index = entries.length - 1; index >= 0 && size < limit; index--) {
     const message = entries[index]!.type === "message" ? entries[index]!.message : undefined;
     if (!message?.role) continue;
-    let body = textOf(message.content).trim();
+    let body = textOf(message.content, Math.min(4_000, limit - size)).trim();
     if (!body) continue;
     if (message.role === "toolResult" && body.length > 1200) body = body.slice(0, 1200) + " …";
     const label = message.role === "toolResult" ? `tool result (${message.toolName ?? "?"}${message.isError ? ", error" : ""})` : message.role;
