@@ -750,7 +750,7 @@ export default function piJar(pi: ExtensionAPI): void {
       if (command === "commit" || command.startsWith("commit ")) { await jarCommit(pi, ctx, modelRoles, sideUsage, args.trim().slice(6).trim()); return; }
       if (command === "shells") {
         if (!shells) return;
-        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify(shells.list().map((job) => `${job.id} ${job.name} ${job.status}`).join("\n") || "No background shells", "info"); return; }
+        if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify(shells.summaries().map((job) => `${job.id} ${job.name} ${job.status}`).join("\n") || "No background shells", "info"); return; }
         await openShellsView(ctx, shells);
         return;
       }
