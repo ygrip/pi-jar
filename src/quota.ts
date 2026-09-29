@@ -20,24 +20,24 @@ function parseQuota(value: unknown): Quota | undefined {
   return fiveHour || week ? { ...(fiveHour ? { fiveHour } : {}), ...(week ? { week } : {}) } : undefined;
 }
 
-const publishedCache = new Map<string, { raw: string; expiresAt: number; value: Quota } | null>();
+const publishedCache = new Map<string, { raw: string; expiresAt?: number; value?: Quota }>();
 
 /** Public statuses are authoritative only when valid and fresh. No arbitrary status prose is parsed. */
 export function publishedQuota(statuses: ReadonlyMap<string, string>, provider: string, now: number): Quota | undefined {
   const raw = statuses.get(QUOTA_PREFIX + provider);
   if (typeof raw !== "string" || raw.length > 2048) return undefined;
   const cached = publishedCache.get(provider);
-  if (cached?.raw === raw) return cached.expiresAt > now && cached.expiresAt <= now + QUOTA_TTL_MS ? cached.value : undefined;
+  if (cached?.raw === raw) return cached.expiresAt != null && cached.value && cached.expiresAt > now && cached.expiresAt <= now + QUOTA_TTL_MS ? cached.value : undefined;
   try {
     const data: unknown = JSON.parse(raw);
-    if (!data || typeof data !== "object") { publishedCache.set(provider, null); return undefined; }
+    if (!data || typeof data !== "object") { publishedCache.set(provider, { raw }); return undefined; }
     const obj = data as Record<string, unknown>;
     const expiresAt = obj.expiresAt;
     const value = parseQuota(obj);
-    if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || !value) { publishedCache.set(provider, null); return undefined; }
+    if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || !value) { publishedCache.set(provider, { raw }); return undefined; }
     publishedCache.set(provider, { raw, expiresAt, value });
     return expiresAt > now && expiresAt <= now + QUOTA_TTL_MS ? value : undefined;
-  } catch { publishedCache.set(provider, null); return undefined; }
+  } catch { publishedCache.set(provider, { raw }); return undefined; }
 }
 
 function codexAccountId(token: string): string | undefined {
