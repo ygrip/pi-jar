@@ -414,12 +414,14 @@ export class PlanMode {
 
     this.pi.on("before_agent_start", async () => {
       if (!this.enabled) return;
+      this.contextDirty = true;
       return { message: { customType: "pi-jar.plan-context", content: this.context(), display: false } };
     });
 
     // Keep plan-only prompt messages bounded. When plan mode is active, retain only the newest
     // context and newest reminder; when it is off, remove all stale plan prompt messages.
     this.pi.on("context", async (event) => {
+      if (!this.contextDirty) return;
       let latestContext = -1;
       let latestReminder = -1;
       let needsPrune = false;
@@ -433,6 +435,7 @@ export class PlanMode {
           else latestReminder = index;
         }
       }
+      this.contextDirty = false;
       if (!needsPrune) return;
       return { messages: event.messages.filter((raw, index) => {
         const type = (raw as { customType?: string }).customType;
@@ -454,6 +457,7 @@ export class PlanMode {
         return;
       }
       this.reminders++;
+      this.contextDirty = true;
       return {
         entries: [{ type: "custom_message", customType: "pi-jar.plan-reminder", display: false,
           content: `[PI-JAR PLAN MODE] You ended the turn without ${PLAN_SUBMIT_TOOL}. If the plan is ready, write it to the plan directory and call ${PLAN_SUBMIT_TOOL}. If you need a decision from the user, use jar_ask. Do not ask for approval in chat.` }],
@@ -473,8 +477,8 @@ export class PlanMode {
       if (this.enabled && this.pendingReview) await this.review(ctx);
     });
 
-    this.pi.on("session_start", async (_event, ctx) => { await this.restore(sessionBranch(ctx), ctx); });
-    this.pi.on("session_tree", async (_event, ctx) => { await this.restore(sessionBranch(ctx), ctx); });
+    this.pi.on("session_start", async (_event, ctx) => { this.contextDirty = true; await this.restore(sessionBranch(ctx), ctx); });
+    this.pi.on("session_tree", async (_event, ctx) => { this.contextDirty = true; await this.restore(sessionBranch(ctx), ctx); });
     this.pi.on("session_shutdown", async (_event, ctx) => { if (this.enabled) await this.leave(ctx, false); });
   }
 }
