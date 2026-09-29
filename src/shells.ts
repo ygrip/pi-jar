@@ -11,6 +11,7 @@ export const SHELL_MESSAGE = "pi-jar.shell";
 export const MAX_RUNNING_SHELLS = 8;
 const MAX_KEPT_SHELLS = 20;
 const MAX_LINES = 2000;
+const LINE_PRUNE_BATCH = 128;
 const MAX_LINE_CHARS = 2000;
 const KILL_GRACE_MS = 3000;
 
@@ -50,8 +51,18 @@ export class ShellManager {
   constructor(onEvent: (event: ShellEvent) => void, spawnShell: typeof spawn = spawn) { this.onEvent = onEvent; this.spawnShell = spawnShell; }
 
   list(): ShellJob[] { return [...this.jobs.values()].map(({ job }) => ({ ...job, lines: [...job.lines] })); }
+  summaries(): Array<Omit<ShellJob, "lines">> {
+    return [...this.jobs.values()].map(({ job }) => {
+      const { lines: _lines, ...summary } = job;
+      return { ...summary };
+    });
+  }
   get(id: string): ShellJob | undefined { const entry = this.jobs.get(id); return entry && { ...entry.job, lines: [...entry.job.lines] }; }
-  running(): number { return [...this.jobs.values()].filter(({ job }) => job.status === "running").length; }
+  running(): number {
+    let count = 0;
+    for (const { job } of this.jobs.values()) if (job.status === "running") count++;
+    return count;
+  }
 
   start(options: StartOptions): ShellJob {
     const command = options.command.trim();
@@ -105,7 +116,12 @@ export class ShellManager {
     const line = raw.replace(ANSI, "").replace(/\r/g, "").slice(0, MAX_LINE_CHARS);
     const { job } = entry;
     job.lines.push(line);
-    if (job.lines.length > MAX_LINES) { job.lines.splice(0, job.lines.length - MAX_LINES); job.dropped++; }
+    // Batch front-pruning avoids O(n) array shifts on every single line once a noisy shell fills
+    // the ring buffer. Allow a small bounded cushion, then remove a batch at once.
+    if (job.lines.length > MAX_LINES + LINE_PRUNE_BATCH) {
+      job.lines.splice(0, LINE_PRUNE_BATCH);
+      job.dropped += LINE_PRUNE_BATCH;
+    }
     if (entry.pattern && !job.matched && entry.pattern.test(line)) {
       job.matched = line;
       this.onEvent({ kind: "match", job: { ...job, lines: [...job.lines] } });
@@ -156,13 +172,14 @@ export class ShellManager {
   }
 }
 
-const elapsed = (job: ShellJob, now = Date.now()) => {
+type ShellMeta = Omit<ShellJob, "lines">;
+const elapsed = (job: ShellMeta | ShellJob, now = Date.now()) => {
   const seconds = Math.max(0, Math.round(((job.endedAt ?? now) - job.startedAt) / 1000));
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 };
-export const shellState = (job: ShellJob) => job.status === "running" ? "running"
+export const shellState = (job: ShellMeta | ShellJob) => job.status === "running" ? "running"
   : job.status === "exited" ? `exited ${job.exitCode ?? "?"}` : job.status === "failed" ? `failed: ${cleanText(job.error ?? "", 60)}` : "killed";
-const describe = (job: ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
+const describe = (job: ShellMeta | ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
 
 /** The message that wakes the agent when a watched shell matches or ends. */
 export function shellEventMessage(event: ShellEvent): string {
@@ -198,7 +215,7 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
     parameters: Parameters,
     async execute(_id, params, _signal, _update, ctx) {
       const manager = shells();
-      const reply = (text: string, jobs: ShellJob[] = manager?.list() ?? []) => ({ content: [{ type: "text" as const, text }], details: { jobs } });
+      const reply = (text: string) => ({ content: [{ type: "text" as const, text }], details: { jobs: manager?.summaries() ?? [] } });
       if (!manager) return reply("Background shells are unavailable before a Pi session starts.");
       try {
         switch (params.action) {
@@ -216,8 +233,8 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
             if (!params.id) return reply("kill needs an id.");
             return reply(manager.kill(params.id) ? `Stopping ${params.id}.` : `${params.id} is not running.`);
           default: {
-            const jobs = manager.list();
-            return reply(jobs.length ? jobs.map(describe).join("\n") : "No background shells.", jobs);
+            const jobs = manager.summaries();
+            return reply(jobs.length ? jobs.map(describe).join("\n") : "No background shells.");
           }
         }
       } catch (error) {
