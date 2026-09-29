@@ -167,6 +167,18 @@ test("jar_todo writes the full list like Claude: statuses, one in progress, stab
   assert.match(text, /☐ Fix bug/);
 });
 
+test("jar_todo mutation results keep persisted previews bounded", async () => {
+  let tool: any;
+  const store = new TodoStore(() => {});
+  registerTaskTool({ registerTool(definition: unknown) { tool = definition; } } as never, () => store, () => {});
+  const todos = Array.from({ length: 12 }, (_, index) => ({ content: "Task " + index, status: index === 0 ? "in_progress" : "pending" }));
+  const result = await tool.execute("w", { todos }, undefined, undefined, {} as never);
+  assert.equal(result.details.total, 12);
+  assert.equal(result.details.items.length, 8);
+  assert.equal(result.details.truncated, true);
+  assert.doesNotMatch(result.content[0].text, /Task 11/, "mutation result does not duplicate the full task list into session history");
+});
+
 test("working message shows the running task's active form", () => {
   const state = new WorkingState();
   state.start(0);
