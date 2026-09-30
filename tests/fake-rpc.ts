@@ -27,7 +27,7 @@ export interface FakeChild extends EventEmitter {
   kill(signal: string): void;
 }
 
-export interface SpawnCall { command: string; args: string[]; env: NodeJS.ProcessEnv }
+export interface SpawnCall { command: string; args: string[]; env: NodeJS.ProcessEnv; cwd?: string }
 
 /**
  * A fake child Pi: `script` runs when the prompt arrives with the prompt text. Closing stdin (what
@@ -58,8 +58,8 @@ export function fakeChild(script?: (child: FakeChild, prompt: string) => void): 
 export function fakeSpawn(script: (child: FakeChild, prompt: string, args: string[]) => void) {
   const calls: SpawnCall[] = [];
   const children: FakeChild[] = [];
-  const spawn = (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
-    calls.push({ command, args, env: options.env ?? {} });
+  const spawn = (command: string, args: string[], options: { env?: NodeJS.ProcessEnv; cwd?: string }) => {
+    calls.push({ command, args, env: options.env ?? {}, ...(options.cwd ? { cwd: options.cwd } : {}) });
     const child = fakeChild((running, prompt) => script(running, prompt, args));
     children.push(child);
     return child as never;
