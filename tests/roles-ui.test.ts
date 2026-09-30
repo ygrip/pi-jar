@@ -4,7 +4,7 @@ import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { openRolesUi } from "../src/roles-ui.ts";
 
 test("role actions are listed one per row and a click runs the action", async () => {
-  const rows = [{ role: "default", label: "Default", custom: false, usedBy: "session start" }, { role: "plan", label: "Plan", custom: false }];
+  const rows = [{ role: "default", label: "Default", custom: false, usedBy: "session start", fallbacks: [] }, { role: "plan", label: "Plan", custom: false, fallbacks: ["p/backup"] }];
   const activated: string[] = [];
   const roles = { list: () => rows, activeRole: () => undefined, activate: async (role: string) => { activated.push(role); return true; } };
   let component: any;
@@ -17,7 +17,7 @@ test("role actions are listed one per row and a click runs the action", async ()
   await new Promise((resolve) => setTimeout(resolve, 0));
   const lines = component.render(100).map(stripTerminalSequences);
   const first = lines.findIndex((line: string) => line.includes("⏎  Activate this role now"));
-  const labels = ["m  Assign a model", "a  Alias another role", "t  Set thinking effort", "s  Move between global and project", "c  Clear the assignment", "n  New custom role", "d  Delete this custom role"];
+  const labels = ["m  Assign a model", "f  Set fallback model", "a  Alias another role", "t  Set thinking effort", "s  Move between global and project", "c  Clear the assignment", "n  New custom role", "d  Delete this custom role"];
   labels.forEach((label, index) => assert.ok(lines[first + 1 + index]!.includes(label), label));
   component.handleMouse({ type: "click", button: "left", x: lines[first]!.indexOf("Activate"), y: first });
   await new Promise((resolve) => setTimeout(resolve, 0));
