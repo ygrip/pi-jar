@@ -11,7 +11,7 @@ export type TodoStatus = (typeof TODO_STATUSES)[number];
 export interface Todo { id: string; title: string; done: boolean; status: TodoStatus; activeForm?: string; details?: string; parentId?: string }
 /** A parent's own `status` is ignored when it has subtasks. */
 export interface TodoInput { id?: string; title: string; status: TodoStatus; activeForm?: string; details?: string; subtasks?: readonly TodoInput[] }
-export type TodoReplacement = Partial<Omit<TodoInput, "id">>;
+export type TodoUpdate = Partial<Omit<TodoInput, "id">>;
 /** Bounds the whole list: parents plus subtasks. */
 export const MAX_TODOS = 50;
 
@@ -313,7 +313,7 @@ export class TodoStore {
     return this.write(next);
   }
   /** Update only the addressed task. Omitted fields and subtasks are preserved. */
-  update(id: string, replacement: TodoReplacement): string | undefined {
+  update(id: string, replacement: TodoUpdate): string | undefined {
     if (!this.items.has(id)) return "update needs a valid existing task id.";
     if (!replacement || typeof replacement !== "object" || Array.isArray(replacement)) return "update needs task fields.";
     if ("id" in replacement && replacement.id !== id) return "Update id must match the addressed task.";
