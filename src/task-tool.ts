@@ -238,7 +238,7 @@ export function registerTaskTool(
       const shown = details?.display ? displayItems : expanded ? items : items.slice(0, 8);
       let text = theme.fg("dim", `${totals.done}/${totals.total} done${details?.current ? " · now: " + details.current : ""}`);
       for (const item of shown) text += "\n" + todoRow(item, (color, value) => theme.fg(color, value), (value) => theme.bold(value), known.get(item.id) ?? todoProgress(items, item.id));
-      if (details?.truncated || shown.length < count) text += "\n" + theme.fg("dim", `  … +${Math.max(0, count - shown.length)} more · /jar tasks`);
+      if (!details?.display && (details?.truncated || shown.length < count)) text += "\n" + theme.fg("dim", `  … +${Math.max(0, count - shown.length)} more · /jar tasks`);
       return new Text(text, 0, 0);
     }
   });
