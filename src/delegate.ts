@@ -857,7 +857,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const mode: DelegateExecutionMode = item.mode ?? defaultMode;
         const role = cleanText(item.role ?? roleForMode(mode), 32) || roleForMode(mode);
         const candidates = [...roles.resolveCandidates(role), ...roles.resolveCandidates("default")];
-        const selected = candidates.find((candidate) => available.has(candidate.provider + "/" + candidate.model)) ?? candidates[0];
+        const selected = candidates.find((candidate) => available.has(candidate.provider + "/" + candidate.model));
         const model = selected ? `${selected.provider}/${selected.model}` : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
         thinkingByRun.set(index + 1, selected?.thinking);
         return {
