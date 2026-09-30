@@ -210,8 +210,8 @@ test("x stops the selected subagent through the registry and kills the selected 
     view.input("x");
     await tick(); await tick();
     assert.deepEqual(agents.children.map((child) => child.killed), [[], []], "stop uses RPC abort then retires the selected child cleanly");
-    assert.match((await agents.pending).content[0]!.text, /\[1\] api \(scout\) — done/);
-    assert.deepEqual(view.list().slice(0, 3), ["⧉ SUBAGENTS", " ○ docs", "▌✔ api"], "the selection follows the retired run after retained agents");
+    assert.match((await agents.pending).content[0]!.text, /\[1\] api \(scout\) — stopped/);
+    assert.deepEqual(view.list().slice(0, 3), ["⧉ SUBAGENTS", " ○ docs", "▌■ api"], "the selection follows the stopped run after retained agents");
     assert.match(view.text(), /▸ ✖ bash npm test/, "a call cut short by stop is closed as failed");
     view.input("x");
     await tick();
