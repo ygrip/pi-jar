@@ -12,18 +12,22 @@ import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation
 import { CHILD_WORKTREE_ENV } from "../src/delegate-worktree.ts";
 import { emit, fakeSpawn, say, settle, taskOf, type FakeChild } from "./fake-rpc.ts";
 
-const roles = (map: Record<string, { provider: string; model: string; thinking?: string }>) => ({ resolve: (role: string) => map[role] }) as never;
+const roles = (map: Record<string, { provider: string; model: string; thinking?: string }>) => ({
+  resolve: (role: string) => map[role],
+  resolveCandidates: (role: string) => map[role] ? [{ ...map[role], via: [role] }] : []
+}) as never;
 type Result = { content: Array<{ text: string }>; details: { runs: Array<Record<string, unknown>> } };
 interface Tool {
+  name: string;
   execute(id: string, params: object, signal: AbortSignal | undefined, onUpdate: ((update: Result) => void) | undefined, ctx: object): Promise<Result>;
   renderResult(result: Result, options: { expanded: boolean }, theme: { fg(color: string, text: string): string }): { render(width: number): string[] };
 }
 const register = (registry: DelegateRegistry, spawn: unknown, options: DelegateOptions = {}, map: Parameters<typeof roles>[0] = {}): Tool => {
   let tool: Tool | undefined;
-  registerDelegate({ registerTool(definition: Tool) { tool = definition; } } as never, roles(map), registry, { ...options, spawnProcess: spawn as never });
+  registerDelegate({ registerTool(definition: Tool) { if (definition.name === "jar_delegate") tool = definition; } } as never, roles(map), registry, { ...options, spawnProcess: spawn as never });
   return tool!;
 };
-const quiet = { cwd: "/repo", hasUI: false };
+const quiet = { cwd: "/repo", hasUI: false, modelRegistry: { getAvailable: () => [] } };
 
 test("subagents run in RPC mode with the parent's extensions, read-only tools plus jar_todo, and never recurse", () => {
   const argv = ["node", "/opt/pi/cli.js", "-ne", "-e", "./extensions", "--extension=/abs/other.ts", "--tui-mode", "fullscreen"];
@@ -69,28 +73,30 @@ test("jar_delegate runs tasks in parallel on roles and returns a detailed report
     settle(child);
   });
   let tool: Tool | undefined;
-  registerDelegate({ registerTool(definition: Tool) { tool = definition; } } as never,
-    roles({ task: { provider: "p", model: "small", thinking: "low" }, default: { provider: "p", model: "big" } }), new DelegateRegistry(), { spawnProcess: spawn as never });
+  registerDelegate({ registerTool(definition: Tool) { if (definition.name === "jar_delegate") tool = definition; } } as never,
+    roles({ scout: { provider: "p", model: "small", thinking: "low" }, default: { provider: "p", model: "big" } }), new DelegateRegistry(), { spawnProcess: spawn as never });
   const statuses = new Map<string, string | undefined>();
   const updates: string[] = [];
-  const ctx = { cwd: "/repo", hasUI: true, model: { provider: "p", id: "current" }, ui: { setStatus(key: string, value?: string) { statuses.set(key, value); } } };
+  const ctx = { cwd: "/repo", hasUI: true, model: { provider: "p", id: "current" },
+    modelRegistry: { getAvailable: () => [{ provider: "p", id: "small" }, { provider: "p", id: "big" }] },
+    ui: { setStatus(key: string, value?: string) { statuses.set(key, value); } } };
   const result = await tool!.execute("d", { tasks: [{ task: "scan api", name: "api" }, { task: "please fail", role: "review" }] }, undefined,
     (update) => updates.push(update.content[0]!.text), ctx);
   assert.equal(calls.length, 2);
   assert.ok(calls.every((call) => call.env[CHILD_ENV] === "1"));
-  assert.ok(calls[0]!.args.includes("p/small") && calls[0]!.args.includes("low"), "task role resolves");
+  assert.ok(calls[0]!.args.includes("p/small") && calls[0]!.args.includes("low"), "scout role resolves");
   assert.ok(calls[1]!.args.includes("p/big"), "unknown role falls back to default");
   assert.equal(children[0]!.stdin.commands[0]!.type, "prompt");
   assert.match(String(children[0]!.stdin.commands[0]!.message), /Task: scan api$/);
-  assert.equal(children[0]!.stdin.writableEnded, true, "stdin is closed once the child settles");
+  assert.equal(children[0]!.stdin.writableEnded, false, "retained scout stays alive after settling");
   const text = result.content[0]!.text;
-  assert.match(text, /## \[1\] api \(task · p\/small\) — done\n- took \d+s · 1 turn · 2 tool calls \(read×1, grep×1\) · \$0\.010\n- files read: src\/auth\.ts\n- failed tool calls: grep login\n\n## Summary\nReport: scan api/);
+  assert.match(text, /## \[1\] api \(scout · p\/small\) — idle\n- took \d+s · 1 turn · 2 tool calls \(read×1, grep×1\) · \$0\.010\n- files read: src\/auth\.ts\n- failed tool calls: grep login\n\n## Summary\nReport: scan api/);
   assert.match(text, /## \[2\] agent 2 \(review · p\/big\) — failed: exited 1 before finishing[\s\S]*\npartial/);
   assert.ok(updates.some((update) => /api: working/.test(update)));
   assert.ok([...statuses.keys()].every((key) => key.startsWith("pi-jar.role.delegate-")));
-  assert.ok([...statuses.values()].every((value) => value === undefined), "teammates are cleared when finished");
+  assert.ok([...statuses.values()].some((value) => value?.includes('"state":"idle"')), "settled retained teammate remains published");
   const rendered = tool!.renderResult(result, { expanded: false }, { fg: (_c, t) => t }).render(120).join("\n");
-  assert.match(rendered, /✔ api · task · 2 tools · \$0\.010/);
+  assert.match(rendered, /○ api · scout · 2 tools · \$0\.010/);
   assert.match(rendered, /✖ agent 2/);
 });
 
@@ -141,7 +147,7 @@ test("the transcript keeps structured, bounded tool calls and text that never re
   assert.ok(notified >= 4, "listeners hear about every event");
   gate.emit("open");
   const result = await pending;
-  assert.equal(run.state, "done");
+  assert.equal(run.state, "idle");
   assert.equal(run.live, "");
   assert.equal(call.status, "done");
   assert.equal(call.output, "ok 3 passed", "escapes are stripped from tool output");
@@ -192,7 +198,7 @@ test("a working subagent can be steered, its dialogs never block, and its checkl
   assert.equal(registry.steer("delegate-9-9", "x"), false);
   gate.emit("open");
   const text = (await pending).content[0]!.text;
-  assert.equal(registry.steer(record!.key, "too late"), false, "finished runs cannot be steered");
+  assert.equal(registry.steer(record!.key, "too late"), false, "idle runs use resume rather than steer");
   assert.match(text, /steered 1×/);
   assert.match(text, /- tasks: 1\/2 done\n  \[~\] Audit\n    \[x\] Read routes\n    \[~\] Check auth/);
 });
