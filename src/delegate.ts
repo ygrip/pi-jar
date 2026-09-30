@@ -782,61 +782,101 @@ type RunDetails = Omit<DelegateRun, "transcript" | "live">;
 
 export interface DelegateOptions {
   spawnProcess?: Spawn;
-  /** The parent's change tracker: subagent edits join /diff. */
+  /** The parent's change tracker: finalized worktree edits join /diff. */
   changes?: () => ChangeTracker | undefined;
   /** Called after a subagent edit was added to the tracker. */
   changed?: () => void;
+  /** Session-scoped shared discussion paper. */
+  discussionFile?: () => string | undefined;
 }
 
-/** jar_delegate. Every run is listed live in `registry` (with its transcript and stop/steer handles) for the activity view. */
+const roleForMode = (mode: DelegateExecutionMode): string =>
+  mode === "scout" ? "scout" : mode === "fork" ? "reviewer" : mode === "worktree" ? "worker" : "task";
+
+const remainingTasks = (run: DelegateRun): string[] => {
+  const leaves = leafTodos(run.todos);
+  return leaves.filter((todo) => todo.status !== "completed").map((todo) => todo.title).slice(0, 20);
+};
+
+const controlReport = (report: SubagentStopReport): string => [
+  `${report.key} · ${report.name} · ${report.state}`,
+  `task: ${report.task}`,
+  `workspace: ${report.workspace ?? "none"}`,
+  `changed: ${report.changed.length ? report.changed.join(", ") : "none"}`,
+  `applied: ${report.applied.length ? report.applied.join(", ") : "none"}`,
+  `remaining: ${report.remaining.length ? report.remaining.join("; ") : "none explicitly tracked"}`,
+  report.error ? `error: ${report.error}` : "",
+  report.last ? `last: ${cleanBlock(report.last, 1200)}` : ""
+].filter(Boolean).join("\n");
+
+const peekRecord = (record: SubagentRecord): string => {
+  const run = record.run;
+  const leaves = leafTodos(run.todos);
+  const done = leaves.filter((todo) => todo.status === "completed").length;
+  const changed = (() => { try { return record.changed(); } catch { return run.filesEdited; } })();
+  const remaining = remainingTasks(run);
+  return [
+    `${record.key} · ${run.name} · ${run.state} · ${run.role}${run.model ? " · " + run.model : ""} · ${run.mode}`,
+    `task: ${cleanText(run.task, 300)}`,
+    `progress: ${leaves.length ? done + "/" + leaves.length + " tasks" : "no checklist"}${run.activity ? " · " + cleanText(run.activity, 100) : ""}`,
+    `changed: ${changed.length ? fileList(changed, 12) : "none"}`,
+    remaining.length ? `remaining: ${remaining.join("; ")}` : "remaining: none explicitly tracked",
+    run.workspace ? `workspace: ${run.workspace}` : "",
+    run.output ? `last: ${cleanBlock(run.output, 700)}` : ""
+  ].filter(Boolean).join("\n");
+};
+
+/** jar_delegate plus jar_subagent: the parent remains a moderator while retained workers do the work. */
 export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, registry: DelegateRegistry, options: DelegateOptions = {}): void {
   if (process.env[CHILD_ENV] || typeof (pi as ExtensionAPI & { registerTool?: unknown }).registerTool !== "function") return;
   let batch = 0;
+
   pi.registerTool({
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Run up to ${MAX_DELEGATES} parallel subagents on pi-jar model roles. mode=scout is fresh/read-only; mode=fork inherits the parent's active Pi session branch read-only; mode=worktree inherits context and edits in a path-guarded disposable Git worktree whose non-conflicting changes are applied back into /diff. The old write=true shared-workspace mode remains only for compatibility.`,
-    promptSnippet: "Use jar_delegate to fan out work: scout for cheap fresh investigation, fork for context-aware review, worktree for isolated implementation.",
+    description: `Spawn retained session-scoped subagents (maximum ${MAX_DELEGATES} alive at once). scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Retained agents become idle after a turn and are controlled with jar_subagent. Worktree changes apply only when the moderator stops that agent.`,
+    promptSnippet: "Act as moderator: delegate parallel work, inspect progress with jar_subagent peek, steer only when needed, and synthesize results instead of duplicating subagent work.",
     promptGuidelines: [
-      "Use scout for independent investigation that needs no conversation history; make its task self-contained.",
-      "Use fork when a read-only reviewer or investigator should inherit the current conversation and decisions.",
-      "Use worktree for implementation. Each writer gets an isolated Git worktree with no shell tool and path-guarded file access; non-conflicting changes are copied back to the parent and join /diff.",
-      "Parallel worktree tasks should own separate files or concerns. If two children touch the same path, pi-jar keeps their worktrees instead of choosing a winner."
+      "When useful work can be delegated, act as the moderator: decompose, assign, monitor, resolve disagreements, and synthesize. Do not redo a delegated implementation yourself while its worker is active.",
+      "Use scout for cheap independent discovery, fork/reviewer for context-aware review, and worktree/worker for implementation. Explicit task.role overrides these mode defaults.",
+      "Retained agents become idle after each turn. Reuse them with jar_subagent resume instead of spawning replacements; pause them when priorities change; stop completed workers to reconcile their worktree into /diff.",
+      "Use jar_subagent ask for a brief BTW question to one worker. For agent-to-agent questions, have them use the bounded jar_discuss paper so answers stay structured and cheap.",
+      "Keep at most four retained agents. Stop agents you no longer need."
     ],
     parameters: Parameters,
     async execute(_id, params, signal, onUpdate, ctx) {
+      const requested = params.tasks.slice(0, MAX_DELEGATES);
+      if (registry.retained() + requested.length > MAX_DELEGATES) {
+        return { content: [{ type: "text", text: `Subagent pool is full: ${registry.retained()}/${MAX_DELEGATES} retained. Reuse or stop an existing agent with jar_subagent.` }], isError: true };
+      }
+
       const id = ++batch;
       const defaultMode: DelegateExecutionMode = params.mode ?? (params.write === true ? "direct" : "scout");
-      const runs: DelegateRun[] = params.tasks.slice(0, MAX_DELEGATES).map((item, index) => {
-        const role = cleanText(item.role ?? "task", 32) || "task";
-        const resolved = roles.resolve(role) ?? roles.resolve("default");
-        const model = resolved ? `${resolved.provider}/${resolved.model}` : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+      const available = new Set(ctx.modelRegistry.getAvailable().map((model) => model.provider + "/" + model.id));
+      const thinkingByRun = new Map<number, string | undefined>();
+      const runs: DelegateRun[] = requested.map((item, index) => {
         const mode: DelegateExecutionMode = item.mode ?? defaultMode;
-        return { index: index + 1, name: cleanText(item.name ?? `agent ${index + 1}`, 24), task: item.task, role, mode, ...(model ? { model } : {}),
+        const role = cleanText(item.role ?? roleForMode(mode), 32) || roleForMode(mode);
+        const candidates = [...roles.resolveCandidates(role), ...roles.resolveCandidates("default")];
+        const selected = candidates.find((candidate) => available.has(candidate.provider + "/" + candidate.model)) ?? candidates[0];
+        const model = selected ? `${selected.provider}/${selected.model}` : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+        thinkingByRun.set(index + 1, selected?.thinking);
+        return {
+          index: index + 1, name: cleanText(item.name ?? `${role} ${index + 1}`, 24), task: item.task, role, mode, ...(model ? { model } : {}),
           state: "queued", tools: 0, turns: 0, cost: 0, output: "", toolCounts: {}, filesRead: [], filesEdited: [], appliedFiles: [],
-          todos: [], steered: 0, transcript: [], live: "" };
+          pauses: 0, resumes: 0, todos: [], steered: 0, transcript: [], live: ""
+        };
       });
-      // One controller per run: aborting the tool call stops them all, the activity view stops one.
+
       const controllers = runs.map(() => new AbortController());
       const abortAll = () => { for (const controller of controllers) controller.abort(); };
       if (signal?.aborted) abortAll(); else signal?.addEventListener("abort", abortAll, { once: true });
       let handles: DelegateHandle[] = [];
-      // The key doubles as the role-status id, so views can tell our own teammates from other extensions'.
-      const records: SubagentRecord[] = runs.map((run, index) => ({
-        key: `delegate-${id}-${run.index}`, batch: id, run,
-        stop: () => controllers[index]!.abort(STOP_REASON),
-        steer: (text) => handles[index]?.steer(text) ?? false
-      }));
-      registry.add(...records);
-      const thinking = (role: string) => (roles.resolve(role) ?? roles.resolve("default"))?.thinking;
+      let records: SubagentRecord[] = [];
+      const worktrees = new Map<number, DelegateWorktree>();
+      const sessionDirs = new Map<number, string>();
       const parentSession = ctx.sessionManager?.getSessionFile?.();
-      let forkSessions: string | undefined;
-      if (runs.some((run) => run.mode === "fork" || run.mode === "worktree")) {
-        try { forkSessions = mkdtempSync(join(tmpdir(), "pi-jar-forks-")); }
-        catch (error) { console.error("pi-jar: could not create temporary fork session directory", error); }
-      }
-      // Deprecated direct-write children keep the old baseline bridge. Worktree children are applied
-      // from their isolated snapshot after all parallel runs finish.
+
       let baselines: string | undefined;
       if (runs.some((run) => run.mode === "direct") && options.changes) {
         try { baselines = mkdtempSync(join(tmpdir(), "pi-jar-baselines-")); }
@@ -849,19 +889,19 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const baseline = readChildBaseline(baselines, absolute);
         if (baseline !== undefined && tracker.adopt(absolute, baseline)) options.changed?.();
       };
-      const worktrees = new Map<number, DelegateWorktree>();
-      // Live teammates: the welcome TEAM row and the footer read this public status contract.
+
       const publish = () => {
         if (!ctx.hasUI) return;
         for (const { key, run } of records) {
           try {
             ctx.ui.setStatus(`${ROLE_PREFIX}${key}`, run.state === "done" || run.state === "failed" ? undefined : JSON.stringify({
-              name: run.name, label: run.name.slice(0, 12), state: run.state === "queued" ? "waiting" : "working", task: cleanText(run.task, 60), expiresAt: Date.now() + 25_000
+              name: run.name, label: run.name.slice(0, 12),
+              state: run.state === "queued" ? "waiting" : run.state,
+              task: cleanText(run.task, 60), expiresAt: Date.now() + 24 * 60 * 60_000
             }));
           } catch { /* status is decoration */ }
         }
       };
-      // Details are persisted with the session: never the transcript or live text, which the registry holds instead.
       const details = (includeOutput = true) => ({
         runs: runs.map(({ transcript: _transcript, live: _live, ...run }): RunDetails => includeOutput ? run : { ...run, output: "" }),
         write: runs.some((run) => run.mode === "direct" || run.mode === "worktree")
@@ -872,126 +912,156 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         updateTimer = undefined;
         lastUpdateAt = Date.now();
         publish();
-        onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}${run.activity ? ` · ${run.activity}` : ""}`).join("\n") }], details: details(false) });
+        onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}${run.activity ? " · " + run.activity : ""}`).join("\n") }], details: details(false) });
       };
       const update = () => {
         registry.notify();
         if (!onUpdate) { publish(); return; }
         const wait = Math.max(0, LIVE_UPDATE_MS - (Date.now() - lastUpdateAt));
-        if (wait === 0) { if (updateTimer) { clearTimeout(updateTimer); updateTimer = undefined; } emitUpdate(); return; }
-        if (!updateTimer) {
-          updateTimer = setTimeout(emitUpdate, wait);
-          updateTimer.unref?.();
-        }
+        if (wait === 0) { if (updateTimer) clearTimeout(updateTimer); emitUpdate(); return; }
+        if (!updateTimer) { updateTimer = setTimeout(emitUpdate, wait); updateTimer.unref?.(); }
       };
       const flushUpdate = () => {
         if (updateTimer) { clearTimeout(updateTimer); updateTimer = undefined; }
         emitUpdate();
       };
-      const refresh = setInterval(publish, STATUS_REFRESH_MS);
-      refresh.unref?.();
-      const failedHandle = (): DelegateHandle => ({ done: Promise.resolve(), steer: () => false });
+      const failedHandle = (): DelegateHandle => ({
+        firstSettled: Promise.resolve(), closed: Promise.resolve(), steer: () => false, pause: async () => false,
+        resume: () => false, ask: async () => undefined, shutdown: async () => {}
+      });
+      const cleanupPrivate = (index: number, discardWorktree: boolean) => {
+        const dir = sessionDirs.get(index);
+        if (dir) { rmSync(dir, { recursive: true, force: true }); sessionDirs.delete(index); }
+        if (discardWorktree) {
+          const worktree = worktrees.get(index);
+          if (worktree) {
+            try { disposeDelegateWorktree(worktree); } catch { /* best effort */ }
+            worktrees.delete(index);
+          }
+        }
+      };
       const failBeforeStart = (run: DelegateRun, error: unknown) => {
         run.state = "failed";
         run.error = cleanText(error instanceof Error ? error.message : String(error), 300);
         run.endedAt = Date.now();
         update();
       };
-      try {
-        handles = runs.map((run, index) => {
-          if ((run.mode === "fork" || run.mode === "worktree") && (!parentSession || !forkSessions)) {
-            failBeforeStart(run, "fork/worktree mode requires a persisted parent Pi session");
+
+      handles = runs.map((run, index) => {
+        if ((run.mode === "fork" || run.mode === "worktree") && !parentSession) {
+          failBeforeStart(run, "fork/worktree mode requires a persisted parent Pi session");
+          return failedHandle();
+        }
+        let cwd = ctx.cwd;
+        let fork: DelegateForkOptions | undefined;
+        const env: Record<string, string> = {
+          [SUBAGENT_KEY_ENV]: `delegate-${id}-${run.index}`,
+          [SUBAGENT_NAME_ENV]: run.name
+        };
+        const discussion = options.discussionFile?.();
+        if (discussion) env[DISCUSSION_FILE_ENV] = discussion;
+        const hooks: DelegateHooks = {};
+        const write = run.mode === "direct" || run.mode === "worktree";
+
+        if (run.mode === "fork" || run.mode === "worktree") {
+          try {
+            const sessionDir = mkdtempSync(join(tmpdir(), "pi-jar-fork-"));
+            sessionDirs.set(run.index, sessionDir);
+            fork = { source: parentSession!, sessionDir, ...(run.mode === "worktree" ? { tools: WORKTREE_TOOLS } : {}) };
+          } catch (error) {
+            failBeforeStart(run, error);
             return failedHandle();
           }
-          let cwd = ctx.cwd;
-          let fork: DelegateForkOptions | undefined;
-          const env: Record<string, string> = {};
-          const hooks: DelegateHooks = {};
-          const write = run.mode === "direct" || run.mode === "worktree";
+        }
+        if (run.mode === "worktree") {
+          try {
+            const worktree = createDelegateWorktree(ctx.cwd);
+            worktrees.set(run.index, worktree);
+            run.workspace = worktree.root;
+            cwd = worktree.cwd;
+            env[CHILD_WORKTREE_ENV] = worktree.root;
+          } catch (error) {
+            cleanupPrivate(run.index, true);
+            failBeforeStart(run, error);
+            return failedHandle();
+          }
+        } else if (run.mode === "direct" && baselines) {
+          env[CHILD_BASELINE_ENV] = baselines;
+          hooks.edited = edited;
+        }
+        hooks.env = env;
+        return startDelegate(run, delegateArgs(run.model, thinkingByRun.get(run.index), write, process.argv, fork),
+          delegatePrompt(run.task, write, run.mode), cwd, controllers[index]!.signal, update, options.spawnProcess, hooks, run.mode !== "direct");
+      });
 
-          if (run.mode === "fork") fork = { source: parentSession!, sessionDir: forkSessions! };
-          if (run.mode === "worktree") {
+      const stopRun = async (index: number): Promise<SubagentStopReport> => {
+        const run = runs[index]!;
+        const key = `delegate-${id}-${run.index}`;
+        const workspace = run.workspace;
+        const handle = handles[index]!;
+        await handle.shutdown();
+
+        let changed: string[] = [];
+        const worktree = worktrees.get(run.index);
+        if (worktree) {
+          try { changed = worktreeChangedFiles(worktree); run.filesEdited = changed; }
+          catch (error) { run.error = "could not inspect isolated changes: " + cleanText(String(error), 240); }
+          if (changed.length && !run.error) {
             try {
-              const worktree = createDelegateWorktree(ctx.cwd);
-              worktrees.set(run.index, worktree);
-              run.workspace = worktree.root;
-              cwd = worktree.cwd;
-              env[CHILD_WORKTREE_ENV] = worktree.root;
-              fork = { source: parentSession!, sessionDir: forkSessions!, tools: WORKTREE_TOOLS };
+              run.appliedFiles = applyDelegateWorktree(worktree, ctx.cwd, changed, options.changes?.());
+              if (run.appliedFiles.length) {
+                try { options.changed?.(); } catch (error) { console.error("pi-jar: could not refresh parent change UI", error); }
+              }
+              disposeDelegateWorktree(worktree);
+              worktrees.delete(run.index);
+              run.workspace = undefined;
             } catch (error) {
-              failBeforeStart(run, error);
-              return failedHandle();
+              run.error = "changes not applied: " + cleanText(error instanceof Error ? error.message : String(error), 240);
             }
-          } else if (run.mode === "direct" && baselines) {
-            env[CHILD_BASELINE_ENV] = baselines;
-            hooks.edited = edited;
-          }
-          if (Object.keys(env).length) hooks.env = env;
-          return startDelegate(run, delegateArgs(run.model, thinking(run.role), write, process.argv, fork),
-            delegatePrompt(run.task, write, run.mode), cwd, controllers[index]!.signal, update, options.spawnProcess, hooks);
-        });
-        await Promise.all(handles.map((handle) => handle.done));
-
-        // Worktree writers are reconciled only after every child stops. This makes overlap detection
-        // deterministic and prevents "last writer wins" from quietly eating another agent's work.
-        const filesByRun = new Map<number, string[]>();
-        const owners = new Map<string, number[]>();
-        for (const run of runs) {
-          const worktree = worktrees.get(run.index);
-          if (!worktree) continue;
-          try {
-            const files = worktreeChangedFiles(worktree);
-            filesByRun.set(run.index, files);
-            run.filesEdited = files;
-            if (run.state === "done") for (const file of files) {
-              const list = owners.get(file) ?? [];
-              list.push(run.index);
-              owners.set(file, list);
-            }
-          } catch (error) {
-            run.state = "failed";
-            run.error = "could not inspect isolated changes: " + cleanText(error instanceof Error ? error.message : String(error), 240);
-          }
-        }
-        const overlaps = new Map<number, string[]>();
-        for (const [file, indexes] of owners) if (indexes.length > 1) for (const index of indexes) {
-          const list = overlaps.get(index) ?? [];
-          list.push(file);
-          overlaps.set(index, list);
-        }
-
-        for (const run of runs) {
-          const worktree = worktrees.get(run.index);
-          if (!worktree) continue;
-          const files = filesByRun.get(run.index) ?? [];
-          if (run.state !== "done") {
-            if (!files.length) { disposeDelegateWorktree(worktree); run.workspace = undefined; }
-            continue;
-          }
-          const overlap = overlaps.get(run.index);
-          if (overlap?.length) {
-            run.state = "failed";
-            run.error = "changes not applied because another worktree edited: " + fileList(overlap, 8);
-            continue;
-          }
-          try {
-            run.appliedFiles = applyDelegateWorktree(worktree, ctx.cwd, files, options.changes?.());
-            if (run.appliedFiles.length) {
-              try { options.changed?.(); } catch (error) { console.error("pi-jar: could not refresh parent change UI", error); }
-            }
-            disposeDelegateWorktree(worktree);
+          } else if (!changed.length) {
+            try { disposeDelegateWorktree(worktree); } catch { /* best effort */ }
+            worktrees.delete(run.index);
             run.workspace = undefined;
-          } catch (error) {
-            run.state = "failed";
-            run.error = "changes not applied: " + cleanText(error instanceof Error ? error.message : String(error), 240);
           }
         }
+        cleanupPrivate(run.index, false);
+        if (run.state !== "failed") run.state = run.error ? "failed" : "done";
+        run.endedAt ??= Date.now();
+        update();
+        return {
+          key, name: run.name, state: run.state, task: run.task, ...(workspace ? { workspace } : {}),
+          changed, applied: [...run.appliedFiles], remaining: remainingTasks(run), last: run.output, ...(run.error ? { error: run.error } : {})
+        };
+      };
+
+      records = runs.map((run, index) => ({
+        key: `delegate-${id}-${run.index}`, batch: id, run,
+        stop: () => stopRun(index),
+        pause: () => handles[index]!.pause(),
+        resume: (text) => handles[index]!.resume(text),
+        steer: (text) => handles[index]!.steer(text),
+        ask: (text) => handles[index]!.ask(text),
+        changed: () => {
+          const worktree = worktrees.get(run.index);
+          if (!worktree) return [...run.filesEdited];
+          try { return worktreeChangedFiles(worktree); } catch { return [...run.filesEdited]; }
+        },
+        discard: () => {
+          void handles[index]!.shutdown().finally(() => cleanupPrivate(run.index, true));
+        }
+      }));
+      registry.add(...records);
+      publish();
+
+      try {
+        await Promise.all(handles.map((handle, index) => runs[index]!.mode === "direct" ? handle.closed : handle.firstSettled));
       } finally {
-        clearInterval(refresh);
         signal?.removeEventListener("abort", abortAll);
         if (baselines) rmSync(baselines, { recursive: true, force: true });
-        if (forkSessions) rmSync(forkSessions, { recursive: true, force: true });
-        for (const run of runs) if (run.state !== "done" && run.state !== "failed") { run.state = "failed"; run.endedAt ??= Date.now(); }
+        for (const run of runs) {
+          if (run.mode === "direct") cleanupPrivate(run.index, true);
+          else if (run.state === "failed") cleanupPrivate(run.index, true);
+        }
         registry.notify();
         flushUpdate();
       }
@@ -1016,6 +1086,60 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         return row;
       });
       return new Text(rows.join("\n") || theme.fg("dim", "No subagents."), 0, 0);
+    }
+  });
+
+  pi.registerTool({
+    name: "jar_subagent",
+    label: "subagent",
+    description: "Moderator control for retained subagents: peek high-level progress, steer a working agent, ask a brief BTW question, pause without losing context, resume the same agent, or stop it and receive a progress/change/remaining-work handoff. Stopping a worktree agent safely applies reviewable changes to the parent.",
+    promptSnippet: "Use jar_subagent as the moderator control plane. Prefer peek over rereading transcripts; reuse paused/idle agents with resume; stop finished workers to reconcile their work.",
+    promptGuidelines: [
+      "Use peek periodically instead of polling constantly. It returns task progress, current activity, changed files, remaining checklist items and last report.",
+      "Use steer to correct direction while an agent is working. Use ask for a short BTW question; it waits for the agent's next compact answer.",
+      "Pause when an agent should stop spending tokens but keep its context/workspace. Resume the same agent later instead of spawning a replacement.",
+      "Stop when an agent is no longer needed. Stop aborts any active turn, retires the process, reports progress/workspace/changes/remaining work, and reconciles safe worktree changes into /diff."
+    ],
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal("peek"), Type.Literal("steer"), Type.Literal("ask"),
+        Type.Literal("pause"), Type.Literal("resume"), Type.Literal("stop")
+      ]),
+      agent: Type.Optional(Type.String({ description: "Subagent key or unique name. Omit only for peek to show all retained agents." })),
+      message: Type.Optional(Type.String({ description: "Direction, BTW question, or resume instruction." }))
+    }),
+    async execute(_id, params) {
+      if (params.action === "peek") {
+        const targets = params.agent ? [registry.resolve(params.agent)].filter((item): item is SubagentRecord => !!item)
+          : registry.records().filter((record) => isRetained(record.run.state));
+        if (!targets.length) return { content: [{ type: "text", text: params.agent ? "Subagent not found: " + params.agent : "No retained subagents." }] };
+        return { content: [{ type: "text", text: targets.map(peekRecord).join("\n\n") }] };
+      }
+      const agent = params.agent ?? "";
+      const record = registry.resolve(agent);
+      if (!record) return { content: [{ type: "text", text: "Subagent not found or name is ambiguous: " + agent }], isError: true };
+      if (params.action === "steer") {
+        const message = cleanBlock(params.message ?? "", MAX_STEER_CHARS);
+        if (!message) return { content: [{ type: "text", text: "steer requires message." }], isError: true };
+        return { content: [{ type: "text", text: registry.steer(record.key, message) ? "Steered " + record.run.name + "." : "Subagent is not currently working; use resume instead." }] };
+      }
+      if (params.action === "ask") {
+        const message = cleanBlock(params.message ?? "", MAX_STEER_CHARS);
+        if (!message) return { content: [{ type: "text", text: "ask requires message." }], isError: true };
+        const answer = await registry.ask(record.key, message);
+        return { content: [{ type: "text", text: answer ? record.run.name + ": " + cleanBlock(answer, 2000) : "No answer arrived before the BTW timeout." }] };
+      }
+      if (params.action === "pause") {
+        const paused = await registry.pause(record.key);
+        return { content: [{ type: "text", text: paused ? "Paused " + record.run.name + "; context and workspace are retained." : "Could not pause " + record.run.name + "." }] };
+      }
+      if (params.action === "resume") {
+        const resumed = registry.resume(record.key, params.message);
+        return { content: [{ type: "text", text: resumed ? "Resumed " + record.run.name + "." : record.run.name + " is not idle or paused." }] };
+      }
+      const report = await registry.stop(record.key);
+      if (!report) return { content: [{ type: "text", text: "Subagent is already retired: " + record.run.name }] };
+      return { content: [{ type: "text", text: controlReport(report) }], details: report };
     }
   });
 }
