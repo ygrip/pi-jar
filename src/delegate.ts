@@ -10,6 +10,14 @@ import { CHILD_BASELINE_ENV, readChildBaseline } from "./child-baselines.ts";
 import type { ModelRoleManager } from "./model-roles.ts";
 import { cleanText, ROLE_PREFIX } from "./status.ts";
 import type { Todo } from "./tasks.ts";
+import {
+  applyDelegateWorktree,
+  CHILD_WORKTREE_ENV,
+  createDelegateWorktree,
+  disposeDelegateWorktree,
+  worktreeChangedFiles,
+  type DelegateWorktree
+} from "./delegate-worktree.ts";
 
 export const DELEGATE_TOOL = "jar_delegate";
 /** Set in child processes so a subagent never delegates again. */
@@ -17,6 +25,10 @@ export const CHILD_ENV = "PI_JAR_CHILD";
 export const MAX_DELEGATES = 4;
 /** Read-only subagents also keep jar_todo so their checklist shows in the activity view. */
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "jar_todo"] as const;
+/** Writable worktree children deliberately have no shell: edits stay inside path-guarded file tools. */
+export const WORKTREE_TOOLS = ["read", "edit", "write", "grep", "find", "ls", "jar_todo"] as const;
+export type DelegateMode = "scout" | "fork" | "worktree";
+type DelegateExecutionMode = DelegateMode | "direct";
 const MAX_OUTPUT_CHARS = 12_000;
 const TIMEOUT_MS = 20 * 60_000;
 const STATUS_REFRESH_MS = 20_000;
@@ -58,6 +70,7 @@ export interface DelegateRun {
   task: string;
   role: string;
   model?: string;
+  mode: DelegateExecutionMode;
   state: DelegateState;
   activity?: string;
   tools: number;
@@ -71,6 +84,10 @@ export interface DelegateRun {
   toolCounts: Record<string, number>;
   filesRead: string[];
   filesEdited: string[];
+  /** Worktree changes successfully copied back into the parent workspace. */
+  appliedFiles: string[];
+  /** Kept only when isolated changes could not safely be applied automatically. */
+  workspace?: string;
   /** The subagent's own jar_todo checklist, mirrored from its tool results. */
   todos: Todo[];
   steered: number;
@@ -105,20 +122,33 @@ export function extensionFlags(argv = process.argv, cwd = process.cwd()): string
   return flags;
 }
 
-/** CLI arguments for one subagent: RPC (so it can be steered), no session, read-only tools unless `write`. */
-export function delegateArgs(model: string | undefined, thinking: string | undefined, write: boolean, argv = process.argv): string[] {
-  const args = ["--mode", "rpc", "--no-session", ...extensionFlags(argv)];
+export interface DelegateForkOptions {
+  source: string;
+  sessionDir: string;
+  tools?: readonly string[];
+}
+
+/** CLI arguments for one subagent: fresh ephemeral session or a real Pi session fork. */
+export function delegateArgs(model: string | undefined, thinking: string | undefined, write: boolean, argv = process.argv,
+  fork?: DelegateForkOptions): string[] {
+  const session = fork ? ["--fork", fork.source, "--session-dir", fork.sessionDir] : ["--no-session"];
+  const args = ["--mode", "rpc", ...session, ...extensionFlags(argv)];
   if (model) args.push("--model", model);
   if (thinking) args.push("--thinking", thinking);
-  if (!write) args.push("--tools", READ_ONLY_TOOLS.join(","));
+  const tools = fork?.tools ?? (!write ? READ_ONLY_TOOLS : undefined);
+  if (tools) args.push("--tools", tools.join(","));
   return args;
 }
 
 /** The subagent's prompt: its rules, how to report back, then the task. */
-export function delegatePrompt(task: string, write: boolean): string {
-  const rules = write
-    ? "You may edit files. Stay strictly within the task; other subagents may be working in the same repository at the same time."
-    : "You are read-only: investigate and report, do not attempt to modify anything.";
+export function delegatePrompt(task: string, write: boolean, mode: DelegateExecutionMode = write ? "direct" : "scout"): string {
+  const rules = mode === "worktree"
+    ? "You inherit the parent conversation but work inside an isolated disposable Git worktree. You may edit only with the provided file tools; shell tools are intentionally unavailable. Stay strictly within the task. Successful non-conflicting changes are copied back to the parent for /diff review."
+    : mode === "fork"
+      ? "You are a read-only fork of the parent conversation: use the inherited context, investigate, and report without modifying files."
+      : write
+        ? "You may edit files. Stay strictly within the task; other subagents may be working in the same repository at the same time."
+        : "You are read-only: investigate and report, do not attempt to modify anything.";
   return [
     `You are a focused subagent working for another agent. ${rules}`,
     "Track multi-step work with jar_todo (when available) so your progress is visible. The user may steer you while you work; follow their messages.",
@@ -520,7 +550,10 @@ export function runReport(run: DelegateRun, now = Date.now()): string {
     run.cost ? `$${run.cost.toFixed(3)}` : "", run.steered ? `steered ${run.steered}×` : ""
   ].filter(Boolean).join(" · ");
   const lines = [`## [${run.index}] ${run.name} (${run.role}${run.model ? " · " + run.model : ""}) — ${run.state}${run.error ? ": " + run.error : ""}`, `- ${facts}`];
+  if (run.mode === "fork" || run.mode === "worktree") lines.push(`- mode: ${run.mode}`);
   if (run.filesEdited.length) lines.push(`- files edited: ${fileList(run.filesEdited, 20)}`);
+  if (run.appliedFiles.length) lines.push(`- applied to parent: ${fileList(run.appliedFiles, 20)}`);
+  if (run.workspace) lines.push(`- isolated worktree kept: ${run.workspace}`);
   if (run.filesRead.length) lines.push(`- files read: ${fileList(run.filesRead, 12)}`);
   if (run.todos.length) {
     const leaves = leafTodos(run.todos);
@@ -532,13 +565,16 @@ export function runReport(run: DelegateRun, now = Date.now()): string {
   return lines.join("\n");
 }
 
+const DelegateModeSchema = Type.Union([Type.Literal("scout"), Type.Literal("fork"), Type.Literal("worktree")]);
 const Parameters = Type.Object({
   tasks: Type.Array(Type.Object({
-    task: Type.String({ description: "A complete, self-contained instruction: the subagent sees nothing else." }),
+    task: Type.String({ description: "Task instruction. scout sees only this task; fork/worktree also inherit the parent's active conversation branch." }),
     name: Type.Optional(Type.String({ description: "Short label, e.g. \"auth scout\"." })),
-    role: Type.Optional(Type.String({ description: "pi-jar role for the model (default \"task\", falls back to the current model)." }))
+    role: Type.Optional(Type.String({ description: "pi-jar role for the model (default \"task\", falls back to the current model)." })),
+    mode: Type.Optional(DelegateModeSchema)
   }), { minItems: 1, maxItems: MAX_DELEGATES }),
-  write: Type.Optional(Type.Boolean({ description: "Allow file edits (default false: read-only tools)." }))
+  mode: Type.Optional(DelegateModeSchema),
+  write: Type.Optional(Type.Boolean({ description: "Deprecated compatibility switch. true keeps the old shared-workspace editing mode; prefer mode=\"worktree\"." }))
 });
 
 const glyph = (state: DelegateState) => state === "done" ? "✔" : state === "failed" ? "✖" : state === "working" ? "●" : "○";
@@ -560,22 +596,26 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   pi.registerTool({
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Run up to ${MAX_DELEGATES} subagents in parallel, each an isolated Pi with a fresh context, on a pi-jar model role (default "task"). Read-only unless write is true. Returns each subagent's report with its tool calls, files read/edited, task checklist and failures.`,
-    promptSnippet: "Use jar_delegate to fan out independent investigations to parallel subagents.",
+    description: `Run up to ${MAX_DELEGATES} parallel subagents on pi-jar model roles. mode=scout is fresh/read-only; mode=fork inherits the parent's active Pi session branch read-only; mode=worktree inherits context and edits in a path-guarded disposable Git worktree whose non-conflicting changes are applied back into /diff. The old write=true shared-workspace mode remains only for compatibility.`,
+    promptSnippet: "Use jar_delegate to fan out work: scout for cheap fresh investigation, fork for context-aware review, worktree for isolated implementation.",
     promptGuidelines: [
-      "Use jar_delegate for independent, parallelizable investigation (scouting several areas, reviewing, researching); give each task complete context because subagents see nothing else.",
-      "Keep delegated work read-only by default. Only set write for clearly separated edits that cannot conflict; never have two subagents edit the same files. Files they edit join /diff for review."
+      "Use scout for independent investigation that needs no conversation history; make its task self-contained.",
+      "Use fork when a read-only reviewer or investigator should inherit the current conversation and decisions.",
+      "Use worktree for implementation. Each writer gets an isolated Git worktree with no shell tool and path-guarded file access; non-conflicting changes are copied back to the parent and join /diff.",
+      "Parallel worktree tasks should own separate files or concerns. If two children touch the same path, pi-jar keeps their worktrees instead of choosing a winner."
     ],
     parameters: Parameters,
     async execute(_id, params, signal, onUpdate, ctx) {
       const id = ++batch;
-      const write = params.write === true;
+      const defaultMode: DelegateExecutionMode = params.mode ?? (params.write === true ? "direct" : "scout");
       const runs: DelegateRun[] = params.tasks.slice(0, MAX_DELEGATES).map((item, index) => {
         const role = cleanText(item.role ?? "task", 32) || "task";
         const resolved = roles.resolve(role) ?? roles.resolve("default");
         const model = resolved ? `${resolved.provider}/${resolved.model}` : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-        return { index: index + 1, name: cleanText(item.name ?? `agent ${index + 1}`, 24), task: item.task, role, ...(model ? { model } : {}),
-          state: "queued", tools: 0, turns: 0, cost: 0, output: "", toolCounts: {}, filesRead: [], filesEdited: [], todos: [], steered: 0, transcript: [], live: "" };
+        const mode: DelegateExecutionMode = item.mode ?? defaultMode;
+        return { index: index + 1, name: cleanText(item.name ?? `agent ${index + 1}`, 24), task: item.task, role, mode, ...(model ? { model } : {}),
+          state: "queued", tools: 0, turns: 0, cost: 0, output: "", toolCounts: {}, filesRead: [], filesEdited: [], appliedFiles: [],
+          todos: [], steered: 0, transcript: [], live: "" };
       });
       // One controller per run: aborting the tool call stops them all, the activity view stops one.
       const controllers = runs.map(() => new AbortController());
@@ -590,11 +630,18 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       }));
       registry.add(...records);
       const thinking = (role: string) => (roles.resolve(role) ?? roles.resolve("default"))?.thinking;
-      // Editing subagents record each file's content before their first change here, for the parent's /diff.
+      const parentSession = ctx.sessionManager?.getSessionFile?.();
+      let forkSessions: string | undefined;
+      if (runs.some((run) => run.mode === "fork" || run.mode === "worktree")) {
+        try { forkSessions = mkdtempSync(join(tmpdir(), "pi-jar-forks-")); }
+        catch (error) { console.error("pi-jar: could not create temporary fork session directory", error); }
+      }
+      // Deprecated direct-write children keep the old baseline bridge. Worktree children are applied
+      // from their isolated snapshot after all parallel runs finish.
       let baselines: string | undefined;
-      if (write && options.changes) {
+      if (runs.some((run) => run.mode === "direct") && options.changes) {
         try { baselines = mkdtempSync(join(tmpdir(), "pi-jar-baselines-")); }
-        catch (error) { console.error("pi-jar: subagent edits will not join /diff", error); }
+        catch (error) { console.error("pi-jar: direct subagent edits will not join /diff", error); }
       }
       const edited = (path: string) => {
         const tracker = options.changes?.();
@@ -603,6 +650,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const baseline = readChildBaseline(baselines, absolute);
         if (baseline !== undefined && tracker.adopt(absolute, baseline)) options.changed?.();
       };
+      const worktrees = new Map<number, DelegateWorktree>();
       // Live teammates: the welcome TEAM row and the footer read this public status contract.
       const publish = () => {
         if (!ctx.hasUI) return;
@@ -616,7 +664,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       };
       // Details are persisted with the session: never the transcript or live text, which the registry holds instead.
       const details = (includeOutput = true) => ({
-        runs: runs.map(({ transcript: _transcript, live: _live, ...run }): RunDetails => includeOutput ? run : { ...run, output: "" }), write
+        runs: runs.map(({ transcript: _transcript, live: _live, ...run }): RunDetails => includeOutput ? run : { ...run, output: "" }),
+        write: params.write === true
       });
       let updateTimer: ReturnType<typeof setTimeout> | undefined;
       let lastUpdateAt = 0;
@@ -642,16 +691,106 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       };
       const refresh = setInterval(publish, STATUS_REFRESH_MS);
       refresh.unref?.();
-      const hooks: DelegateHooks = { ...(baselines ? { env: { [CHILD_BASELINE_ENV]: baselines } } : {}), edited };
+      const failedHandle = (): DelegateHandle => ({ done: Promise.resolve(), steer: () => false });
+      const failBeforeStart = (run: DelegateRun, error: unknown) => {
+        run.state = "failed";
+        run.error = cleanText(error instanceof Error ? error.message : String(error), 300);
+        run.endedAt = Date.now();
+        update();
+      };
       try {
-        handles = runs.map((run, index) => startDelegate(run, delegateArgs(run.model, thinking(run.role), write), delegatePrompt(run.task, write),
-          ctx.cwd, controllers[index]!.signal, update, options.spawnProcess, hooks));
+        handles = runs.map((run, index) => {
+          if ((run.mode === "fork" || run.mode === "worktree") && (!parentSession || !forkSessions)) {
+            failBeforeStart(run, "fork/worktree mode requires a persisted parent Pi session");
+            return failedHandle();
+          }
+          let cwd = ctx.cwd;
+          let fork: DelegateForkOptions | undefined;
+          const env: Record<string, string> = {};
+          const hooks: DelegateHooks = {};
+          const write = run.mode === "direct" || run.mode === "worktree";
+
+          if (run.mode === "fork") fork = { source: parentSession!, sessionDir: forkSessions! };
+          if (run.mode === "worktree") {
+            try {
+              const worktree = createDelegateWorktree(ctx.cwd);
+              worktrees.set(run.index, worktree);
+              run.workspace = worktree.root;
+              cwd = worktree.cwd;
+              env[CHILD_WORKTREE_ENV] = worktree.root;
+              fork = { source: parentSession!, sessionDir: forkSessions!, tools: WORKTREE_TOOLS };
+            } catch (error) {
+              failBeforeStart(run, error);
+              return failedHandle();
+            }
+          } else if (run.mode === "direct" && baselines) {
+            env[CHILD_BASELINE_ENV] = baselines;
+            hooks.edited = edited;
+          }
+          if (Object.keys(env).length) hooks.env = env;
+          return startDelegate(run, delegateArgs(run.model, thinking(run.role), write, process.argv, fork),
+            delegatePrompt(run.task, write, run.mode), cwd, controllers[index]!.signal, update, options.spawnProcess, hooks);
+        });
         await Promise.all(handles.map((handle) => handle.done));
+
+        // Worktree writers are reconciled only after every child stops. This makes overlap detection
+        // deterministic and prevents "last writer wins" from quietly eating another agent's work.
+        const filesByRun = new Map<number, string[]>();
+        const owners = new Map<string, number[]>();
+        for (const run of runs) {
+          const worktree = worktrees.get(run.index);
+          if (!worktree) continue;
+          try {
+            const files = worktreeChangedFiles(worktree);
+            filesByRun.set(run.index, files);
+            run.filesEdited = files;
+            if (run.state === "done") for (const file of files) {
+              const list = owners.get(file) ?? [];
+              list.push(run.index);
+              owners.set(file, list);
+            }
+          } catch (error) {
+            run.state = "failed";
+            run.error = "could not inspect isolated changes: " + cleanText(error instanceof Error ? error.message : String(error), 240);
+          }
+        }
+        const overlaps = new Map<number, string[]>();
+        for (const [file, indexes] of owners) if (indexes.length > 1) for (const index of indexes) {
+          const list = overlaps.get(index) ?? [];
+          list.push(file);
+          overlaps.set(index, list);
+        }
+
+        for (const run of runs) {
+          const worktree = worktrees.get(run.index);
+          if (!worktree) continue;
+          const files = filesByRun.get(run.index) ?? [];
+          if (run.state !== "done") {
+            if (!files.length) { disposeDelegateWorktree(worktree); run.workspace = undefined; }
+            continue;
+          }
+          const overlap = overlaps.get(run.index);
+          if (overlap?.length) {
+            run.state = "failed";
+            run.error = "changes not applied because another worktree edited: " + fileList(overlap, 8);
+            continue;
+          }
+          try {
+            run.appliedFiles = applyDelegateWorktree(worktree, ctx.cwd, files, options.changes?.());
+            if (run.appliedFiles.length) options.changed?.();
+            disposeDelegateWorktree(worktree);
+            run.workspace = undefined;
+          } catch (error) {
+            run.state = "failed";
+            run.error = "changes not applied: " + cleanText(error instanceof Error ? error.message : String(error), 240);
+          }
+        }
       } finally {
         clearInterval(refresh);
         signal?.removeEventListener("abort", abortAll);
         if (baselines) rmSync(baselines, { recursive: true, force: true });
-        for (const run of runs) if (run.state !== "done") { run.state = "failed"; run.endedAt ??= Date.now(); }
+        if (forkSessions) rmSync(forkSessions, { recursive: true, force: true });
+        for (const run of runs) if (run.state !== "done" && run.state !== "failed") { run.state = "failed"; run.endedAt ??= Date.now(); }
         registry.notify();
         flushUpdate();
       }
@@ -659,15 +798,18 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     },
     renderCall(args, theme) {
       const count = Array.isArray(args.tasks) ? args.tasks.length : 0;
+      const requested = args.mode ?? (args.write ? "direct" : "scout");
       return new Text(theme.fg("toolTitle", theme.bold("delegate")) + " " + theme.fg("accent", `${count} subagent${count === 1 ? "" : "s"}`)
-        + theme.fg("dim", args.write ? " · can edit" : " · read-only"), 0, 0);
+        + theme.fg("dim", ` · ${requested}`), 0, 0);
     },
     renderResult(result, { expanded }, theme) {
       const runs = (result.details as { runs?: Array<Partial<RunDetails> & Pick<DelegateRun, "name" | "state" | "role">> } | undefined)?.runs ?? [];
       const rows = runs.map((run) => {
         const leaves = leafTodos(run.todos ?? []);
-        const meta = [run.role, run.activity, run.tools ? `${run.tools} tools` : "", leaves.length ? `${leaves.filter((todo) => todo.done).length}/${leaves.length} tasks` : "",
-          run.filesEdited?.length ? `${run.filesEdited.length} edited` : "", run.cost ? `$${run.cost.toFixed(3)}` : "", run.error].filter(Boolean).join(" · ");
+        const meta = [run.role, run.mode === "fork" || run.mode === "worktree" ? run.mode : "", run.activity, run.tools ? `${run.tools} tools` : "",
+          leaves.length ? `${leaves.filter((todo) => todo.done).length}/${leaves.length} tasks` : "",
+          run.appliedFiles?.length ? `${run.appliedFiles.length} applied` : run.filesEdited?.length ? `${run.filesEdited.length} edited` : "",
+          run.cost ? `${run.cost.toFixed(3)}` : "", run.error].filter(Boolean).join(" · ");
         let row = theme.fg(color(run.state) as never, `  ${glyph(run.state)} ${run.name}`) + theme.fg("dim", " · " + meta);
         if (expanded && run.output) row += "\n" + run.output.split("\n").map((line) => theme.fg("muted", "    " + line)).join("\n");
         return row;
