@@ -34,7 +34,8 @@ import { TASK_ENTRY, TodoStore, todoProgress, todoTotals } from "../src/tasks.ts
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
 import { ChangeTracker } from "../src/changes.ts";
-import { DelegateRegistry, registerDelegate, type DelegateRun } from "../src/delegate.ts";
+import { CHILD_ENV, DelegateRegistry, registerDelegate, type DelegateRun } from "../src/delegate.ts";
+import { CHILD_WORKTREE_ENV, workspacePathAllowed } from "../src/delegate-worktree.ts";
 import { openActivityView, type ActivityTarget } from "../src/activity-view.ts";
 import { ICON_SETS, setIconSet, withIcon } from "../src/icons.ts";
 import { collectPrompts, openPromptSearch } from "../src/prompt-search.ts";
@@ -55,6 +56,25 @@ const LARGE_SESSION_ENTRIES = 800;
 /** Entries Pi writes when a fresh session starts; a branch holding only these has no transcript yet. */
 const SESSION_SETUP_ENTRIES = new Set(["thinking_level_change", "model_change", "session_info"]);
 export default function piJar(pi: ExtensionAPI): void {
+  const delegatedChild = process.env[CHILD_ENV] === "1";
+  const delegatedWorktree = delegatedChild ? process.env[CHILD_WORKTREE_ENV] : undefined;
+  if (delegatedWorktree) {
+    const pathTools = new Set(["read", "edit", "write", "grep", "find", "ls"]);
+    const shellTools = new Set(["bash", "powershell", "jar_shell"]);
+    pi.on("tool_call", (event, ctx) => {
+      if (shellTools.has(event.toolName)) {
+        return { block: true, reason: "Sandboxed worktree subagents cannot run shell tools." };
+      }
+      if (!pathTools.has(event.toolName)) return;
+      const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
+      for (const key of ["path", "file_path", "cwd"]) {
+        const value = input[key];
+        if (typeof value === "string" && value && !workspacePathAllowed(delegatedWorktree, ctx.cwd, value)) {
+          return { block: true, reason: `Sandboxed worktree subagent cannot access outside its workspace: ${value}` };
+        }
+      }
+    });
+  }
   installCompactBuiltinTools(pi);
   let demo = false;
   let visualSettings = defaultVisualSettings();
@@ -230,14 +250,14 @@ export default function piJar(pi: ExtensionAPI): void {
   modelRoles.register((ctx) => openRolesUi(ctx, modelRoles));
   registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges });
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
-  planMode.register();
+  if (!delegatedChild) planMode.register();
   const goalLoop = new GoalLoop(pi, {
     goals: () => goals, todos: () => todos, roles: modelRoles, planActive: () => planMode.isEnabled(),
     maxRounds: () => visualSettings.goalRounds,
     changed: (ctx) => { footerTui?.requestRender(); welcomeTui?.requestRender(); updateTaskWidget(ctx); },
     completed: () => composer.flash("complete", 4000)
   });
-  goalLoop.register();
+  if (!delegatedChild) goalLoop.register();
   planMode.setOnEnter((ctx) => goalLoop.pause(ctx, "plan mode is on"));
   const suggestions = new SuggestionState();
   composer.attachSuggestions(suggestions);
@@ -608,8 +628,13 @@ export default function piJar(pi: ExtensionAPI): void {
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
     let branch: readonly unknown[] = [];
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
-    restoreTodos(ctx, branch);
-    restoreGoal(ctx, branch);
+    if (delegatedChild) {
+      todos.restore([]);
+      goals.restore([]);
+    } else {
+      restoreTodos(ctx, branch);
+      restoreGoal(ctx, branch);
+    }
     // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
@@ -641,7 +666,7 @@ export default function piJar(pi: ExtensionAPI): void {
     // A fresh session is not empty: Pi records the startup thinking level/model as entries.
     const resumed = branch.some((entry) => !(typeof entry === "object" && entry !== null && "type" in entry
       && typeof entry.type === "string" && SESSION_SETUP_ENTRIES.has(entry.type)));
-    if (!resumed) showWelcome(ctx);
+    if (!delegatedChild && !resumed) showWelcome(ctx);
   });
   // Any real prompt dismisses the welcome. Slash commands bypass `input`, so `agent_start` covers them.
   const dismissWelcome = (ctx: ExtensionContext) => {
@@ -684,13 +709,19 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("session_tree", (_event, ctx) => {
     let branch: readonly unknown[] = [];
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
-    restoreTodos(ctx, branch);
-    restoreGoal(ctx, branch);
+    if (!delegatedChild) {
+      restoreTodos(ctx, branch);
+      restoreGoal(ctx, branch);
+    }
     updateCost(ctx);
     composer.refreshSession(ctx);
     sampleFooter(ctx);
   });
-  pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); sampleFooter(ctx); });
+  pi.on("session_compact", (_event, ctx) => {
+    if (!delegatedChild) { restoreTodos(ctx); restoreGoal(ctx); }
+    updateCost(ctx);
+    sampleFooter(ctx);
+  });
   pi.on("model_select", (_event, ctx) => sampleFooter(ctx));
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); sampleFooter(ctx); });
