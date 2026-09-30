@@ -36,6 +36,7 @@ import { WorkingState } from "../src/working.ts";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_ENV, DelegateRegistry, registerDelegate, type DelegateRun } from "../src/delegate.ts";
 import { CHILD_WORKTREE_ENV, workspacePathAllowed } from "../src/delegate-worktree.ts";
+import { createDiscussionPaper, DISCUSSION_FILE_ENV, disposeDiscussionPaper, registerDiscussionTool, SUBAGENT_NAME_ENV } from "../src/discussion.ts";
 import { openActivityView, type ActivityTarget } from "../src/activity-view.ts";
 import { ICON_SETS, setIconSet, withIcon } from "../src/icons.ts";
 import { collectPrompts, openPromptSearch } from "../src/prompt-search.ts";
@@ -114,6 +115,8 @@ export default function piJar(pi: ExtensionAPI): void {
   let workingIndicatorKey = "";
   let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
   let settingsOpen = false;
+  let discussionFile: string | undefined = process.env[DISCUSSION_FILE_ENV];
+  registerDiscussionTool(pi, () => discussionFile, () => process.env[SUBAGENT_NAME_ENV] ?? "moderator");
 
   // A finished list stays visible (all struck through) until the user's next prompt, like Claude.
   let todosAcknowledged = false;
@@ -183,7 +186,8 @@ export default function piJar(pi: ExtensionAPI): void {
   /** Finished work stays visible briefly so a quick run is not a flicker. */
   const ACTIVITY_LINGER_MS = 5000;
   const subagentState = (run: DelegateRun): ActivityState => run.state === "working" ? "running" : run.state === "queued" ? "queued"
-    : run.state === "done" ? "done" : run.error === "stopped" ? "stopped" : "failed";
+    : run.state === "idle" ? "idle" : run.state === "paused" ? "paused"
+      : run.state === "done" ? "done" : run.error === "stopped" ? "stopped" : "failed";
   const shellActivityState = (job: Omit<ShellJob, "lines">): ActivityState => job.status === "running" ? "running"
     : job.status === "killed" ? "stopped" : job.status === "exited" && job.exitCode === 0 ? "done" : "failed";
   const seconds = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; };
@@ -248,7 +252,7 @@ export default function piJar(pi: ExtensionAPI): void {
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
   modelRoles.register((ctx) => openRolesUi(ctx, modelRoles));
-  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges });
+  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges, discussionFile: () => discussionFile });
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
   if (!delegatedChild) planMode.register();
   const goalLoop = new GoalLoop(pi, {
@@ -623,6 +627,10 @@ export default function piJar(pi: ExtensionAPI): void {
     changeCount = 0;
     shells?.dispose();
     subagents.clear();
+    if (!delegatedChild) {
+      disposeDiscussionPaper(discussionFile);
+      discussionFile = createDiscussionPaper();
+    }
     shells = new ShellManager(onShellEvent);
     shells.onChange = () => footerTui?.requestRender();
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
@@ -734,6 +742,7 @@ export default function piJar(pi: ExtensionAPI): void {
     try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
     quotaCache?.stop();
     quotaCache = undefined;
+    if (!delegatedChild) { disposeDiscussionPaper(discussionFile); discussionFile = undefined; }
     todos = undefined;
     changes = undefined;
     changeCount = 0;
