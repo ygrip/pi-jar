@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, writeChildBaseline } from "../src/child-baselines.ts";
-import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation, READ_ONLY_TOOLS, registerDelegate, type DelegateOptions } from "../src/delegate.ts";
+import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation, READ_ONLY_TOOLS, registerDelegate, WORKTREE_TOOLS, type DelegateOptions } from "../src/delegate.ts";
+import { CHILD_WORKTREE_ENV } from "../src/delegate-worktree.ts";
 import { emit, fakeSpawn, say, settle, taskOf, type FakeChild } from "./fake-rpc.ts";
 
 const roles = (map: Record<string, { provider: string; model: string; thinking?: string }>) => ({ resolve: (role: string) => map[role] }) as never;
@@ -30,10 +31,21 @@ test("subagents run in RPC mode with the parent's extensions, read-only tools pl
   assert.deepEqual(args.slice(3, 8), ["-ne", "--extension", join(process.cwd(), "extensions"), "--extension", "/abs/other.ts"], "extension flags are forwarded with absolute paths");
   assert.deepEqual(args.slice(8), ["--model", "anthropic/claude-haiku", "--thinking", "low", "--tools", READ_ONLY_TOOLS.join(",")]);
   assert.ok(READ_ONLY_TOOLS.includes("jar_todo"));
-  assert.ok(!delegateArgs(undefined, undefined, true, ["node", "cli"]).includes("--tools"), "write mode keeps the default tools");
+  assert.ok(!delegateArgs(undefined, undefined, true, ["node", "cli"]).includes("--tools"), "legacy write mode keeps the default tools");
+  const fork = delegateArgs("p/m", undefined, false, ["node", "cli"], { source: "/tmp/parent.jsonl", sessionDir: "/tmp/forks" });
+  assert.deepEqual(fork.slice(0, 7), ["--mode", "rpc", "--fork", "/tmp/parent.jsonl", "--session-dir", "/tmp/forks", "--model"]);
+  assert.ok(!fork.includes("--no-session"));
+  assert.equal(fork.at(-1), READ_ONLY_TOOLS.join(","));
+  const worktree = delegateArgs("p/m", undefined, true, ["node", "cli"], {
+    source: "/tmp/parent.jsonl", sessionDir: "/tmp/forks", tools: WORKTREE_TOOLS
+  });
+  assert.equal(worktree.at(-1), WORKTREE_TOOLS.join(","));
+  assert.ok(!WORKTREE_TOOLS.includes("bash" as never), "worktree writers deliberately have no shell");
   const prompt = delegatePrompt("Find the auth code", false);
   assert.match(prompt, /read-only[\s\S]*jar_todo[\s\S]*## Summary[\s\S]*## Details[\s\S]*## Verification[\s\S]*## Open issues[\s\S]*Task: Find the auth code$/);
   assert.match(delegatePrompt("x", true), /You may edit files/);
+  assert.match(delegatePrompt("review", false, "fork"), /read-only fork of the parent conversation/);
+  assert.match(delegatePrompt("implement", true, "worktree"), /isolated disposable Git worktree[\s\S]*shell tools are intentionally unavailable/);
   assert.deepEqual(piInvocation(["-p"], ["node", "/definitely/missing.js"], "/usr/bin/node"), { command: "pi", args: ["-p"] });
   assert.deepEqual(piInvocation(["-p"], ["pi"], "/opt/pi/bin/pi"), { command: "/opt/pi/bin/pi", args: ["-p"] });
   process.env[CHILD_ENV] = "1";
@@ -261,4 +273,48 @@ test("the registry keeps only the newest eight finished subagents", async () => 
   assert.equal(registry.running(), 0);
   assert.deepEqual(registry.records().map((record) => record.key),
     ["delegate-3-4", "delegate-3-3", "delegate-3-2", "delegate-3-1", "delegate-2-4", "delegate-2-3", "delegate-2-2", "delegate-2-1"], "newest first; the oldest batch dropped off");
+});
+
+
+test("worktree mode forks parent context, isolates edits, and applies successful changes into /diff", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-jar-worktree-run-"));
+  try {
+    const git = (...args: string[]) => {
+      const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+      return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+    };
+    git("init");
+    git("config", "user.email", "test@example.com");
+    git("config", "user.name", "Test");
+    writeFileSync(join(root, "a.ts"), "before\n");
+    git("add", "a.ts");
+    git("commit", "-m", "initial");
+
+    const tracker = new ChangeTracker(() => root);
+    const fake = fakeSpawn((child) => {
+      const call = fake.calls[0]!;
+      assert.notEqual(call.cwd, root, "child runs in a disposable worktree");
+      writeFileSync(join(call.cwd, "a.ts"), "from child\n");
+      emit(child, { type: "tool_execution_start", toolCallId: "e", toolName: "edit", args: { path: "a.ts" } });
+      emit(child, { type: "tool_execution_end", toolCallId: "e", toolName: "edit", result: { content: [] }, isError: false });
+      say(child, "implemented");
+      settle(child);
+    });
+    const tool = register(new DelegateRegistry(), fake.spawn, { changes: () => tracker });
+    const result = await tool.execute("d", { mode: "worktree", tasks: [{ task: "edit a", name: "writer" }] }, undefined, undefined, {
+      cwd: root, hasUI: false, sessionManager: { getSessionFile: () => "/tmp/pi-parent.jsonl" }
+    });
+    const call = fake.calls[0]!;
+    assert.ok(call.args.includes("--fork") && call.args.includes("/tmp/pi-parent.jsonl"), "child receives a real Pi fork");
+    assert.ok(call.args.includes("--tools") && call.args.includes(WORKTREE_TOOLS.join(",")), "writer receives the sandboxed tool allowlist");
+    assert.ok(call.env[CHILD_WORKTREE_ENV], "child receives its workspace boundary");
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "from child\n");
+    assert.equal(tracker.count(), 1, "applied child edits join the parent's /diff tracker");
+    assert.equal(existsSync(call.cwd), false, "successful disposable worktree is cleaned up");
+    const run = result.details.runs[0]!;
+    assert.equal(run.mode, "worktree");
+    assert.deepEqual(run.appliedFiles, ["a.ts"]);
+    assert.equal(run.workspace, undefined);
+    assert.match(result.content[0]!.text, /- mode: worktree[\s\S]*- applied to parent: a\.ts/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
