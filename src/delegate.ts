@@ -57,7 +57,7 @@ const HINT_KEYS = ["command", "path", "file_path", "pattern", "query", "url"] as
 const DIALOGS = new Set(["select", "confirm", "input", "editor"]);
 const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 
-export type DelegateState = "queued" | "working" | "idle" | "paused" | "done" | "failed";
+export type DelegateState = "queued" | "working" | "idle" | "paused" | "stopped" | "done" | "failed";
 export type ToolStatus = "running" | "done" | "error";
 /** One transcript row; `rev` changes whenever the entry does, so views can cache their rendering. */
 export type TranscriptEntry =
@@ -686,7 +686,7 @@ export class DelegateRegistry {
   }
   async stop(key: string): Promise<SubagentStopReport | undefined> {
     const record = this.resolve(key);
-    if (!record || record.run.state === "done") return undefined;
+    if (!record || record.run.state === "done" || record.run.state === "stopped") return undefined;
     const report = await record.stop();
     this.notify();
     return report;
@@ -798,7 +798,7 @@ const Parameters = Type.Object({
   write: Type.Optional(Type.Boolean({ description: "Deprecated compatibility switch. true keeps the old shared-workspace editing mode; prefer mode=\"worktree\"." }))
 });
 
-const glyph = (state: DelegateState) => state === "done" ? "✔" : state === "failed" ? "✖" : state === "working" ? "●" : "○";
+const glyph = (state: DelegateState) => state === "done" ? "✔" : state === "failed" ? "✖" : state === "stopped" ? "■" : state === "working" ? "●" : "○";
 const color = (state: DelegateState) => state === "done" ? "success" : state === "failed" ? "error" : state === "working" ? "accent" : "dim";
 type RunDetails = Omit<DelegateRun, "transcript" | "live">;
 
@@ -1087,7 +1087,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           }
         }
         cleanupPrivate(run.index, false);
-        if (run.state !== "failed") run.state = run.error ? "failed" : "done";
+        if (run.state !== "failed") run.state = run.error ? "failed" : "stopped";
         run.endedAt ??= Date.now();
         update();
         return {
