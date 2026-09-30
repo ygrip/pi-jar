@@ -154,7 +154,8 @@ export function delegatePrompt(task: string, write: boolean, mode: DelegateExecu
         : "You are read-only: investigate and report, do not attempt to modify anything.";
   return [
     `You are a focused subagent working for another agent. ${rules}`,
-    "Track multi-step work with jar_todo (when available) so your progress is visible. The user may steer you while you work; follow their messages.",
+    "Track multi-step work with jar_todo (when available) so your progress is visible. The moderator may steer, pause or resume you; preserve scope across those controls.",
+    "Use jar_discuss when available for short cross-agent questions and answers. Keep discussion entries narrow; do not turn the shared paper into a transcript.",
     "Finish with a self-contained report in these sections:",
     "## Summary — the outcome in one to three sentences.",
     "## Details — findings or changes, with file paths (and line numbers where useful).",
@@ -662,7 +663,7 @@ export class DelegateRegistry {
   }
   async stop(key: string): Promise<SubagentStopReport | undefined> {
     const record = this.resolve(key);
-    if (!record || !isRetained(record.run.state)) return undefined;
+    if (!record || record.run.state === "done") return undefined;
     const report = await record.stop();
     this.notify();
     return report;
@@ -705,9 +706,7 @@ export class DelegateRegistry {
     const records = [...this.entries.values()].map(({ record }) => record);
     this.entries.clear();
     for (const record of records) {
-      if (isRetained(record.run.state)) {
-        try { record.discard(); } catch { /* best effort */ }
-      }
+      try { record.discard(); } catch { /* best effort */ }
     }
     this.notify();
   }
@@ -752,7 +751,7 @@ export function runReport(run: DelegateRun, now = Date.now()): string {
   if (run.mode === "fork" || run.mode === "worktree") lines.push(`- mode: ${run.mode}`);
   if (run.filesEdited.length) lines.push(`- files edited: ${fileList(run.filesEdited, 20)}`);
   if (run.appliedFiles.length) lines.push(`- applied to parent: ${fileList(run.appliedFiles, 20)}`);
-  if (run.workspace) lines.push(`- isolated worktree kept: ${run.workspace}`);
+  if (run.workspace) lines.push(`- workspace: ${run.workspace}`);
   if (run.filesRead.length) lines.push(`- files read: ${fileList(run.filesRead, 12)}`);
   if (run.todos.length) {
     const leaves = leafTodos(run.todos);
@@ -908,6 +907,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       });
       let updateTimer: ReturnType<typeof setTimeout> | undefined;
       let lastUpdateAt = 0;
+      let toolReturned = false;
       const emitUpdate = () => {
         updateTimer = undefined;
         lastUpdateAt = Date.now();
@@ -916,7 +916,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       };
       const update = () => {
         registry.notify();
-        if (!onUpdate) { publish(); return; }
+        if (toolReturned || !onUpdate) { publish(); return; }
         const wait = Math.max(0, LIVE_UPDATE_MS - (Date.now() - lastUpdateAt));
         if (wait === 0) { if (updateTimer) clearTimeout(updateTimer); emitUpdate(); return; }
         if (!updateTimer) { updateTimer = setTimeout(emitUpdate, wait); updateTimer.unref?.(); }
@@ -1060,10 +1060,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         if (baselines) rmSync(baselines, { recursive: true, force: true });
         for (const run of runs) {
           if (run.mode === "direct") cleanupPrivate(run.index, true);
-          else if (run.state === "failed") cleanupPrivate(run.index, true);
+          else if (run.state === "failed") cleanupPrivate(run.index, false);
         }
         registry.notify();
         flushUpdate();
+        toolReturned = true;
       }
       return { content: [{ type: "text", text: runs.map((run) => runReport(run)).join("\n\n") }], details: details() };
     },
