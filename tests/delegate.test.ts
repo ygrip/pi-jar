@@ -239,51 +239,58 @@ test("files a subagent edits join the parent's /diff once each, with the subagen
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("stopping one subagent from the registry leaves the rest of its batch running", async () => {
+test("stopping one subagent retires it with a progress report and leaves the rest running", async () => {
   const { spawn, children } = fakeSpawn(() => {});
   const registry = new DelegateRegistry();
   const pending = register(registry, spawn).execute("d", { tasks: [{ task: "one", name: "first" }, { task: "two", name: "second" }] }, undefined, undefined, quiet);
   await tick();
   const [first, second] = registry.records();
   assert.equal(registry.running(), 2);
-  assert.equal(registry.stop(first!.key), true);
-  assert.equal(registry.stop(first!.key), false, "already finished");
-  assert.equal(registry.stop("delegate-9-9"), false, "unknown key");
-  assert.deepEqual(children.map((child) => child.killed), [["SIGTERM"], []]);
-  assert.equal(first!.run.error, "stopped");
+  const report = await registry.stop(first!.key);
+  assert.equal(report?.state, "done");
+  assert.equal(report?.task, "one");
+  assert.equal(await registry.stop(first!.key), undefined, "already retired");
+  assert.equal(await registry.stop("delegate-9-9"), undefined, "unknown key");
+  assert.equal(children[0]!.stdin.writableEnded, true, "stop retires the child process");
   assert.equal(registry.running(), 1);
-  assert.deepEqual(registry.records().map((record) => record.key), [second!.key, first!.key], "live runs first, finished after");
+  assert.deepEqual(registry.records().map((record) => record.key), [second!.key, first!.key], "retained runs stay ahead of retired ones");
   say(children[1]!, "two done");
   settle(children[1]!);
   const text = (await pending).content[0]!.text;
-  assert.match(text, /\[1\] first \(task\) — failed: stopped/);
-  assert.match(text, /\[2\] second \(task\) — done\n[\s\S]*\ntwo done$/);
+  assert.match(text, /\[1\] first \(scout\) — done/);
+  assert.match(text, /\[2\] second \(scout\) — idle\n[\s\S]*\ntwo done$/);
 });
 
-test("clearing a session stops its live subagents and removes their details", async () => {
+test("clearing a session retires retained subagents and removes their details", async () => {
   const { spawn, children } = fakeSpawn(() => {});
   const registry = new DelegateRegistry();
   const pending = register(registry, spawn).execute("d", { tasks: [{ task: "one" }, { task: "two" }] }, undefined, undefined, quiet);
   await tick();
   registry.clear();
-  assert.deepEqual(children.map((child) => child.killed), [["SIGTERM"], ["SIGTERM"]]);
   assert.deepEqual(registry.records(), []);
   await pending;
+  await tick();
+  assert.ok(children.every((child) => child.stdin.writableEnded), "session clear closes retained child RPC processes");
   assert.deepEqual(registry.records(), [], "old process events cannot repopulate a new session");
 });
 
-test("the registry keeps only the newest eight finished subagents", async () => {
+test("the registry keeps only the newest eight retired subagents", async () => {
   const { spawn } = fakeSpawn((child) => settle(child));
   const registry = new DelegateRegistry();
   const tool = register(registry, spawn);
-  for (let batch = 0; batch < 3; batch++) await tool.execute("d", { tasks: [1, 2, 3, 4].map((n) => ({ task: `t${n}` })) }, undefined, undefined, quiet);
+  for (let batch = 0; batch < 3; batch++) {
+    await tool.execute("d", { tasks: [1, 2, 3, 4].map((n) => ({ task: `t${n}` })) }, undefined, undefined, quiet);
+    const retained = registry.records().filter((record) => record.run.state === "idle");
+    await Promise.all(retained.map((record) => registry.stop(record.key)));
+  }
   assert.equal(registry.running(), 0);
+  assert.equal(registry.retained(), 0);
   assert.deepEqual(registry.records().map((record) => record.key),
-    ["delegate-3-4", "delegate-3-3", "delegate-3-2", "delegate-3-1", "delegate-2-4", "delegate-2-3", "delegate-2-2", "delegate-2-1"], "newest first; the oldest batch dropped off");
+    ["delegate-3-4", "delegate-3-3", "delegate-3-2", "delegate-3-1", "delegate-2-4", "delegate-2-3", "delegate-2-2", "delegate-2-1"], "newest retired agents are kept");
 });
 
 
-test("worktree mode forks parent context, isolates edits, and applies successful changes into /diff", async () => {
+test("worktree mode retains isolated edits until stop, then safely applies them into /diff", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-jar-worktree-run-"));
   try {
     const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
@@ -305,7 +312,8 @@ test("worktree mode forks parent context, isolates edits, and applies successful
       say(child, "implemented");
       settle(child);
     });
-    const tool = register(new DelegateRegistry(), fake.spawn, { changes: () => tracker });
+    const registry = new DelegateRegistry();
+    const tool = register(registry, fake.spawn, { changes: () => tracker });
     const result = await tool.execute("d", { mode: "worktree", tasks: [{ task: "edit a", name: "writer" }] }, undefined, undefined, {
       cwd: root, hasUI: false, sessionManager: { getSessionFile: () => "/tmp/pi-parent.jsonl" }
     });
@@ -313,14 +321,19 @@ test("worktree mode forks parent context, isolates edits, and applies successful
     assert.ok(call.args.includes("--fork") && call.args.includes("/tmp/pi-parent.jsonl"), "child receives a real Pi fork");
     assert.ok(call.args.includes("--tools") && call.args.includes(WORKTREE_TOOLS.join(",")), "writer receives the sandboxed tool allowlist");
     assert.ok(call.env[CHILD_WORKTREE_ENV], "child receives its workspace boundary");
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "before\n", "parent stays untouched while the worker is reusable");
+    assert.equal(tracker.count(), 0);
+    assert.ok(call.cwd && existsSync(call.cwd), "worktree remains available while idle");
+    assert.equal(result.details.runs[0]!.state, "idle");
+    assert.match(result.content[0]!.text, /- mode: worktree[\s\S]*- workspace:/);
+
+    const [record] = registry.records();
+    const report = await registry.stop(record!.key);
+    assert.deepEqual(report?.changed, ["a.ts"]);
+    assert.deepEqual(report?.applied, ["a.ts"]);
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "from child\n");
-    assert.equal(tracker.count(), 1, "applied child edits join the parent's /diff tracker");
+    assert.equal(tracker.count(), 1, "stopping reconciles the worker into /diff");
     assert.ok(call.cwd);
-    assert.equal(existsSync(call.cwd), false, "successful disposable worktree is cleaned up");
-    const run = result.details.runs[0]!;
-    assert.equal(run.mode, "worktree");
-    assert.deepEqual(run.appliedFiles, ["a.ts"]);
-    assert.equal(run.workspace, undefined);
-    assert.match(result.content[0]!.text, /- mode: worktree[\s\S]*- applied to parent: a\.ts/);
+    assert.equal(existsSync(call.cwd), false, "finalized worktree is cleaned up");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
