@@ -27,7 +27,7 @@ const initRepo = () => {
 
 test("delegate worktree snapshots dirty and untracked parent state, then applies only child deltas", () => {
   const { root } = initRepo();
-  let worktree;
+  let worktree: ReturnType<typeof createDelegateWorktree> | undefined;
   try {
     writeFileSync(join(root, "tracked.txt"), "parent dirty\n");
     writeFileSync(join(root, "untracked.txt"), "parent untracked\n");
