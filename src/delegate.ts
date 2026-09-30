@@ -641,7 +641,7 @@ export class DelegateRegistry {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
   }
-  /** Queued/working first (oldest first), then finished ones newest first. */
+  /** Retained agents first (oldest first), then retired ones newest first. */
   records(): SubagentRecord[] {
     this.sweep();
     const live: SubagentRecord[] = [];
@@ -653,48 +653,78 @@ export class DelegateRegistry {
     return [...live, ...finished.map((entry) => entry.record)];
   }
   get(key: string): SubagentRecord | undefined { return this.entries.get(key)?.record; }
-  /** Abort one queued/working run, leaving the rest of its batch alone; false when unknown or already finished. */
-  stop(key: string): boolean {
-    const record = this.entries.get(key)?.record;
-    if (!record || !isActive(record.run.state)) return false;
-    record.stop();
-    this.notify();
-    return true;
+  resolve(ref: string): SubagentRecord | undefined {
+    const exact = this.get(ref);
+    if (exact) return exact;
+    const name = cleanText(ref, 48).toLowerCase();
+    const matches = this.records().filter((record) => record.run.name.toLowerCase() === name);
+    return matches.length === 1 ? matches[0] : undefined;
   }
-  /** Send a steering message to one working run; false when it cannot take one. */
+  async stop(key: string): Promise<SubagentStopReport | undefined> {
+    const record = this.resolve(key);
+    if (!record || !isRetained(record.run.state)) return undefined;
+    const report = await record.stop();
+    this.notify();
+    return report;
+  }
+  async pause(key: string): Promise<boolean> {
+    const record = this.resolve(key);
+    if (!record || !isRetained(record.run.state)) return false;
+    const paused = await record.pause();
+    this.notify();
+    return paused;
+  }
+  resume(key: string, text?: string): boolean {
+    const record = this.resolve(key);
+    if (!record || !isRetained(record.run.state)) return false;
+    const resumed = record.resume(text);
+    if (resumed) this.notify();
+    return resumed;
+  }
   steer(key: string, text: string): boolean {
-    const record = this.entries.get(key)?.record;
+    const record = this.resolve(key);
     return !!record && record.run.state === "working" && record.steer(text);
+  }
+  async ask(key: string, text: string): Promise<string | undefined> {
+    const record = this.resolve(key);
+    if (!record || !isRetained(record.run.state)) return undefined;
+    return record.ask(text);
   }
   running(): number {
     let count = 0;
-    for (const { record } of this.entries.values()) if (isActive(record.run.state)) count++;
+    for (const { record } of this.entries.values()) if (isRunning(record.run.state)) count++;
     return count;
   }
-  /** Stop outstanding runs on session changes/shutdown and forget their transcript. */
+  retained(): number {
+    let count = 0;
+    for (const { record } of this.entries.values()) if (isRetained(record.run.state)) count++;
+    return count;
+  }
+  /** Session changes discard retained workers and their private workspaces; they never auto-apply here. */
   clear(): void {
-    const stopping = [...this.entries.values()].filter(({ record }) => isActive(record.run.state)).map(({ record }) => record.stop);
+    const records = [...this.entries.values()].map(({ record }) => record);
     this.entries.clear();
-    for (const stop of stopping) stop();
+    for (const record of records) {
+      if (isRetained(record.run.state)) {
+        try { record.discard(); } catch { /* best effort */ }
+      }
+    }
     this.notify();
   }
-  /** jar_delegate's side: list new runs. */
   add(...records: SubagentRecord[]): void {
     for (const record of records) this.entries.set(record.key, { record });
     this.notify();
   }
-  /** jar_delegate's side: a run changed. */
   notify(): void {
     this.sweep();
     for (const listener of this.listeners) {
       try { listener(); } catch { /* views are decoration; a broken one must not break the run */ }
     }
   }
-  /** Stamp runs in the order they finish and keep only the newest MAX_FINISHED of them. */
   private sweep(): void {
     let finished = 0;
     for (const entry of this.entries.values()) {
-      if (isActive(entry.record.run.state)) continue;
+      if (isRetained(entry.record.run.state)) { entry.finished = undefined; continue; }
       entry.finished ??= ++this.sequence;
       finished++;
     }
