@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { Todo, TodoInput, TodoStatus } from "./tasks.ts";
 import { TODO_STATUSES, TodoStore, todoMark, todoProgress, todoTotals } from "./tasks.ts";
 
-const ACTIONS = ["write", "list", "append", "remove", "replace", "add", "start", "done", "open", "edit", "delete"] as const;
+const ACTIONS = ["write", "list", "append", "remove", "update", "add", "start", "done", "open", "edit", "delete"] as const;
 const Action = Type.Unsafe<(typeof ACTIONS)[number]>({ type: "string", enum: [...ACTIONS] });
 const Status = Type.Unsafe<(typeof TODO_STATUSES)[number]>({ type: "string", enum: [...TODO_STATUSES] });
 const Content = Type.String({ description: "Imperative task title, e.g. \"Run the tests\"." });
@@ -19,10 +19,10 @@ const Parameters = Type.Object({
     subtasks: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.String()), content: Content, status: Status, activeForm: ActiveForm }), {
       description: "Optional steps of this task (one level deep). The task's status then follows its subtasks."
     }))
-  }), { description: "For append: new tasks only. For replace: exactly one replacement task. With write (or no action): the complete list, replacing it." })),
+  }), { description: "For append: new tasks only. For update: exactly one updated task. With write (or no action): the complete list, replacing it." })),
   action: Type.Optional(Action),
-  id: Type.Optional(Type.String({ description: "Stable task id for replace/remove/start/done/open/edit/delete. On a parent, start runs its first open subtask; done/open apply to all its subtasks." })),
-  title: Type.Optional(Type.String({ description: "Task title for append/add/edit/replace." })),
+  id: Type.Optional(Type.String({ description: "Stable task id for update/remove/start/done/open/edit/delete. On a parent, start runs its first open subtask; done/open apply to all its subtasks." })),
+  title: Type.Optional(Type.String({ description: "Task title for append/add/edit/update." })),
   status: Type.Optional(Status),
   activeForm: ActiveForm,
   parent: Type.Optional(Type.String({ description: "For append/add: id of a top-level task to add the new task under as a subtask." })),
@@ -42,6 +42,8 @@ interface TaskToolDetails {
   changed?: string;
   /** Full stable id index, including items outside the bounded preview. */
   ids?: { id: string; title: string; parentId?: string }[];
+  /** Optional deliberately small render surface for terse mutations such as start/done. */
+  display?: Todo[];
   truncated?: boolean;
   /** Subtask counts of previewed parents when the preview cuts the list. */
   progress?: { id: string; done: number; total: number }[];
@@ -85,11 +87,13 @@ export function registerTaskTool(
   pi.registerTool({
     name: "jar_todo",
     label: "tasks",
-    description: "Maintain session tasks incrementally: append adds todos (or title), remove deletes id and its subtasks, replace updates only id using title/status/activeForm or exactly one todos item. Omitted replacement fields/subtasks are preserved. append with parent adds subtasks. Stable IDs are returned for every task. Legacy write (or todos without action) replaces the entire list. add/delete and start/done/open/edit/list remain supported.",
-    promptSnippet: "Track multi-step work with jar_todo: append new tasks, replace/remove by stable id, keep one leaf in_progress, complete tasks as they finish.",
+    description: "Maintain session tasks: write establishes a fresh complete task plan, update changes one existing task by stable id, append adds genuinely new work, and remove deletes one task tree. start/done/open/edit remain concise status operations. Stable IDs are returned for every task.",
+    promptSnippet: "Track multi-step work with jar_todo: write the task plan first, update/remove existing tasks by stable id, append only when new work arrives mid-run, and keep one leaf in_progress.",
     promptGuidelines: [
       "Use jar_todo proactively, without waiting for the user, for any task with three or more distinct steps, when the user gives several tasks, or right after receiving new instructions. Skip it for single trivial requests and pure questions.",
-      "Prefer incremental actions: append with todos adds only new tasks; replace with id updates only that task; remove with id deletes only that task tree. Use the returned stable IDs. write with todos is legacy full-list replacement and removes omitted tasks. Each todos item has content, status, and optional activeForm/subtasks.",
+      "Prefer write when establishing the task plan for a new request. If the existing checklist is fully completed, start the next request with a fresh write rather than appending onto old completed work.",
+      "Use update with a stable id to revise one existing task and remove to delete one task tree. Use append mainly when the user steers or adds genuinely new requirements while an active checklist is already in progress; do not use append as the default way to create a new plan.",
+      "write with todos is the complete current task plan and removes omitted tasks. Each item has content, status, and optional activeForm/subtasks.",
       "Break a large task into `subtasks` (same shape, one level deep). A parent's status follows its subtasks: it is completed when all of them are. Progress counts leaf tasks (subtasks and tasks without subtasks).",
       "Keep exactly one leaf task in_progress at a time. Mark a task in_progress before you start it and completed immediately after it is verified; do not batch completions.",
       "Only mark a task completed when it is fully done. If tests fail, work is partial or you are blocked, keep it in_progress and add a task for what must be resolved. Remove tasks that are no longer relevant."
@@ -109,7 +113,7 @@ export function registerTaskTool(
           if (!Array.isArray(params.todos)) throw new Error();
           inputs = params.todos.map(toInput);
         } catch { error = "todos must be an array of task objects with array subtasks."; }
-        if (!["write", "append", "replace"].includes(action)) error = "todos may only be used with write, append, or replace; no tasks were changed.";
+        if (!["write", "append", "update"].includes(action)) error = "todos may only be used with write, append, or update; no tasks were changed.";
       }
       if (!error) switch (action) {
         case "list":
@@ -125,15 +129,15 @@ export function registerTaskTool(
           if (!error) changedId = current.all().find((item) => !before.has(item.id))?.id;
           break;
         }
-        case "replace": {
-          if (!params.id) { error = "replace needs a valid existing task id."; break; }
-          if (inputs && (inputs.length !== 1 || params.title !== undefined || params.status !== undefined || params.activeForm !== undefined)) { error = "replace accepts exactly one todos item OR title/status/activeForm fields."; break; }
+        case "update": {
+          if (!params.id) { error = "update needs a valid existing task id."; break; }
+          if (inputs && (inputs.length !== 1 || params.title !== undefined || params.status !== undefined || params.activeForm !== undefined)) { error = "update accepts exactly one todos item OR title/status/activeForm fields."; break; }
           const replacement = inputs?.[0] ?? {
             ...(params.title !== undefined ? { title: params.title } : {}),
             ...(params.status !== undefined ? { status: params.status } : {}),
             ...(params.activeForm !== undefined ? { activeForm: params.activeForm } : {})
           };
-          error = current.replace(params.id, replacement);
+          error = current.update(params.id, replacement);
           if (!error) changedId = params.id;
           break;
         }
@@ -154,7 +158,7 @@ export function registerTaskTool(
           if (!item) error = `${action} needs a valid id from jar_todo list.`;
           else if (action === "start" && progress.total && progress.done === progress.total) error = `every subtask of ${item.id} is completed; open it or add a subtask first.`;
           else if (!current.setStatus(item.id, action === "start" ? "in_progress" : action === "done" ? "completed" : "pending")) error = "Could not save the task.";
-          else changedId = item.id;
+          else changedId = action === "start" ? (current.current()?.id ?? item.id) : item.id;
           break;
         }
         case "edit":
@@ -177,6 +181,8 @@ export function registerTaskTool(
       const group = root ? items.filter((item) => item.id === root || item.parentId === root) : [];
       const mutationItems = action === "write" || action === "append" ? items : group;
       const mutationPreview = mutationItems.slice(0, 8);
+      const terseMutation = action === "start" || action === "done";
+      const terseItem = terseMutation && changedId ? items.find((item) => item.id === changedId) : undefined;
       // Keep task prose bounded while still returning every addressable id in canonical order.
       const idIndex = mutationItems.length > 8
         ? "\nTask IDs (list order): " + items.map((item, index) => `${index + 1}=${item.id}`).join(", ") + "\nUse list for all task titles."
@@ -185,7 +191,11 @@ export function registerTaskTool(
         ? `Could not ${action} tasks: ${error} (${summary(items)}).`
         : action === "list"
           ? `Tasks (${summary(items)}):\n${lines(items)}`
-          : `Task list updated (${summary(items)}).${mutationPreview.length ? "\n" + mutationPreview.map((item) => line(items, item)).join("\n") : ""}${idIndex}\n${REMINDER}`;
+          : action === "start" && terseItem
+            ? `Started task:\n${line(items, terseItem)}`
+            : action === "done" && terseItem
+              ? `Completed task:\n${line(items, terseItem)}`
+              : `Task list updated (${summary(items)}).${mutationPreview.length ? "\n" + mutationPreview.map((item) => line(items, item)).join("\n") : ""}${idIndex}\n${REMINDER}`;
       // A subagent's parent mirrors the checklist from these details, so children send it whole.
       const preview = process.env.PI_JAR_CHILD ? items : items.slice(0, 8);
       const truncated = preview.length < items.length;
@@ -198,6 +208,7 @@ export function registerTaskTool(
         details: {
           action, items: preview, total: state.total, done: state.done, count: items.length,
           ids: items.map(({ id, title, parentId }) => ({ id, title, ...(parentId ? { parentId } : {}) })),
+          ...(terseItem ? { display: [{ ...terseItem }] } : {}),
           ...(state.current ? { current: state.current } : {}),
           ...(truncated ? { truncated: true } : {}),
           ...(progress.length ? { progress } : {}),
@@ -218,12 +229,13 @@ export function registerTaskTool(
       if (isPartial) return new Text(theme.fg("warning", "Updating tasks…"), 0, 0);
       const details = result.details as TaskToolDetails | undefined;
       const items = details?.items ?? [];
+      const displayItems = details?.display ?? items;
       // Older results predate `count`, when `total` counted every item.
       const count = details?.count ?? details?.total ?? items.length;
       const totals = details?.total === undefined ? todoTotals(items) : { done: details.done, total: details.total };
       if (!count) return new Text(theme.fg("dim", "No tracked tasks."), 0, 0);
       const known = new Map((details?.progress ?? []).map((value) => [value.id, value]));
-      const shown = expanded ? items : items.slice(0, 8);
+      const shown = details?.display ? displayItems : expanded ? items : items.slice(0, 8);
       let text = theme.fg("dim", `${totals.done}/${totals.total} done${details?.current ? " · now: " + details.current : ""}`);
       for (const item of shown) text += "\n" + todoRow(item, (color, value) => theme.fg(color, value), (value) => theme.bold(value), known.get(item.id) ?? todoProgress(items, item.id));
       if (details?.truncated || shown.length < count) text += "\n" + theme.fg("dim", `  … +${Math.max(0, count - shown.length)} more · /jar tasks`);
