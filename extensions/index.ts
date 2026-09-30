@@ -186,15 +186,15 @@ export default function piJar(pi: ExtensionAPI): void {
   /** Finished work stays visible briefly so a quick run is not a flicker. */
   const ACTIVITY_LINGER_MS = 5000;
   const subagentState = (run: DelegateRun): ActivityState => run.state === "working" ? "running" : run.state === "queued" ? "queued"
-    : run.state === "idle" ? "idle" : run.state === "paused" ? "paused"
-      : run.state === "done" ? "done" : run.error === "stopped" ? "stopped" : "failed";
+    : run.state === "idle" ? "idle" : run.state === "paused" ? "paused" : run.state === "stopped" ? "stopped"
+      : run.state === "done" ? "done" : "failed";
   const shellActivityState = (job: Omit<ShellJob, "lines">): ActivityState => job.status === "running" ? "running"
     : job.status === "killed" ? "stopped" : job.status === "exited" && job.exitCode === 0 ? "done" : "failed";
   const seconds = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; };
   const footerActivity = (now: number): FooterActivity[] => {
     const rows: FooterActivity[] = [];
     for (const { key, run } of subagents.records()) {
-      if ((run.state === "done" || run.state === "failed") && run.endedAt && now - run.endedAt > ACTIVITY_LINGER_MS) continue;
+      if ((run.state === "done" || run.state === "failed" || run.state === "stopped") && run.endedAt && now - run.endedAt > ACTIVITY_LINGER_MS) continue;
       rows.push({ kind: "subagent", id: key, name: run.name, state: subagentState(run),
         detail: run.error ?? run.activity ?? cleanText(run.task, 120),
         stats: [run.tools ? `${run.tools} tools` : "", run.startedAt ? seconds((run.endedAt ?? now) - run.startedAt) : ""].filter(Boolean).join(" · ") });
