@@ -665,7 +665,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       // Details are persisted with the session: never the transcript or live text, which the registry holds instead.
       const details = (includeOutput = true) => ({
         runs: runs.map(({ transcript: _transcript, live: _live, ...run }): RunDetails => includeOutput ? run : { ...run, output: "" }),
-        write: params.write === true
+        write: runs.some((run) => run.mode === "direct" || run.mode === "worktree")
       });
       let updateTimer: ReturnType<typeof setTimeout> | undefined;
       let lastUpdateAt = 0;
