@@ -66,20 +66,38 @@ export function discussionEntries(file: string | undefined): DiscussionEntry[] {
   return file ? readPaper(file).entries : [];
 }
 
+function withPaperLock<T>(file: string, run: () => T): T {
+  const lock = file + ".lock";
+  const sleep = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      mkdirSync(lock);
+      try { return run(); }
+      finally { rmSync(lock, { recursive: true, force: true }); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      Atomics.wait(sleep, 0, 0, 10);
+    }
+  }
+  throw new Error("discussion paper is busy");
+}
+
 function append(file: string, actor: string, entry: Omit<DiscussionEntry, "id" | "from" | "at">): DiscussionEntry {
-  const paper = readPaper(file);
-  paper.seq++;
-  const next: DiscussionEntry = {
-    id: "d" + paper.seq,
-    from: safeActor(actor),
-    at: new Date().toISOString(),
-    ...entry,
-    text: cleanText(entry.text, MAX_DISCUSSION_TEXT)
-  };
-  paper.entries.push(next);
-  if (paper.entries.length > MAX_DISCUSSION_ENTRIES) paper.entries.splice(0, paper.entries.length - MAX_DISCUSSION_ENTRIES);
-  writePaper(file, paper);
-  return next;
+  return withPaperLock(file, () => {
+    const paper = readPaper(file);
+    paper.seq++;
+    const next: DiscussionEntry = {
+      id: "d" + paper.seq,
+      from: safeActor(actor),
+      at: new Date().toISOString(),
+      ...entry,
+      text: cleanText(entry.text, MAX_DISCUSSION_TEXT)
+    };
+    paper.entries.push(next);
+    if (paper.entries.length > MAX_DISCUSSION_ENTRIES) paper.entries.splice(0, paper.entries.length - MAX_DISCUSSION_ENTRIES);
+    writePaper(file, paper);
+    return next;
+  });
 }
 
 const render = (entries: readonly DiscussionEntry[]): string => {
