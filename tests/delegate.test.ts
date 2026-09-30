@@ -247,7 +247,7 @@ test("stopping one subagent retires it with a progress report and leaves the res
   const [first, second] = registry.records();
   assert.equal(registry.running(), 2);
   const report = await registry.stop(first!.key);
-  assert.equal(report?.state, "done");
+  assert.equal(report?.state, "stopped");
   assert.equal(report?.task, "one");
   assert.equal(await registry.stop(first!.key), undefined, "already retired");
   assert.equal(await registry.stop("delegate-9-9"), undefined, "unknown key");
@@ -257,7 +257,7 @@ test("stopping one subagent retires it with a progress report and leaves the res
   say(children[1]!, "two done");
   settle(children[1]!);
   const text = (await pending).content[0]!.text;
-  assert.match(text, /\[1\] first \(scout\) — done/);
+  assert.match(text, /\[1\] first \(scout\) — stopped/);
   assert.match(text, /\[2\] second \(scout\) — idle\n[\s\S]*\ntwo done$/);
 });
 
@@ -389,6 +389,6 @@ test("moderator can peek, resume, pause, ask and stop the same retained subagent
 
   const stopped = await control.execute("s", { action: "stop", agent: record!.key }, undefined, undefined, quiet);
   assert.match(stopped.content[0]!.text, /workspace: none[\s\S]*changed: none[\s\S]*remaining:/);
-  assert.equal(record!.run.state, "done");
+  assert.equal(record!.run.state, "stopped");
   assert.equal(fake.children[0]!.stdin.writableEnded, true);
 });
