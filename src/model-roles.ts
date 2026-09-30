@@ -241,12 +241,13 @@ export class ModelRoleManager {
 
   async activate(role: string, ctx: ExtensionContext, quiet = false): Promise<boolean> {
     const primary = resolveRole(this.merged(), role);
-    if (primary && "error" in primary) {
-      if (!quiet) ctx.ui.notify("Role " + role + ": " + primary.error, "warning");
-      return false;
-    }
+    const primaryError = primary && "error" in primary ? primary.error : undefined;
     const candidates = this.resolveCandidates(role);
     if (!candidates.length) {
+      if (primaryError) {
+        if (!quiet) ctx.ui.notify("Role " + role + ": " + primaryError, "warning");
+        return false;
+      }
       if (!quiet) ctx.ui.notify("Role " + role + " follows the current model; assign one with /roles", "info");
       this.active = role;
       this.status(ctx);
