@@ -109,6 +109,14 @@ Manual choices win: a model or effort you select yourself (model picker, cycling
 - If a completed turn did not suggest, a single hidden reminder asks for one (never while plan or goal automation owns the next step, and never after an interrupt).
 - The suggestion is sanitized to one line (≤ 160 characters) and kept in memory only. It is cleared by your next prompt, a new run, typing, or branch navigation.
 
+## Task tracking discipline
+
+- `jar_todo write` is the normal way to establish the checklist for a new multi-step request. It represents the complete current plan, so completed work from an earlier request is naturally dropped.
+- `update` changes one stable task id while preserving omitted fields and subtasks. `remove` deletes one task tree.
+- `append` is for genuinely new work introduced while an existing checklist is still active, especially user steering or an added requirement. When the current checklist is already fully completed, start a fresh list with `write` instead of appending.
+- `start` and `done` deliberately return/render only the single task they changed. Their structured result still carries the bounded checklist (the full list inside subagents) so parent/subagent progress mirroring remains accurate.
+- Exactly one leaf task may be `in_progress`; starting another leaf parks the previous one. Parent status is derived from its subtasks.
+
 ## Change review
 
 - A `tool_call` hook records a file's content right before the agent's **first** `edit` or `write` to it (project files only, up to 200 files, 1 MB each, text only). Later edits keep that baseline, so the review always shows everything since the agent started on the file.
