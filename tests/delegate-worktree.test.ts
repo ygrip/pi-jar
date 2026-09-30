@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -89,5 +89,48 @@ test("workspace path guard rejects lexical and symlink escapes", (t) => {
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+
+test("delegate worktree refuses changes that cannot enter /diff review", () => {
+  const { root, git } = initRepo();
+  const binary = join(root, "binary.dat");
+  writeFileSync(binary, Buffer.from([1, 0, 2, 3]));
+  git("add", "binary.dat");
+  git("commit", "-m", "binary");
+  const worktree = createDelegateWorktree(root);
+  try {
+    writeFileSync(join(worktree.root, "binary.dat"), Buffer.from([4, 0, 5, 6]));
+    const tracker = new ChangeTracker(() => root);
+    assert.throws(() => applyDelegateWorktree(worktree, root, ["binary.dat"], tracker), /cannot add changed file to \/diff review/);
+    assert.deepEqual(readFileSync(binary), Buffer.from([1, 0, 2, 3]));
+    assert.equal(tracker.count(), 0);
+  } finally {
+    disposeDelegateWorktree(worktree);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("delegate worktree treats executable-bit drift as a parent conflict", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX executable bits are not meaningful on Windows");
+    return;
+  }
+  const { root, git } = initRepo();
+  const script = join(root, "script.sh");
+  writeFileSync(script, "#!/bin/sh\necho base\n");
+  chmodSync(script, 0o755);
+  git("add", "script.sh");
+  git("commit", "-m", "script");
+  const worktree = createDelegateWorktree(root);
+  try {
+    writeFileSync(join(worktree.root, "script.sh"), "#!/bin/sh\necho child\n");
+    chmodSync(script, 0o644);
+    assert.throws(() => applyDelegateWorktree(worktree, root, ["script.sh"]), /parent changed since delegation started/);
+    assert.equal(readFileSync(script, "utf8"), "#!/bin/sh\necho base\n");
+  } finally {
+    disposeDelegateWorktree(worktree);
+    rmSync(root, { recursive: true, force: true });
   }
 });
