@@ -895,7 +895,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           try {
             ctx.ui.setStatus(`${ROLE_PREFIX}${key}`, run.state === "done" || run.state === "failed" ? undefined : JSON.stringify({
               name: run.name, label: run.name.slice(0, 12),
-              state: run.state === "queued" ? "waiting" : run.state,
+              state: run.state === "queued" || run.state === "paused" ? "waiting" : run.state === "idle" ? "idle" : "working",
               task: cleanText(run.task, 60), expiresAt: Date.now() + 24 * 60 * 60_000
             }));
           } catch { /* status is decoration */ }
