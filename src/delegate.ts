@@ -811,7 +811,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const meta = [run.role, run.mode === "fork" || run.mode === "worktree" ? run.mode : "", run.activity, run.tools ? `${run.tools} tools` : "",
           leaves.length ? `${leaves.filter((todo) => todo.done).length}/${leaves.length} tasks` : "",
           run.appliedFiles?.length ? `${run.appliedFiles.length} applied` : run.filesEdited?.length ? `${run.filesEdited.length} edited` : "",
-          run.cost ? `${run.cost.toFixed(3)}` : "", run.error].filter(Boolean).join(" · ");
+          run.cost ? `\${run.cost.toFixed(3)}` : "", run.error].filter(Boolean).join(" · ");
         let row = theme.fg(color(run.state) as never, `  ${glyph(run.state)} ${run.name}`) + theme.fg("dim", " · " + meta);
         if (expanded && run.output) row += "\n" + run.output.split("\n").map((line) => theme.fg("muted", "    " + line)).join("\n");
         return row;
