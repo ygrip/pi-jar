@@ -34,7 +34,7 @@ function readPaper(file: string): DiscussionPaper {
       && (item.kind === "question" || item.kind === "answer") && typeof item.id === "string"
       && typeof item.from === "string" && typeof item.text === "string" && typeof item.at === "string")
       .slice(-MAX_DISCUSSION_ENTRIES);
-    return { version: 1, seq: Number.isFinite(raw.seq) ? Math.max(0, Number(raw.seq)) : entries.length, entries };
+    return { version: 1, seq: typeof raw.seq === "number" && Number.isFinite(raw.seq) ? Math.max(0, raw.seq) : entries.length, entries };
   } catch { return empty(); }
 }
 
