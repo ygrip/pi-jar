@@ -11,7 +11,11 @@ export const BUILTIN_ROLES = [
   { role: "plan", label: "Architect", usedBy: "plan mode" },
   { role: "implement", label: "Builder", usedBy: "goal implement rounds and approved plans" },
   { role: "advisor", label: "Advisor", usedBy: "second opinions, stuck-work gates and the goal audit" },
-  { role: "task", label: "Subtask", usedBy: "delegated tasks" },
+  { role: "moderator", label: "Moderator", usedBy: "main-agent multi-agent coordination" },
+  { role: "scout", label: "Scout", usedBy: "cheap delegated discovery and codebase scouting" },
+  { role: "worker", label: "Worker", usedBy: "sandboxed delegated implementation" },
+  { role: "reviewer", label: "Reviewer", usedBy: "forked delegated review and verification" },
+  { role: "task", label: "Subtask", usedBy: "legacy or explicitly generic delegated tasks" },
   { role: "commit", label: "Commit", usedBy: "/jar commit messages" }
 ] as const;
 export const MODEL_ROLES = BUILTIN_ROLES.map((item) => item.role);
@@ -24,7 +28,7 @@ export interface RoleTag { name?: string; color?: string }
 export interface RoleConfig { version: 2; roles: Record<string, string>; cycleOrder?: string[]; tags?: Record<string, RoleTag>; fallbacks?: Record<string, string[]> }
 export interface RoleRow {
   role: string; label: string; usedBy?: string; custom: boolean;
-  spec?: string; scope?: RoleScope; resolved?: ResolvedRole; error?: string;
+  spec?: string; scope?: RoleScope; resolved?: ResolvedRole; error?: string; fallbacks: string[];
 }
 
 export const ROLE_FILE = "pi-jar-roles.json";
@@ -180,6 +184,23 @@ export class ModelRoleManager {
     return result && !("error" in result) ? result : undefined;
   }
 
+  /** Primary role target followed by its configured fallbacks, de-duplicated in priority order. */
+  resolveCandidates(role: string): ResolvedRole[] {
+    const candidates: ResolvedRole[] = [];
+    const primary = this.resolve(role);
+    if (primary) candidates.push(primary);
+    for (const spec of this.fallbackSpecs(role)) {
+      try { candidates.push(this.resolveSpec(spec)); } catch { /* malformed alias targets are skipped */ }
+    }
+    const seen = new Set<string>();
+    return candidates.filter((item) => {
+      const key = item.provider + "/" + item.model + ":" + (item.thinking ?? "");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
   get(role: string): RoleAssignment | undefined {
     const resolved = this.resolve(role);
     if (!resolved) return undefined;
@@ -196,7 +217,7 @@ export class ModelRoleManager {
     ];
     return rows.map((row) => {
       const result = resolveRole(roles, row.role);
-      return { ...row, spec: roles[row.role], scope: this.scopeOf(row.role),
+      return { ...row, spec: roles[row.role], scope: this.scopeOf(row.role), fallbacks: this.fallbackSpecs(row.role),
         ...(result && "error" in result ? { error: result.error } : result ? { resolved: result } : {}) };
     });
   }
@@ -219,39 +240,45 @@ export class ModelRoleManager {
   }
 
   async activate(role: string, ctx: ExtensionContext, quiet = false): Promise<boolean> {
-    const result = resolveRole(this.merged(), role);
-    if (result && "error" in result) {
-      if (!quiet) ctx.ui.notify("Role " + role + ": " + result.error, "warning");
+    const primary = resolveRole(this.merged(), role);
+    if (primary && "error" in primary) {
+      if (!quiet) ctx.ui.notify("Role " + role + ": " + primary.error, "warning");
       return false;
     }
-    if (!result) {
+    const candidates = this.resolveCandidates(role);
+    if (!candidates.length) {
       if (!quiet) ctx.ui.notify("Role " + role + " follows the current model; assign one with /roles", "info");
       this.active = role;
       this.status(ctx);
       return true;
     }
-    const model = ctx.modelRegistry.find(result.provider, result.model);
-    if (!model) {
-      if (!quiet) ctx.ui.notify("Model not found for role " + role + ": " + result.provider + "/" + result.model, "warning");
-      return false;
+
+    const failures: string[] = [];
+    for (let index = 0; index < candidates.length; index++) {
+      const candidate = candidates[index]!;
+      const model = ctx.modelRegistry.find(candidate.provider, candidate.model);
+      if (!model) { failures.push(candidate.provider + "/" + candidate.model + " not found"); continue; }
+      let changed: boolean;
+      this.applying = true;
+      try { changed = await this.pi.setModel(model); } finally { this.applying = false; }
+      if (!changed) { failures.push(candidate.provider + "/" + candidate.model + " unavailable"); continue; }
+      if (candidate.thinking) this.withApplying(() => this.pi.setThinkingLevel(candidate.thinking!));
+      this.active = role;
+      this.status(ctx);
+      if (!quiet) {
+        ctx.ui.notify("Role " + role + " · " + candidate.provider + "/" + candidate.model
+          + (candidate.thinking ? " · " + candidate.thinking : "") + (index ? " · fallback " + index : ""), "info");
+      }
+      return true;
     }
-    let changed: boolean;
-    this.applying = true;
-    try { changed = await this.pi.setModel(model); } finally { this.applying = false; }
-    if (!changed) {
-      if (!quiet) ctx.ui.notify("No configured authentication for " + result.provider + "/" + result.model, "warning");
-      return false;
-    }
-    if (result.thinking) this.withApplying(() => this.pi.setThinkingLevel(result.thinking!));
-    this.active = role;
-    this.status(ctx);
-    if (!quiet) ctx.ui.notify("Role " + role + " · " + result.provider + "/" + result.model + (result.thinking ? " · " + result.thinking : ""), "info");
-    return true;
+
+    if (!quiet) ctx.ui.notify("No usable model for role " + role + ": " + failures.join("; "), "warning");
+    return false;
   }
 
   /** Switch to a role for a bounded workflow; the returned function restores the previous model. */
   async activateTemporary(role: string, ctx: ExtensionContext): Promise<() => Promise<void>> {
-    if (!this.resolve(role)) return async () => {};
+    if (!this.resolveCandidates(role).length) return async () => {};
     const previousModel = ctx.model;
     const previousThinking = this.pi.getThinkingLevel();
     const previousActive = this.active;
