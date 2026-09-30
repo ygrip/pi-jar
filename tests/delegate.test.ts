@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter, once } from "node:events";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -279,10 +280,7 @@ test("the registry keeps only the newest eight finished subagents", async () => 
 test("worktree mode forks parent context, isolates edits, and applies successful changes into /diff", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-jar-worktree-run-"));
   try {
-    const git = (...args: string[]) => {
-      const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-      return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
-    };
+    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
     git("init");
     git("config", "user.email", "test@example.com");
     git("config", "user.name", "Test");
