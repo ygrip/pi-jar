@@ -154,6 +154,11 @@ const parentMatchesBaseline = (worktree: DelegateWorktree, parentRoot: string, r
     return stat.isSymbolicLink() && Buffer.from(readlinkSync(target)).equals(baseline.content);
   }
   if (!stat.isFile()) return false;
+  if (baseline.mode === "100644" || baseline.mode === "100755") {
+    const expectedExecutable = baseline.mode === "100755";
+    const actualExecutable = (stat.mode & 0o111) !== 0;
+    if (expectedExecutable !== actualExecutable) return false;
+  }
   return readFileSync(target).equals(baseline.content);
 };
 
@@ -178,12 +183,18 @@ export function applyDelegateWorktree(worktree: DelegateWorktree, parentCwd: str
     }
   }
 
+  if (tracker) {
+    for (const rel of files) {
+      const target = resolve(parentRoot, rel);
+      if (!tracker.capture(target)) throw new Error("cannot add changed file to /diff review: " + rel);
+    }
+  }
+
   const applied: string[] = [];
   for (const rel of files) {
     const source = resolve(worktree.root, rel);
     const target = resolve(parentRoot, rel);
     if (!inside(parentRoot, target)) throw new Error("unsafe changed path: " + rel);
-    tracker?.capture(target);
 
     if (!existsSync(source)) {
       if (existsSync(target)) unlinkSync(target);
