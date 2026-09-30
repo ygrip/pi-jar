@@ -20,7 +20,7 @@ function withAgentDir(run: (directory: string) => Promise<void>) {
   };
 }
 
-function harness() {
+function harness(options: { activateDefault?: () => boolean } = {}) {
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
   const events = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
   const notices: string[] = [];
@@ -39,7 +39,7 @@ function harness() {
     modelRegistry: { find: (_provider: string, id: string) => ({ provider: "test", id }) }
   } as unknown as ExtensionContext & { cwd?: string };
   const manager = new ModelRoleManager(pi);
-  manager.register();
+  manager.register(undefined, options);
   return { commands, events, notices, models, thinking, ctx, manager };
 }
 
@@ -54,6 +54,16 @@ test("roles rejects incomplete assignment, persists valid role and activates aut
   await h.commands.get("roles")!("plan", h.ctx);
   assert.deepEqual(h.models, ["model"]);
   assert.ok(h.notices.some((notice) => notice.includes("Usage:")));
+}));
+
+test("child role startup loads assignments without overriding CLI-selected model or effort", withAgentDir(async (directory) => {
+  writeFileSync(join(directory, "pi-jar-roles.json"), JSON.stringify({ version: 2, roles: { default: "p/base:low", worker: "p/worker:high" } }));
+  const h = harness({ activateDefault: () => false });
+  await h.events.get("session_start")!({}, h.ctx);
+  assert.deepEqual(h.models, []);
+  assert.deepEqual(h.thinking, []);
+  assert.equal(h.manager.activeRole(), undefined);
+  assert.deepEqual(h.manager.get("worker"), { provider: "p", model: "worker", thinking: "high" });
 }));
 
 test("specs normalize models, aliases, effort suffixes and the default wildcard", () => {

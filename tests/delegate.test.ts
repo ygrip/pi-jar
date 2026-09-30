@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, writeChildBaseline } from "../src/child-baselines.ts";
-import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation, READ_ONLY_TOOLS, registerDelegate, WORKTREE_TOOLS, type DelegateOptions } from "../src/delegate.ts";
+import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation, READ_ONLY_TOOLS, registerDelegate, WORKTREE_TOOLS, type DelegateOptions, type DelegateController } from "../src/delegate.ts";
 import { CHILD_WORKTREE_ENV } from "../src/delegate-worktree.ts";
 import { emit, fakeSpawn, say, settle, taskOf, type FakeChild } from "./fake-rpc.ts";
 
@@ -16,7 +16,7 @@ const roles = (map: Record<string, { provider: string; model: string; thinking?:
   resolve: (role: string) => map[role],
   resolveCandidates: (role: string) => map[role] ? [{ ...map[role], via: [role] }] : []
 }) as never;
-type Result = { content: Array<{ text: string }>; details: { runs: Array<Record<string, unknown>> } };
+type Result = { isError?: boolean; content: Array<{ text: string }>; details: { runs: Array<Record<string, unknown>> } };
 interface Tool {
   name: string;
   execute(id: string, params: object, signal: AbortSignal | undefined, onUpdate: ((update: Result) => void) | undefined, ctx: object): Promise<Result>;
@@ -38,7 +38,8 @@ test("subagents run in RPC mode with the parent's extensions, read-only tools pl
   assert.ok(READ_ONLY_TOOLS.includes("jar_todo"));
   assert.ok(!delegateArgs(undefined, undefined, true, ["node", "cli"]).includes("--tools"), "legacy write mode keeps the default tools");
   const fork = delegateArgs("p/m", undefined, false, ["node", "cli"], { source: "/tmp/parent.jsonl", sessionDir: "/tmp/forks" });
-  assert.deepEqual(fork.slice(0, 7), ["--mode", "rpc", "--fork", "/tmp/parent.jsonl", "--session-dir", "/tmp/forks", "--model"]);
+  assert.deepEqual(fork.slice(0, 7), ["--mode", "rpc", "--fork", "/tmp/parent.jsonl", "--session-dir", "/tmp/forks", "--extension"]);
+  assert.ok(fork[7]!.endsWith("/extensions/index.ts"), "forks explicitly load pi-jar even without parent CLI extension flags");
   assert.ok(!fork.includes("--no-session"));
   assert.equal(fork.at(-1), READ_ONLY_TOOLS.join(","));
   const worktree = delegateArgs("p/m", undefined, true, ["node", "cli"], {
@@ -91,13 +92,13 @@ test("jar_delegate runs tasks in parallel on roles and returns a detailed report
   assert.equal(children[0]!.stdin.writableEnded, false, "retained scout stays alive after settling");
   const text = result.content[0]!.text;
   assert.match(text, /## \[1\] api \(scout · p\/small\) — idle\n- took \d+s · 1 turn · 2 tool calls \(read×1, grep×1\) · \$0\.010\n- files read: src\/auth\.ts\n- failed tool calls: grep login\n\n## Summary\nReport: scan api/);
-  assert.match(text, /## \[2\] agent 2 \(review · p\/big\) — failed: exited 1 before finishing[\s\S]*\npartial/);
+  assert.match(text, /## \[2\] review 2 \(review · p\/big\) — failed: exited 1 before finishing[\s\S]*\npartial/);
   assert.ok(updates.some((update) => /api: working/.test(update)));
   assert.ok([...statuses.keys()].every((key) => key.startsWith("pi-jar.role.delegate-")));
   assert.ok([...statuses.values()].some((value) => value?.includes('"state":"idle"')), "settled retained teammate remains published");
   const rendered = tool!.renderResult(result, { expanded: false }, { fg: (_c, t) => t }).render(120).join("\n");
   assert.match(rendered, /○ api · scout · 2 tools · \$0\.010/);
-  assert.match(rendered, /✖ agent 2/);
+  assert.match(rendered, /✖ review 2/);
 });
 
 test("a rejected prompt and an aborted call fail with the reason", async () => {
@@ -328,9 +329,10 @@ test("worktree mode retains isolated edits until stop, then safely applies them 
     assert.match(result.content[0]!.text, /- mode: worktree[\s\S]*- workspace:/);
 
     const [record] = registry.records();
-    const report = await registry.stop(record!.key);
+    const [report, duplicate] = await Promise.all([registry.stop(record!.key), registry.stop(record!.key)]);
+    assert.deepEqual(duplicate, report, "concurrent stops share one finalization/apply");
     assert.deepEqual(report?.changed, ["a.ts"]);
-    assert.deepEqual(report?.applied, ["a.ts"]);
+    assert.deepEqual(report?.applied, ["a.ts"], JSON.stringify(report));
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "from child\n");
     assert.equal(tracker.count(), 1, "stopping reconciles the worker into /diff");
     assert.ok(call.cwd);
@@ -391,4 +393,234 @@ test("moderator can peek, resume, pause, ask and stop the same retained subagent
   assert.match(stopped.content[0]!.text, /workspace: none[\s\S]*changed: none[\s\S]*remaining:/);
   assert.equal(record!.run.state, "stopped");
   assert.equal(fake.children[0]!.stdin.writableEnded, true);
+});
+
+test("failed assistant turns and rejected follow-up prompts never become successful idle reports", async () => {
+  for (const message of [{ stopReason: "error", errorMessage: "provider unavailable" }, { stopReason: "error" }]) {
+    const registry = new DelegateRegistry();
+    const fake = fakeSpawn((child) => {
+      emit(child, { type: "message_end", message: { role: "assistant", content: [], ...message } });
+      settle(child);
+    });
+    const result = await register(registry, fake.spawn).execute("d", { tasks: [{ task: "fail" }] }, undefined, undefined, quiet);
+    assert.equal(result.isError, true);
+    assert.equal(result.details.runs[0]!.state, "failed");
+    assert.equal(registry.retained(), 0);
+    assert.notEqual(fake.children[0]!.exitCode, null);
+  }
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn((child, prompt) => {
+    if (prompt === "reject follow-up") emit(child, { type: "response", command: "prompt", success: false, error: "rejected follow-up" });
+    else { say(child, "old report"); settle(child); }
+  });
+  await register(registry, fake.spawn).execute("d", { tasks: [{ task: "initial" }] }, undefined, undefined, quiet);
+  assert.equal(registry.resume(registry.records()[0]!.key, "reject follow-up"), true);
+  await tick();
+  assert.equal(registry.records()[0]!.run.state, "failed");
+  assert.equal(registry.records()[0]!.run.output, "", "failed follow-up cannot reuse a previous report");
+  assert.equal(registry.retained(), 0);
+});
+
+test("ask interrupts a tool-active turn and waits for the dedicated question's final answer", async () => {
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn((child, prompt) => {
+    if (prompt.includes("Moderator BTW:")) {
+      say(child, "intermediate question reasoning");
+      queueMicrotask(() => { say(child, "actual BTW answer"); settle(child); });
+    } else {
+      say(child, "old active task report");
+      emit(child, { type: "tool_execution_start", toolCallId: "read", toolName: "read", args: { path: "x" } });
+    }
+  });
+  const pending = register(registry, fake.spawn).execute("d", { tasks: [{ task: "work" }] }, undefined, undefined, quiet);
+  await tick();
+  const record = registry.records()[0]!;
+  fake.children[0]!.stdin.on("command", (command: Record<string, unknown>) => {
+    if (command.type === "abort") say(fake.children[0]!, "interrupted task final report");
+  });
+  const answer = await registry.ask(record.key, "Where is x?");
+  assert.equal(answer, "actual BTW answer");
+  assert.equal(record.run.state, "idle");
+  assert.deepEqual(fake.children[0]!.stdin.commands.slice(1).map((command) => command.type), ["clear_queue", "abort", "prompt"]);
+  await pending;
+  registry.clear();
+});
+
+test("configured pool sizes include idle, paused, and in-progress one-shot children", async () => {
+  for (const maximum of [2, 4, 6, 8, 16]) {
+    const registry = new DelegateRegistry();
+    const fake = fakeSpawn((child) => settle(child));
+    const tool = register(registry, fake.spawn, { getMaxSubagents: () => maximum });
+    const result = await tool.execute("d", { tasks: Array.from({ length: maximum }, (_, i) => ({ task: `scout ${i}` })) }, undefined, undefined, quiet);
+    assert.equal(result.details.runs.length, maximum, "batch must not be truncated to four");
+    assert.equal(await registry.pause(registry.records()[0]!.key), true);
+    const denied = await tool.execute("d2", { tasks: [{ task: "overflow" }] }, undefined, undefined, quiet);
+    assert.equal(denied.isError, true);
+    assert.equal(fake.calls.length, maximum);
+    registry.clear();
+    await tick();
+  }
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn(() => {});
+  const tool = register(registry, fake.spawn, { getMaxSubagents: () => 2 });
+  const pending = tool.execute("direct", { write: true, tasks: [{ task: "one" }, { task: "two" }] }, undefined, undefined, quiet);
+  const denied = await tool.execute("other", { tasks: [{ task: "three" }] }, undefined, undefined, quiet);
+  assert.equal(denied.isError, true);
+  assert.equal(fake.calls.length, 2);
+  registry.clear();
+  await pending;
+});
+
+test("queued batch reservations prevent reentrant concurrent launch oversubscription", async () => {
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn((child) => settle(child));
+  const tool = register(registry, fake.spawn, { getMaxSubagents: () => 2 });
+  let concurrent: Promise<Result> | undefined;
+  let attempted = false;
+  registry.subscribe(() => {
+    if (attempted) return;
+    attempted = true;
+    concurrent = tool.execute("other", { tasks: [{ task: "overflow" }] }, undefined, undefined, quiet);
+  });
+  await tool.execute("batch", { tasks: [{ task: "one" }, { task: "two" }] }, undefined, undefined, quiet);
+  assert.equal((await concurrent)!.isError, true);
+  assert.equal(fake.calls.length, 2);
+  registry.clear();
+});
+
+test("session clear during handle publication kills the child and never launches the remaining queued child", async () => {
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn(() => {});
+  let cleared = false;
+  registry.subscribe(() => {
+    if (cleared || !registry.records().some((record) => record.run.state === "working")) return;
+    cleared = true;
+    registry.clear();
+  });
+  await register(registry, fake.spawn).execute("d", { tasks: [{ task: "one" }, { task: "two" }] }, undefined, undefined, quiet);
+  await tick();
+  assert.equal(fake.children.length, 1);
+  assert.notEqual(fake.children[0]!.exitCode, null);
+  assert.deepEqual(registry.records(), []);
+});
+
+test("exit without close retires an idle child and prevents dead-child resume/ask", async () => {
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn((child) => { say(child, "done"); settle(child); });
+  await register(registry, fake.spawn).execute("d", { tasks: [{ task: "one" }] }, undefined, undefined, quiet);
+  const record = registry.records()[0]!;
+  fake.children[0]!.exit(0, undefined, false);
+  await tick();
+  assert.equal(record.run.state, "done");
+  assert.equal(registry.retained(), 0);
+  assert.equal(registry.resume(record.key, "x"), false);
+  assert.equal(await registry.ask(record.key, "x"), undefined);
+  fake.children[0]!.emit("close", 0);
+  await record.stop();
+});
+
+test("controller reuses the same pool/process and only resumes its fresh read-only scouts", async () => {
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn((child, prompt) => { say(child, prompt.includes("Task:") ? "initial report" : prompt); settle(child); });
+  let controller!: DelegateController;
+  const handlers = new Map<string, (event: object, ctx: object) => unknown>();
+  const tools = new Map<string, Tool>();
+  registerDelegate({
+    on(event: string, handler: (event: object, ctx: object) => unknown) { handlers.set(event, handler); },
+    registerTool(tool: Tool) { tools.set(tool.name, tool); }
+  } as never, roles({}), registry, { spawnProcess: fake.spawn as never, getMaxSubagents: () => 2, onController: (value) => { controller = value; } });
+  handlers.get("session_start")!({}, quiet);
+  const scout = await controller.spawnScout("investigate independently");
+  assert.equal(scout.state, "idle");
+  assert.equal(scout.mode, "scout");
+  assert.equal(scout.output, "initial report");
+  const vote = await controller.resumeScout(scout.id, "Vote yes with evidence");
+  assert.equal(vote.output, "Vote yes with evidence");
+  assert.equal(fake.calls.length, 1, "resumes use the retained process");
+  await tools.get("jar_delegate")!.execute("d", { tasks: [{ task: "ordinary scout" }] }, undefined, undefined, quiet);
+  const other = controller.list().find((report) => report.id !== scout.id)!;
+  assert.equal((await controller.resumeScout(other.id, "vote")).output, "vote", "Relevant ordinary fresh scouts can be nominated too");
+  await assert.rejects(controller.spawnScout("overflow"), /pool is full/);
+  assert.equal(fake.calls.length, 2);
+  registry.clear();
+});
+
+test("controller resume abort retires only its scout and does not return a stale answer", async () => {
+  const registry = new DelegateRegistry();
+  let controller!: DelegateController;
+  const fake = fakeSpawn((child, prompt) => {
+    if (prompt.includes("Task:")) { say(child, "previous answer"); settle(child); }
+  });
+  const tool = register(registry, fake.spawn, { onController: (value) => { controller = value; } });
+  await tool.execute("context", { tasks: [{ task: "ordinary scout" }] }, undefined, undefined, quiet);
+  const scout = await controller.spawnScout("fresh scout");
+  const abort = new AbortController();
+  const pending = controller.resumeScout(scout.id, "vote slowly", abort.signal);
+  abort.abort();
+  await assert.rejects(pending, /aborted/);
+  await tick();
+  assert.equal(registry.get(scout.id)!.run.state, "stopped");
+  assert.equal(registry.get(scout.id)!.run.output, "");
+  assert.equal(registry.retained(), 1);
+  registry.clear();
+});
+
+test("stop blocks resume immediately, clears its status, and shares finalization", async () => {
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn((child) => settle(child));
+  const statuses = new Map<string, string | undefined>();
+  await register(registry, fake.spawn).execute("d", { tasks: [{ task: "one" }] }, undefined, undefined, {
+    ...quiet, hasUI: true, ui: { setStatus(key: string, value?: string) { statuses.set(key, value); } }
+  });
+  const record = registry.records()[0]!;
+  const stopped = registry.stop(record.key);
+  assert.equal(registry.resume(record.key, "must not start"), false);
+  const duplicate = registry.stop(record.key);
+  assert.deepEqual(await stopped, await duplicate);
+  assert.equal([...statuses.values()][0], undefined);
+  assert.equal(fake.children[0]!.stdin.commands.filter((command) => command.type === "prompt").length, 1);
+});
+
+test("discarded live processes hold capacity until actual exit", async () => {
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn(() => {});
+  const tool = register(registry, fake.spawn, { getMaxSubagents: () => 2 });
+  const pending = tool.execute("d", { tasks: [{ task: "one" }, { task: "two" }] }, undefined, undefined, quiet);
+  await tick();
+  // Model a child that ignores TERM and whose stdio does not close on stdin.end().
+  for (const child of fake.children) {
+    child.kill = (signal) => { child.killed.push(signal); };
+    child.stdin.removeAllListeners("finish");
+  }
+  registry.clear();
+  assert.equal(registry.retained(), 2);
+  assert.equal((await tool.execute("overflow", { tasks: [{ task: "three" }] }, undefined, undefined, quiet)).isError, true);
+  for (const child of fake.children) child.exit(143);
+  await pending;
+  await tick();
+  assert.equal(registry.retained(), 0);
+});
+
+test("session discard racing a worktree stop never applies private edits", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-jar-discard-race-"));
+  try {
+    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+    git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+    writeFileSync(join(root, "a.ts"), "parent\n"); git("add", "a.ts"); git("commit", "-m", "initial");
+    const registry = new DelegateRegistry();
+    const fake = fakeSpawn((child) => {
+      writeFileSync(join(fake.calls[0]!.cwd!, "a.ts"), "private\n");
+      say(child, "private changes ready"); settle(child);
+    });
+    await register(registry, fake.spawn).execute("d", { mode: "worktree", tasks: [{ task: "edit" }] }, undefined, undefined, {
+      cwd: root, hasUI: false, sessionManager: { getSessionFile: () => "/tmp/parent.jsonl" }
+    });
+    const record = registry.records()[0]!;
+    const stopped = registry.stop(record.key);
+    registry.clear();
+    assert.deepEqual((await stopped)?.applied, []);
+    await tick();
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "parent\n");
+    assert.equal(existsSync(fake.calls[0]!.cwd!), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

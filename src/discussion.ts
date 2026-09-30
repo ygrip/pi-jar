@@ -42,8 +42,10 @@ function writePaper(file: string, paper: DiscussionPaper): void {
   mkdirSync(dirname(file), { recursive: true });
   const temp = file + "." + process.pid + ".tmp";
   let data = JSON.stringify(paper, null, 2) + "\n";
-  if (Buffer.byteLength(data, "utf8") > MAX_DISCUSSION_BYTES) {
-    paper.entries = paper.entries.slice(-Math.max(8, Math.floor(MAX_DISCUSSION_ENTRIES / 2)));
+  // Entry count/character caps are not byte caps (CJK, emoji and JSON escaping cost
+  // more). Evict oldest entries until the actual serialized UTF-8 paper fits.
+  while (Buffer.byteLength(data, "utf8") > MAX_DISCUSSION_BYTES && paper.entries.length) {
+    paper.entries.shift();
     data = JSON.stringify(paper, null, 2) + "\n";
   }
   writeFileSync(temp, data);
@@ -112,7 +114,13 @@ const render = (entries: readonly DiscussionEntry[]): string => {
 
 export function registerDiscussionTool(pi: ExtensionAPI, file: () => string | undefined,
   actor: () => string = () => safeActor(process.env[SUBAGENT_NAME_ENV] ?? process.env[SUBAGENT_KEY_ENV])): void {
-  pi.registerTool({
+  const parameters = Type.Object({
+    action: Type.Union([Type.Literal("list"), Type.Literal("ask"), Type.Literal("answer")]),
+    text: Type.Optional(Type.String()),
+    to: Type.Optional(Type.String()),
+    questionId: Type.Optional(Type.String())
+  });
+  pi.registerTool?.<typeof parameters, { path?: string; entry?: DiscussionEntry }>({
     name: "jar_discuss",
     label: "discuss",
     description: "Use the session's bounded shared discussion paper for terse cross-agent questions and answers. Prefer one precise question or answer per call; do not use it as a transcript or scratchpad.",
@@ -121,28 +129,23 @@ export function registerDiscussionTool(pi: ExtensionAPI, file: () => string | un
       "Keep discussion entries short and decision-oriented. Read the paper before answering if the question id is unfamiliar.",
       "When answering, address only the requested question and cite the question id. Do not continue unrelated task work inside the discussion entry."
     ],
-    parameters: Type.Object({
-      action: Type.Union([Type.Literal("list"), Type.Literal("ask"), Type.Literal("answer")]),
-      text: Type.Optional(Type.String()),
-      to: Type.Optional(Type.String()),
-      questionId: Type.Optional(Type.String())
-    }),
+    parameters,
     async execute(_id, params) {
       const path = file();
-      if (!path) return { content: [{ type: "text", text: "No shared discussion paper is active." }] };
+      if (!path) return { content: [{ type: "text", text: "No shared discussion paper is active." }], details: {} };
       if (params.action === "list") {
         return { content: [{ type: "text", text: render(discussionEntries(path).slice(-24)) }], details: { path } };
       }
       const text = cleanText(params.text ?? "", MAX_DISCUSSION_TEXT);
-      if (!text) return { content: [{ type: "text", text: "Discussion text is required." }], isError: true };
+      if (!text) return { content: [{ type: "text", text: "Discussion text is required." }], details: {}, isError: true };
       if (params.action === "ask") {
         const entry = append(path, actor(), { kind: "question", text, ...(params.to ? { to: safeActor(params.to) } : {}) });
         return { content: [{ type: "text", text: `Added ${entry.id}: ${entry.text}` }], details: { path, entry } };
       }
       const questionId = cleanText(params.questionId ?? "", 24);
-      if (!questionId) return { content: [{ type: "text", text: "questionId is required for an answer." }], isError: true };
+      if (!questionId) return { content: [{ type: "text", text: "questionId is required for an answer." }], details: {}, isError: true };
       const exists = discussionEntries(path).some((entry) => entry.kind === "question" && entry.id === questionId);
-      if (!exists) return { content: [{ type: "text", text: "Unknown discussion question: " + questionId }], isError: true };
+      if (!exists) return { content: [{ type: "text", text: "Unknown discussion question: " + questionId }], details: {}, isError: true };
       const entry = append(path, actor(), { kind: "answer", questionId, text });
       return { content: [{ type: "text", text: `Answered ${questionId}: ${entry.text}` }], details: { path, entry } };
     }

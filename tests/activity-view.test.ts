@@ -210,7 +210,11 @@ test("x stops the selected subagent through the registry and kills the selected 
     view.input("x");
     await tick(); await tick();
     assert.deepEqual(agents.children.map((child) => child.killed), [[], []], "stop uses RPC abort then retires the selected child cleanly");
-    assert.match((await agents.pending).content[0]!.text, /\[1\] api \(scout\) — stopped/);
+    // The initial batch report can resolve as idle while asynchronous stop retires the child.
+    const stopped = await agents.registry.resolve("api")!.stop();
+    await agents.pending;
+    assert.equal(stopped?.state, "stopped");
+    assert.equal(agents.registry.resolve("api")?.run.state, "stopped");
     assert.deepEqual(view.list().slice(0, 3), ["⧉ SUBAGENTS", " ○ docs", "▌■ api"], "the selection follows the stopped run after retained agents");
     assert.match(view.text(), /▸ ✖ bash npm test/, "a call cut short by stop is closed as failed");
     view.input("x");
@@ -234,6 +238,20 @@ test("x stops the selected subagent through the registry and kills the selected 
   assert.deepEqual(view.notes, ["pi-jar: no shell s9"], "kill errors are reported");
   view.input("q");
   await view.opened;
+});
+
+test("asynchronous subagent stop failures are reported without rejecting the UI", async () => {
+  const agents = await subagents();
+  try {
+    agents.registry.stop = async () => { throw new Error("could not retire api"); };
+    const view = mount({ subagents: agents.registry });
+    view.lines();
+    view.input("x");
+    await tick();
+    assert.deepEqual(view.notes, ["pi-jar: could not retire api"]);
+    view.input("q");
+    await view.opened;
+  } finally { agents.abort(); }
 });
 
 test("mouse picks rows, scrolls with the wheel (pausing follow), passes drags through and closes on ×", async () => {

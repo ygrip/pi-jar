@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { saveFooterSettings, DEFAULT_FOOTER_SETTINGS } from "../src/footer-settings.ts";
-import { defaultVisualSettings, loadVisualSettings, migrateLegacySettings, saveVisualSettings, SETTINGS_FILE } from "../src/settings.ts";
+import { defaultVisualSettings, loadVisualSettings, migrateLegacySettings, saveVisualSettings, SETTINGS_FILE, MAX_SUBAGENT_CHOICES, isMaxSubagents } from "../src/settings.ts";
 import { openJarSettings } from "../src/settings-ui.ts";
 
 test("visual preferences migrate legacy footer once, validate fields and preserve legacy file", () => {
@@ -37,6 +37,28 @@ test("visual preferences migrate legacy footer once, validate fields and preserv
     writeFileSync(join(dir, SETTINGS_FILE), '{"version":2,"accent":"violet"}');
     assert.throws(() => saveVisualSettings(dir, chosen), /unknown pi-jar settings version/);
     assert.equal(readFileSync(join(dir, SETTINGS_FILE), "utf8"), '{"version":2,"accent":"violet"}');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("max subagents defaults, validates supported choices and persists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-jar-subagent-settings-"));
+  try {
+    assert.equal(defaultVisualSettings().maxSubagents, 4);
+    assert.equal(loadVisualSettings(dir).maxSubagents, 4);
+    assert.deepEqual(MAX_SUBAGENT_CHOICES, [2, 4, 6, 8, 16]);
+    for (const maxSubagents of MAX_SUBAGENT_CHOICES) {
+      assert.equal(isMaxSubagents(maxSubagents), true);
+      const settings = { ...defaultVisualSettings(), maxSubagents };
+      saveVisualSettings(dir, settings);
+      assert.equal(JSON.parse(readFileSync(join(dir, SETTINGS_FILE), "utf8")).maxSubagents, maxSubagents);
+      assert.deepEqual(loadVisualSettings(dir), settings);
+    }
+    for (const invalid of [undefined, null, "8", false, 0, 1, 3, 5, 7, 9, 17, 50, 4.5, {}, []]) {
+      assert.equal(isMaxSubagents(invalid), false);
+      writeFileSync(join(dir, SETTINGS_FILE), JSON.stringify({ version: 1, maxSubagents: invalid, goalRounds: 12 }));
+      assert.equal(loadVisualSettings(dir).maxSubagents, 4);
+      assert.equal(loadVisualSettings(dir).goalRounds, 12);
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -93,6 +115,8 @@ test("Pi tab toggles fullscreen mouse, copy-on-select and goal rounds", async ()
       pane.handleInput("\x1b[B"); pane.handleInput(" ");
       assert.equal(prefs.copyOnSelect, false);
       pane.handleInput("\x1b[B"); pane.handleInput(" ");
+      assert.equal(state.goalRounds, 8); // Opening a choice does not save it.
+      pane.handleInput("\x1b[B"); pane.handleInput("\r");
       assert.equal(state.goalRounds, 12);
       pane.handleMouse({ type: "click", button: "left", x: 5, y: 1 });
       assert.match(pane.render(64).join(" "), /APPEARANCE/);

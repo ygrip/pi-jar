@@ -2,7 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { ChangeTracker } from "./changes.ts";
@@ -17,6 +18,7 @@ import {
   createDelegateWorktree,
   disposeDelegateWorktree,
   worktreeChangedFiles,
+  WorktreeApplyError,
   type DelegateWorktree
 } from "./delegate-worktree.ts";
 
@@ -24,6 +26,7 @@ export const DELEGATE_TOOL = "jar_delegate";
 /** Set in child processes so a subagent never delegates again. */
 export const CHILD_ENV = "PI_JAR_CHILD";
 export const MAX_DELEGATES = 4;
+export const SUBAGENT_LIMIT_CHOICES = [2, 4, 6, 8, 16] as const;
 /** Read-only subagents also keep jar_todo so their checklist shows in the activity view. */
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "jar_todo", "jar_discuss"] as const;
 /** Writable worktree children deliberately have no shell: edits stay inside path-guarded file tools. */
@@ -47,6 +50,8 @@ const MAX_LINE_CHARS = 16 * 1024 * 1024;
 const MAX_FILES = 50;
 const MAX_TODOS = 50;
 const MAX_STEER_CHARS = 4000;
+/** Resumed assignments/ballots can include bounded evidence and multiple options. */
+export const MAX_RESUME_CHARS = 40_000;
 /** Finished subagents the registry keeps for the activity view after their tool call returns. */
 const MAX_FINISHED = 8;
 /** Abort reason for stopping one subagent from the activity view (vs. aborting the whole tool call). */
@@ -135,7 +140,13 @@ export interface DelegateForkOptions {
 export function delegateArgs(model: string | undefined, thinking: string | undefined, write: boolean, argv = process.argv,
   fork?: DelegateForkOptions): string[] {
   const session = fork ? ["--fork", fork.source, "--session-dir", fork.sessionDir] : ["--no-session"];
-  const args = ["--mode", "rpc", ...session, ...extensionFlags(argv)];
+  const extensions = extensionFlags(argv);
+  // Worktree cwd/session forks do not inherit project extension discovery from the parent.
+  if (fork) {
+    const ownExtension = fileURLToPath(new URL("../extensions/index.ts", import.meta.url));
+    if (!extensions.includes(ownExtension)) extensions.push("--extension", ownExtension);
+  }
+  const args = ["--mode", "rpc", ...session, ...extensions];
   if (model) args.push("--model", model);
   if (thinking) args.push("--thinking", thinking);
   const tools = fork?.tools ?? (!write ? READ_ONLY_TOOLS : undefined);
@@ -273,6 +284,7 @@ export interface DelegateHandle {
   resume(text?: string): boolean;
   ask(text: string): Promise<string | undefined>;
   shutdown(): Promise<void>;
+  alive(): boolean;
 }
 
 /**
@@ -286,6 +298,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
   let resume: (text?: string) => boolean = () => false;
   let ask: (text: string) => Promise<string | undefined> = async () => undefined;
   let shutdown: () => Promise<void> = async () => {};
+  let alive = false;
   let resolveFirst!: () => void;
   let firstResolved = false;
   const firstSettled = new Promise<void>((resolve) => { resolveFirst = resolve; });
@@ -294,12 +307,15 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     const invocation = piInvocation(args);
     let child: ChildProcess;
     try {
-      child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...hooks.env, [CHILD_ENV]: "1" } });
+      const env = { ...process.env };
+      for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, DISCUSSION_FILE_ENV, SUBAGENT_KEY_ENV, SUBAGENT_NAME_ENV]) delete env[key];
+      child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, stdio: ["pipe", "pipe", "pipe"], env: { ...env, ...hooks.env, [CHILD_ENV]: "1" } });
     } catch (error) {
       run.state = "failed"; run.error = error instanceof Error ? error.message : String(error); run.endedAt = Date.now(); update();
       firstResolved = true; resolveFirst(); resolveClosed(); return;
     }
 
+    alive = true;
     run.state = "working";
     run.startedAt = Date.now();
     run.endedAt = undefined;
@@ -314,20 +330,24 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     let finished = false;
     let settled = false;
     let pauseRequested = false;
-    let assistantOpen = false;
+    let closing = false;
+    let shutdownPromise: Promise<void> | undefined;
+    let askBusy = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
     let turnTimer: ReturnType<typeof setTimeout> | undefined;
     const settleWaiters: Array<() => void> = [];
-    const messageWaiters: Array<{ after: number; resolve(value: string | undefined): void; timer: ReturnType<typeof setTimeout> }> = [];
 
     const send = (command: object): boolean => {
       const stdin = child.stdin;
-      if (!stdin || stdin.destroyed || stdin.writableEnded) return false;
+      if (!alive || !stdin || stdin.destroyed || stdin.writableEnded) return false;
       try { stdin.write(JSON.stringify(command) + "\n"); return true; } catch { return false; }
     };
     const clearTurnTimer = () => { if (turnTimer) clearTimeout(turnTimer); turnTimer = undefined; };
     const hardStop = () => {
+      if (!alive) return;
       child.kill("SIGTERM");
-      setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 3000).unref?.();
+      killTimer ??= setTimeout(() => { if (alive) child.kill("SIGKILL"); }, 3000);
+      killTimer.unref?.();
     };
     const armTurnTimer = () => {
       clearTurnTimer();
@@ -355,23 +375,22 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       for (const entry of run.transcript) if (entry.kind === "tool" && entry.status === "running") { entry.status = "error"; entry.endedAt = Date.now(); entry.rev++; }
       run.endedAt = Date.now();
       resolveSettled();
-      if (!firstResolved) { firstResolved = true; resolveFirst(); }
-      for (const waiter of messageWaiters.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(undefined); }
+      if (!alive && !firstResolved) { firstResolved = true; resolveFirst(); }
       update();
-      resolveClosed();
     };
     const abort = () => { hardStop(); finish("failed", signal?.reason === STOP_REASON ? "stopped" : "aborted"); };
 
     child.stdin?.on("error", (error) => { if (!finished) stderr = (stderr + "\n" + error.message).slice(-4000); });
-    if (signal?.aborted) { abort(); return; }
     signal?.addEventListener("abort", abort, { once: true });
     armTurnTimer();
 
     const beginPrompt = (message: string, pauseAfter = false): boolean => {
-      const clean = cleanBlock(message, MAX_STEER_CHARS);
-      if (finished || !settled || !clean) return false;
+      const clean = cleanBlock(message, MAX_RESUME_CHARS);
+      if (finished || closing || !alive || !settled || !clean) return false;
       if (!send({ id: "prompt-" + (run.resumes + 1), type: "prompt", message: clean })) return false;
       settled = false;
+      run.error = undefined;
+      run.output = "";
       pauseRequested = pauseAfter;
       run.state = "working";
       run.resumes++;
@@ -402,7 +421,6 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         case "message_update": {
           const delta = event.assistantMessageEvent;
           if (delta?.type === "text_delta" && typeof delta.delta === "string") {
-            assistantOpen = true;
             run.live = (run.live + delta.delta).slice(-MAX_LIVE_CHARS);
             run.activity = "writing";
             const now = Date.now();
@@ -412,7 +430,6 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
               liveTimer.unref?.();
             }
           } else if (delta?.type === "thinking_start" || delta?.type === "thinking_delta") {
-            assistantOpen = true;
             if (run.activity !== "thinking") run.activity = "thinking";
             update();
           }
@@ -463,21 +480,14 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         }
         case "message_end": {
           if (event.message?.role !== "assistant") return;
-          assistantOpen = false;
           run.turns++;
           run.cost += Number(event.message.usage?.cost?.total) || 0;
           const text = textOf(event.message).trim();
           if (text) { run.output = text.slice(0, MAX_OUTPUT_CHARS); pushEntry(run, { kind: "text", rev: 0, text: cleanBlock(text, MAX_ENTRY_TEXT) }); }
-          if (event.message.stopReason === "error" && event.message.errorMessage) run.error = cleanText(String(event.message.errorMessage), 200);
+          if (event.message.stopReason === "error") run.error = cleanText(String(event.message.errorMessage ?? "assistant turn failed"), 200);
+          if (event.message.stopReason === "aborted" && !pauseRequested && !closing) run.error = "assistant turn aborted";
           run.live = "";
           run.activity = "thinking";
-          for (let index = messageWaiters.length - 1; index >= 0; index--) {
-            const waiter = messageWaiters[index]!;
-            if (run.turns <= waiter.after) continue;
-            messageWaiters.splice(index, 1);
-            clearTimeout(waiter.timer);
-            waiter.resolve(text || undefined);
-          }
           update();
           return;
         }
@@ -493,16 +503,16 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
           run.live = "";
           run.activity = undefined;
           run.endedAt = Date.now();
-          run.state = pauseRequested ? "paused" : "idle";
+          run.state = run.error ? "failed" : pauseRequested ? "paused" : "idle";
           pauseRequested = false;
-          if (!firstResolved) {
+          if (!firstResolved && !run.error) {
             firstResolved = true;
-            signal?.removeEventListener("abort", abort);
             resolveFirst();
           }
           resolveSettled();
           update();
-          if (!persistent && child.stdin && !child.stdin.writableEnded) child.stdin.end();
+          if (run.error) { hardStop(); finish("failed", run.error); }
+          else if (!persistent && child.stdin && !child.stdin.writableEnded) child.stdin.end();
           return;
         }
       }
@@ -524,23 +534,41 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       if (buffer.length > MAX_LINE_CHARS) { buffer = ""; overflow = true; }
     });
     child.stderr?.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-4000); });
-    child.on("error", (error) => finish("failed", error.message));
-    child.on("close", (code) => {
-      if (buffer && !overflow) line(buffer);
+    const exited = (code: number | null) => {
+      alive = false;
+      clearTimeout(killTimer);
+      if (buffer && !overflow) { line(buffer); buffer = ""; }
       if (code === 0 && settled && !run.error) finish("done");
       else finish("failed", run.error ?? (cleanText(stderr, 300) || (settled ? `exited ${code}` : `exited ${code} before finishing`)));
+      if (!firstResolved) { firstResolved = true; resolveFirst(); }
+      resolveClosed();
+    };
+    child.on("error", (error) => { hardStop(); finish("failed", error.message); });
+    // Exit retires control immediately, but finalization waits for close so stdio drains first.
+    child.once("exit", (code) => {
+      alive = false;
+      clearTurnTimer();
+      clearTimeout(killTimer);
+      if (!finished) {
+        run.state = code === 0 && settled && !run.error ? "done" : "failed";
+        if (run.state === "failed") run.error ??= `exited ${code}`;
+        run.activity = undefined;
+        resolveSettled();
+        update();
+      }
     });
+    child.once("close", exited);
 
     steer = (text) => {
       const message = cleanBlock(text, MAX_STEER_CHARS);
-      if (finished || !message || run.state !== "working" || !send({ type: "steer", message })) return false;
+      if (finished || closing || !message || run.state !== "working" || !send({ type: "steer", message })) return false;
       pushEntry(run, { kind: "steer", rev: 0, text: message });
       run.steered++;
       update();
       return true;
     };
     pause = async () => {
-      if (finished) return false;
+      if (finished || closing || !alive) return false;
       if (run.state === "paused") return true;
       if (run.state === "idle") { run.state = "paused"; run.pauses++; update(); return true; }
       if (run.state !== "working") return false;
@@ -558,7 +586,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       }
       update();
       await waiting;
-      return run.state === "paused";
+      return (run.state as DelegateState) === "paused";
     };
     resume = (text) => {
       if (run.state !== "paused" && run.state !== "idle") return false;
@@ -567,29 +595,29 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     };
     ask = async (text) => {
       const question = cleanBlock(text, MAX_STEER_CHARS);
-      if (!question || finished) return undefined;
-      const after = run.turns + (assistantOpen ? 1 : 0);
-      const answer = new Promise<string | undefined>((resolve) => {
-        const timer = setTimeout(() => {
-          const index = messageWaiters.findIndex((item) => item.resolve === resolve);
-          if (index >= 0) messageWaiters.splice(index, 1);
-          resolve(undefined);
-        }, 2 * 60_000);
-        timer.unref?.();
-        messageWaiters.push({ after, resolve, timer });
-      });
-      const instruction = "Moderator BTW: answer this question first in one compact paragraph, then continue your assigned task without changing scope. Question: " + question;
+      if (!question || finished || closing || askBusy) return undefined;
+      askBusy = true;
       const wasPaused = run.state === "paused";
-      const sent = run.state === "working" ? steer(instruction)
-        : (run.state === "idle" || run.state === "paused") ? beginPrompt(instruction, wasPaused) : false;
-      if (!sent) {
-        const waiter = messageWaiters.pop();
-        if (waiter) { clearTimeout(waiter.timer); waiter.resolve(undefined); }
-        return undefined;
-      }
-      return answer;
+      try {
+        // Cross a settled boundary so the active task's report cannot answer the question.
+        if (run.state === "working" && !await pause()) return undefined;
+        const instruction = "Moderator BTW: answer only this question in one compact paragraph. Preserve your assigned task scope for the next resume. Question: " + question;
+        if (!beginPrompt(instruction, wasPaused)) return undefined;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), 2 * 60_000);
+          timer.unref?.();
+        });
+        const answered = await Promise.race([waitSettled().then(() => true), timeout]);
+        clearTimeout(timer);
+        if (!answered) { void pause(); return undefined; }
+        return !finished && !run.error ? run.output || undefined : undefined;
+      } finally { askBusy = false; }
     };
-    shutdown = async () => {
+    shutdown = () => {
+      if (shutdownPromise) return shutdownPromise;
+      closing = true;
+      shutdownPromise = Promise.resolve().then(async () => {
       if (finished) { await closed; return; }
       if (run.state === "working") {
         const waiting = waitSettled();
@@ -609,8 +637,11 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       killer.unref?.();
       await closed;
       clearTimeout(killer);
+      });
+      return shutdownPromise;
     };
 
+    if (signal?.aborted) { abort(); return; }
     if (!send({ id: "prompt", type: "prompt", message: prompt })) { hardStop(); finish("failed", "could not send the task to the subagent"); }
   });
   return {
@@ -620,7 +651,8 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     pause: () => pause(),
     resume: (text) => resume(text),
     ask: (text) => ask(text),
-    shutdown: () => shutdown()
+    shutdown: () => shutdown(),
+    alive: () => alive
   };
 }
 
@@ -650,6 +682,8 @@ export interface SubagentRecord {
   ask(text: string): Promise<string | undefined>;
   changed(): string[];
   discard(): void;
+  alive?(): boolean;
+  closed?(): Promise<void>;
 }
 
 /**
@@ -660,6 +694,16 @@ export class DelegateRegistry {
   private entries = new Map<string, { record: SubagentRecord; finished?: number }>();
   private listeners = new Set<() => void>();
   private sequence = 0;
+  private reservations = 0;
+  private draining = new Set<SubagentRecord>();
+
+  /** Synchronous reservation prevents concurrent/reentrant batches from oversubscribing. */
+  reserve(count: number, maximum: number): (() => void) | undefined {
+    if (count < 1 || this.retained() + this.reservations + count > maximum) return undefined;
+    this.reservations += count;
+    let released = false;
+    return () => { if (!released) { released = true; this.reservations -= count; } };
+  }
 
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -686,7 +730,7 @@ export class DelegateRegistry {
   }
   async stop(key: string): Promise<SubagentStopReport | undefined> {
     const record = this.resolve(key);
-    if (!record || record.run.state === "done" || record.run.state === "stopped") return undefined;
+    if (!record || record.run.state === "stopped" || (record.run.state === "done" && !record.run.workspace)) return undefined;
     const report = await record.stop();
     this.notify();
     return report;
@@ -720,8 +764,8 @@ export class DelegateRegistry {
     return count;
   }
   retained(): number {
-    let count = 0;
-    for (const { record } of this.entries.values()) if (isRetained(record.run.state)) count++;
+    let count = this.draining.size;
+    for (const { record } of this.entries.values()) if (isRetained(record.run.state) || record.alive?.()) count++;
     return count;
   }
   /** Session changes discard retained workers and their private workspaces; they never auto-apply here. */
@@ -729,6 +773,10 @@ export class DelegateRegistry {
     const records = [...this.entries.values()].map(({ record }) => record);
     this.entries.clear();
     for (const record of records) {
+      if (record.closed && (isRetained(record.run.state) || record.alive?.())) {
+        this.draining.add(record);
+        void record.closed().finally(() => { this.draining.delete(record); this.notify(); });
+      }
       try { record.discard(); } catch { /* best effort */ }
     }
     this.notify();
@@ -746,12 +794,14 @@ export class DelegateRegistry {
   private sweep(): void {
     let finished = 0;
     for (const entry of this.entries.values()) {
-      if (isRetained(entry.record.run.state)) { entry.finished = undefined; continue; }
+      if (isRetained(entry.record.run.state) || entry.record.alive?.()) { entry.finished = undefined; continue; }
       entry.finished ??= ++this.sequence;
       finished++;
     }
     if (finished <= MAX_FINISHED) return;
-    const oldest = [...this.entries].filter(([, entry]) => entry.finished !== undefined).sort((a, b) => a[1].finished! - b[1].finished!);
+    // Conflicted/failed workspaces are recovery state, not disposable transcript history.
+    const oldest = [...this.entries].filter(([, entry]) => entry.finished !== undefined && !entry.record.run.workspace)
+      .sort((a, b) => a[1].finished! - b[1].finished!);
     for (const [key] of oldest.slice(0, finished - MAX_FINISHED)) this.entries.delete(key);
   }
 }
@@ -793,7 +843,7 @@ const Parameters = Type.Object({
     name: Type.Optional(Type.String({ description: "Short label, e.g. \"auth scout\"." })),
     role: Type.Optional(Type.String({ description: "pi-jar role override. Defaults by mode: scout→scout, fork→reviewer, worktree→worker; then role fallbacks/current model." })),
     mode: Type.Optional(DelegateModeSchema)
-  }), { minItems: 1, maxItems: MAX_DELEGATES }),
+  }), { minItems: 1, maxItems: 16 }),
   mode: Type.Optional(DelegateModeSchema),
   write: Type.Optional(Type.Boolean({ description: "Deprecated compatibility switch. true keeps the old shared-workspace editing mode; prefer mode=\"worktree\"." }))
 });
@@ -802,7 +852,28 @@ const glyph = (state: DelegateState) => state === "done" ? "✔" : state === "fa
 const color = (state: DelegateState) => state === "done" ? "success" : state === "failed" ? "error" : state === "working" ? "accent" : "dim";
 type RunDetails = Omit<DelegateRun, "transcript" | "live">;
 
+/** Plain orchestration snapshots. id/key are the stable registry key. */
+export interface SubagentReport {
+  id: string;
+  key: string;
+  name: string;
+  task: string;
+  mode: DelegateExecutionMode;
+  state: DelegateState;
+  output: string;
+  error?: string;
+}
+export interface DelegateController {
+  list(): SubagentReport[];
+  spawnScout(task: string, signal?: AbortSignal): Promise<SubagentReport>;
+  resumeScout(id: string, prompt: string, signal?: AbortSignal): Promise<SubagentReport>;
+}
+
 export interface DelegateOptions {
+  /** Allowed sizes: 2, 4, 6, 8, 16; defaults to 4. Read on every launch. */
+  getMaxSubagents?: () => number;
+  /** Shares the delegate lifecycle and capacity with scout orchestration. */
+  onController?: (controller: DelegateController) => void;
   spawnProcess?: Spawn;
   /** The parent's change tracker: finalized worktree edits join /diff. */
   changes?: () => ChangeTracker | undefined;
@@ -852,6 +923,12 @@ const peekRecord = (record: SubagentRecord): string => {
 export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, registry: DelegateRegistry, options: DelegateOptions = {}): void {
   if (process.env[CHILD_ENV] || typeof (pi as ExtensionAPI & { registerTool?: unknown }).registerTool !== "function") return;
   let batch = 0;
+  let controllerContext: ExtensionContext | undefined;
+  const maxSubagents = () => {
+    const value = options.getMaxSubagents?.() ?? MAX_DELEGATES;
+    return SUBAGENT_LIMIT_CHOICES.includes(value as never) ? value : MAX_DELEGATES;
+  };
+  pi.on?.("session_start", (_event, ctx) => { controllerContext = ctx; });
   const roleCandidates = (role: string) => {
     const manager = roles as ModelRoleManager & { resolveCandidates?: (name: string) => ReturnType<ModelRoleManager["resolveCandidates"]> };
     if (typeof manager.resolveCandidates === "function") return manager.resolveCandidates(role);
@@ -861,7 +938,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
 
   let moderatorContextDirty = true;
   registry.subscribe(() => { moderatorContextDirty = true; });
-  pi.on("before_agent_start", () => {
+  pi.on?.("before_agent_start", (_event, ctx) => {
+    controllerContext = ctx;
     moderatorContextDirty = true;
     const retained = registry.records().filter((record) => isRetained(record.run.state));
     if (!retained.length) return;
@@ -875,7 +953,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       fleet
     ].join("\n") } };
   });
-  pi.on("context", (event) => {
+  pi.on?.("context", (event) => {
     if (!moderatorContextDirty) return;
     const active = registry.retained() > 0;
     let latest = -1;
@@ -891,24 +969,28 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       (raw as { customType?: string }).customType !== "pi-jar.moderator-context" || (active && index === latest)) };
   });
 
-  pi.registerTool({
+  const delegateTool: ToolDefinition<typeof Parameters> = {
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Spawn retained session-scoped subagents (maximum ${MAX_DELEGATES} alive at once). scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Retained agents become idle after a turn and are controlled with jar_subagent. Worktree changes apply only when the moderator stops that agent.`,
+    description: `Spawn retained session-scoped subagents within the configured live pool limit. scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Retained agents become idle after a turn and are controlled with jar_subagent. Worktree changes apply only when the moderator stops that agent.`,
     promptSnippet: "Act as moderator: delegate parallel work, inspect progress with jar_subagent peek, steer only when needed, and synthesize results instead of duplicating subagent work.",
     promptGuidelines: [
       "When useful work can be delegated, act as the moderator: decompose, assign, monitor, resolve disagreements, and synthesize. Do not redo a delegated implementation yourself while its worker is active.",
       "Use scout for cheap independent discovery, fork/reviewer for context-aware review, and worktree/worker for implementation. Explicit task.role overrides these mode defaults.",
       "Retained agents become idle after each turn. Reuse them with jar_subagent resume instead of spawning replacements; pause them when priorities change; stop completed workers to reconcile their worktree into /diff.",
       "Use jar_subagent ask for a brief BTW question to one worker. For agent-to-agent questions, have them use the bounded jar_discuss paper so answers stay structured and cheap.",
-      "Keep at most four retained agents. Stop agents you no longer need."
+      "Respect the configured pool limit, including idle and paused agents. Stop agents you no longer need."
     ],
     parameters: Parameters,
     async execute(_id, params, signal, onUpdate, ctx) {
-      const requested = params.tasks.slice(0, MAX_DELEGATES);
-      if (registry.retained() + requested.length > MAX_DELEGATES) {
-        return { content: [{ type: "text", text: `Subagent pool is full: ${registry.retained()}/${MAX_DELEGATES} retained. Reuse or stop an existing agent with jar_subagent.` }], isError: true };
+      controllerContext = ctx;
+      const requested = params.tasks;
+      const maximum = maxSubagents();
+      const releaseReservation = registry.reserve(requested.length, maximum);
+      if (!releaseReservation) {
+        return { content: [{ type: "text", text: `Subagent pool is full: ${registry.retained()}/${maximum} retained. Reuse or stop an existing agent with jar_subagent.` }], details: { runs: [], write: false }, isError: true };
       }
+      try {
 
       const id = ++batch;
       const defaultMode: DelegateExecutionMode = params.mode ?? (params.write === true ? "direct" : "scout");
@@ -955,7 +1037,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         if (!ctx.hasUI) return;
         for (const { key, run } of records) {
           try {
-            ctx.ui.setStatus(`${ROLE_PREFIX}${key}`, run.state === "done" || run.state === "failed" ? undefined : JSON.stringify({
+            ctx.ui.setStatus(`${ROLE_PREFIX}${key}`, run.state === "done" || run.state === "failed" || run.state === "stopped" ? undefined : JSON.stringify({
               name: run.name, label: run.name.slice(0, 12),
               state: run.state === "queued" || run.state === "paused" ? "waiting" : run.state === "idle" ? "idle" : "working",
               task: cleanText(run.task, 60), expiresAt: Date.now() + 24 * 60 * 60_000
@@ -964,6 +1046,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         }
       };
       const details = (includeOutput = true) => ({
+        batch: id,
         runs: runs.map(({ transcript: _transcript, live: _live, ...run }): RunDetails => includeOutput ? run : { ...run, output: "" }),
         write: runs.some((run) => run.mode === "direct" || run.mode === "worktree")
       });
@@ -989,7 +1072,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       };
       const failedHandle = (): DelegateHandle => ({
         firstSettled: Promise.resolve(), closed: Promise.resolve(), steer: () => false, pause: async () => false,
-        resume: () => false, ask: async () => undefined, shutdown: async () => {}
+        resume: () => false, ask: async () => undefined, shutdown: async () => {}, alive: () => false
       });
       const cleanupPrivate = (index: number, discardWorktree: boolean) => {
         const dir = sessionDirs.get(index);
@@ -1009,7 +1092,13 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         update();
       };
 
-      handles = runs.map((run, index) => {
+      let discarded = false;
+      handles = runs.map(failedHandle);
+      const readyResolvers: Array<() => void> = [];
+      const ready = runs.map(() => new Promise<void>((resolve) => readyResolvers.push(resolve)));
+      const startRuns = () => runs.forEach((run, index) => {
+        if (discarded) { run.state = "stopped"; readyResolvers[index]!(); return; }
+        const start = (): DelegateHandle => {
         if ((run.mode === "fork" || run.mode === "worktree") && !parentSession) {
           failBeforeStart(run, "fork/worktree mode requires a persisted parent Pi session");
           return failedHandle();
@@ -1054,18 +1143,43 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         hooks.env = env;
         return startDelegate(run, delegateArgs(run.model, thinkingByRun.get(run.index), write, process.argv, fork),
           delegatePrompt(run.task, write, run.mode), cwd, controllers[index]!.signal, update, options.spawnProcess, hooks, run.mode !== "direct");
+        };
+        let handle: DelegateHandle;
+        try { handle = start(); }
+        catch (error) { failBeforeStart(run, error); handle = failedHandle(); }
+        handles[index] = handle;
+        readyResolvers[index]!();
+        void handle.closed.then(() => {
+          cleanupPrivate(run.index, discarded || run.mode !== "worktree");
+          update();
+        });
+        if (discarded) void handle.shutdown().finally(() => cleanupPrivate(run.index, true));
       });
 
-      const stopRun = async (index: number): Promise<SubagentStopReport> => {
+      const stopping = new Map<number, Promise<SubagentStopReport>>();
+      const stopRequested = new Set<number>();
+      const stopRun = (index: number): Promise<SubagentStopReport> => {
+        const existing = stopping.get(index);
+        if (existing) return existing;
+        stopRequested.add(index);
+        const promise = finalizeRun(index);
+        stopping.set(index, promise);
+        // A reconciliation conflict is retryable after the parent drift is resolved.
+        void promise.then(() => { if (worktrees.has(runs[index]!.index)) stopping.delete(index); });
+        return promise;
+      };
+      const finalizeRun = async (index: number): Promise<SubagentStopReport> => {
         const run = runs[index]!;
         const key = `delegate-${id}-${run.index}`;
         const workspace = run.workspace;
+        if (run.error?.startsWith("changes not applied:")) run.error = undefined;
+        await ready[index];
         const handle = handles[index]!;
         await handle.shutdown();
 
         let changed: string[] = [];
         const worktree = worktrees.get(run.index);
-        if (worktree) {
+        if (worktree && !discarded) {
           try { changed = worktreeChangedFiles(worktree); run.filesEdited = changed; }
           catch (error) { run.error = "could not inspect isolated changes: " + cleanText(String(error), 240); }
           if (changed.length && !run.error) {
@@ -1078,6 +1192,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
               worktrees.delete(run.index);
               run.workspace = undefined;
             } catch (error) {
+              if (error instanceof WorktreeApplyError) run.appliedFiles = error.appliedFiles;
               run.error = "changes not applied: " + cleanText(error instanceof Error ? error.message : String(error), 240);
             }
           } else if (!changed.length) {
@@ -1087,7 +1202,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           }
         }
         cleanupPrivate(run.index, false);
-        if (run.state !== "failed") run.state = run.error ? "failed" : "stopped";
+        run.state = run.error ? "failed" : "stopped";
         run.endedAt ??= Date.now();
         update();
         return {
@@ -1099,20 +1214,28 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       records = runs.map((run, index) => ({
         key: `delegate-${id}-${run.index}`, batch: id, run,
         stop: () => stopRun(index),
-        pause: () => handles[index]!.pause(),
-        resume: (text) => handles[index]!.resume(text),
-        steer: (text) => handles[index]!.steer(text),
-        ask: (text) => handles[index]!.ask(text),
+        pause: () => discarded || stopRequested.has(index) ? Promise.resolve(false) : handles[index]!.pause(),
+        resume: (text) => !discarded && !stopRequested.has(index) && handles[index]!.resume(text),
+        steer: (text) => !discarded && !stopRequested.has(index) && handles[index]!.steer(text),
+        ask: (text) => discarded || stopRequested.has(index) ? Promise.resolve(undefined) : handles[index]!.ask(text),
+        alive: () => handles[index]!.alive(),
+        closed: () => ready[index]!.then(() => handles[index]!.closed),
         changed: () => {
           const worktree = worktrees.get(run.index);
           if (!worktree) return [...run.filesEdited];
           try { return worktreeChangedFiles(worktree); } catch { return [...run.filesEdited]; }
         },
         discard: () => {
-          void handles[index]!.shutdown().finally(() => cleanupPrivate(run.index, true));
+          discarded = true;
+          // Cancellation is synchronous: a concurrent stop must never apply discarded edits.
+          controllers[index]!.abort(STOP_REASON);
+          void ready[index]!.then(() => handles[index]!.shutdown()).finally(() => cleanupPrivate(run.index, true));
         }
       }));
+      // Transfer the reservation into queued records before notifying reentrant listeners.
+      releaseReservation();
       registry.add(...records);
+      startRuns();
       publish();
 
       try {
@@ -1128,7 +1251,9 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         flushUpdate();
         toolReturned = true;
       }
-      return { content: [{ type: "text", text: runs.map((run) => runReport(run)).join("\n\n") }], details: details() };
+      return { content: [{ type: "text", text: runs.map((run) => runReport(run)).join("\n\n") }], details: details(),
+        ...(runs.some((run) => run.state === "failed") ? { isError: true } : {}) };
+      } finally { releaseReservation(); }
     },
     renderCall(args, theme) {
       const count = Array.isArray(args.tasks) ? args.tasks.length : 0;
@@ -1149,6 +1274,50 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         return row;
       });
       return new Text(rows.join("\n") || theme.fg("dim", "No subagents."), 0, 0);
+    }
+  };
+  pi.registerTool(delegateTool);
+
+  const snapshot = (record: SubagentRecord): SubagentReport => ({
+    id: record.key, key: record.key, name: record.run.name, task: record.run.task,
+    mode: record.run.mode, state: record.run.state, output: record.run.output,
+    ...(record.run.error ? { error: record.run.error } : {})
+  });
+  options.onController?.({
+    list: () => registry.records().map(snapshot),
+    async spawnScout(task, signal) {
+      if (!controllerContext) throw new Error("Delegate controller has no active session context");
+      if (signal?.aborted) throw new Error("Scout launch aborted");
+      const result = await delegateTool.execute("scout", { tasks: [{ task, mode: "scout" }] }, signal, undefined, controllerContext);
+      const launched = (result.details as { batch?: number }).batch;
+      if (!launched) throw new Error(result.content.map((part) => "text" in part ? part.text : "").join("\n"));
+      const record = registry.get(`delegate-${launched}-1`);
+      if (!record) throw new Error("Scout session was discarded");
+      if (record.run.error || record.run.state !== "idle") throw new Error(record.run.error ?? "Scout failed to settle");
+      return snapshot(record);
+    },
+    async resumeScout(id, prompt, signal) {
+      const record = registry.get(id);
+      if (!record || record.run.mode !== "scout") throw new Error("Only fresh read-only scouts can vote");
+      if (!prompt.trim()) throw new Error("Scout resume requires a prompt");
+      if (signal?.aborted) throw new Error("Scout resume aborted");
+      const result = new Promise<SubagentReport>((resolve, reject) => {
+        let unsubscribe = () => {};
+        const cleanup = () => { unsubscribe(); signal?.removeEventListener("abort", abort); };
+        const check = () => {
+          if (registry.get(id) !== record) { cleanup(); reject(new Error("Scout session was discarded")); return; }
+          if (isRunning(record.run.state)) return;
+          cleanup();
+          if (record.run.error || !isRetained(record.run.state)) reject(new Error(record.run.error ?? "Scout exited before reporting"));
+          else resolve(snapshot(record));
+        };
+        const abort = () => { cleanup(); void registry.stop(id); reject(new Error("Scout resume aborted")); };
+        unsubscribe = registry.subscribe(check);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (!registry.resume(id, prompt)) { cleanup(); reject(new Error("Scout is not idle or paused")); }
+        else check();
+      });
+      return result;
     }
   });
 
@@ -1172,6 +1341,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       message: Type.Optional(Type.String({ description: "Direction, BTW question, or resume instruction." }))
     }),
     async execute(_id, params) {
+      const result = await (async () => {
       if (params.action === "peek") {
         const targets = params.agent ? [registry.resolve(params.agent)].filter((item): item is SubagentRecord => !!item)
           : registry.records().filter((record) => isRetained(record.run.state));
@@ -1203,6 +1373,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       const report = await registry.stop(record.key);
       if (!report) return { content: [{ type: "text", text: "Subagent is already retired: " + record.run.name }] };
       return { content: [{ type: "text", text: controlReport(report) }], details: report };
+      })();
+      return { ...result, content: result.content.map((part) => ({ ...part, type: "text" as const })), details: result.details };
     }
   });
 }

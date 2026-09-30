@@ -34,13 +34,29 @@ test("discussion paper keeps structured bounded questions and answers", async ()
       await tool!.execute("x" + i, { action: "ask", text: "x".repeat(MAX_DISCUSSION_TEXT + 200) });
     }
     const entries = discussionEntries(file);
-    assert.equal(entries.length, MAX_DISCUSSION_ENTRIES);
+    assert.ok(entries.length > 0 && entries.length <= MAX_DISCUSSION_ENTRIES);
     assert.ok(entries.every((entry) => entry.text.length <= MAX_DISCUSSION_TEXT));
     assert.ok(Buffer.byteLength(readFileSync(file)) <= 64 * 1024);
   } finally {
     disposeDiscussionPaper(file);
     assert.equal(existsSync(file), false);
   }
+});
+
+test("discussion UTF-8 cap holds after every multibyte append and preserves newest entries", async () => {
+  const file = createDiscussionPaper();
+  let tool: Tool | undefined;
+  try {
+    registerDiscussionTool({ registerTool(definition: Tool) { tool = definition; } } as never, () => file, () => "worker");
+    for (let i = 0; i < MAX_DISCUSSION_ENTRIES + 8; i++) {
+      await tool!.execute("x" + i, { action: "ask", text: "界".repeat(MAX_DISCUSSION_TEXT) });
+      assert.ok(Buffer.byteLength(readFileSync(file)) <= 64 * 1024, "paper exceeds actual UTF-8 byte cap at append " + i);
+    }
+    const entries = discussionEntries(file);
+    assert.ok(entries.length > 0 && entries.length < 32, "even 32 multibyte entries exceed the byte cap");
+    assert.equal(entries.at(-1)?.id, "d" + (MAX_DISCUSSION_ENTRIES + 8));
+    assert.ok(entries.every((entry) => entry.text === "界".repeat(MAX_DISCUSSION_TEXT)));
+  } finally { disposeDiscussionPaper(file); }
 });
 
 test("discussion answers require a known question id", async () => {

@@ -47,7 +47,7 @@ test("goal state replays v1 entries and ignores malformed or foreign ones", () =
   assert.equal(store.current(), undefined);
 });
 
-function harness(maxRounds = 3) {
+function harness(maxRounds = 3, subagentMode?: (agent: string) => string | undefined) {
   const events = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
   const tools = new Map<string, { execute: (...args: any[]) => Promise<any> }>();
@@ -67,7 +67,7 @@ function harness(maxRounds = 3) {
   const roles = { activateTemporary: async (role: string) => { roleCalls.push("on:" + role); return async () => { roleCalls.push("off:" + role); }; } } as unknown as ModelRoleManager;
   const completed: string[] = [];
   new GoalLoop(pi, { goals: () => goals, todos: () => todos, roles, planActive: () => planActive, maxRounds: () => maxRounds,
-    completed: (_ctx, goal) => completed.push(goal.text) }).register();
+    subagentMode, completed: (_ctx, goal) => completed.push(goal.text) }).register();
   const settle = (outcome = "completed", extra: object = {}) => events.get("agent_before_settle")!({ outcome, continue: false, entries: [], ...extra }, ctx);
   const tool = (params: object) => tools.get(GOAL_TOOL)!.execute("id", params, undefined, undefined, ctx);
   const guard = (toolName: string, input: object = {}) => events.get("tool_call")!({ toolName, input }, ctx);
@@ -86,6 +86,22 @@ test("goal command starts the loop; edits are blocked until a task is open", asy
   assert.equal(await h.guard("write", { path: "a.ts" }), undefined);
   const injected = await h.events.get("before_agent_start")!({}, h.ctx);
   assert.match(injected.message.content, /ACTIVE GOAL[\s\S]*Ship the hello command[\s\S]*\[ \] Register command/);
+});
+
+test("goal mutation guard blocks worktree finalization, not stopping read-only or unknown agents", async () => {
+  const h = harness(3, (agent) => ({ worker: "worktree", reviewer: "fork", scout: "scout" } as Record<string, string>)[agent]);
+  await h.commands.get("goal")!("Ship it", h.ctx);
+  for (const phase of ["implement", "audit"] as const) {
+    h.goals.setRound(1, phase);
+    assert.equal((await h.guard("jar_subagent", { action: "stop", agent: "worker" }))?.block, true);
+    for (const agent of ["reviewer", "scout", "missing", ""]) {
+      assert.equal(await h.guard("jar_subagent", { action: "stop", agent }), undefined);
+    }
+    assert.equal(await h.guard("jar_subagent", { action: "pause", agent: "worker" }), undefined);
+    assert.equal(await h.guard("jar_subagent", { action: "stop" }), undefined);
+  }
+  h.todos.add("Apply isolated changes");
+  assert.equal(await h.guard("jar_subagent", { action: "stop", agent: "worker" }), undefined);
 });
 
 test("implementor continues while tasks are open, then an auditor pass must complete with evidence", async () => {

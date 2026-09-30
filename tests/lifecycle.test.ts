@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadVisualSettings } from "../src/settings.ts";
@@ -14,6 +14,67 @@ after(() => {
   if (initialAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = initialAgentDir;
   rmSync(testAgentDir, { recursive: true, force: true });
+});
+
+test("fork children strip inherited parent automation prompts on every context event", async () => {
+  const previousChild = process.env.PI_JAR_CHILD;
+  process.env.PI_JAR_CHILD = "1";
+  try {
+    const events = new Map<string, Function[]>();
+    piJar({ on(name: string, fn: Function) { events.set(name, [...(events.get(name) ?? []), fn]); },
+      registerCommand() {}, registerTool() {}, getCommands: () => []
+    } as never);
+    const keep = [{ role: "user", content: "Assigned task" }, { customType: "other.context", content: "keep" }];
+    const inherited = ["goal-context", "goal-continuation", "plan-context", "plan-reminder", "moderator-context"]
+      .map((type) => ({ customType: "pi-jar." + type, content: "parent instructions" }));
+    for (let round = 0; round < 2; round++) {
+      let messages: unknown[] = [...keep, ...inherited];
+      for (const handler of events.get("context") ?? []) {
+        const result = await handler({ messages }, {});
+        if (result?.messages) messages = result.messages;
+      }
+      assert.deepEqual(messages, keep);
+    }
+  } finally {
+    if (previousChild === undefined) delete process.env.PI_JAR_CHILD;
+    else process.env.PI_JAR_CHILD = previousChild;
+  }
+});
+
+test("worktree child guard checks normalized paths, git control files, and default cwd", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-jar-guard-")));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace);
+  writeFileSync(join(workspace, ".git"), "gitdir: elsewhere");
+  mkdirSync(join(workspace, "nested", ".git"), { recursive: true });
+  const previousChild = process.env.PI_JAR_CHILD;
+  const previousRoot = process.env.PI_JAR_WORKTREE_ROOT;
+  process.env.PI_JAR_CHILD = "1";
+  process.env.PI_JAR_WORKTREE_ROOT = workspace;
+  try {
+    const guards: Function[] = [];
+    piJar({ on(name: string, fn: Function) { if (name === "tool_call") guards.push(fn); },
+      registerCommand() {}, registerTool() {}, getCommands: () => []
+    } as never);
+    const call = async (toolName: string, input: object, cwd = workspace) => {
+      for (const guard of guards) {
+        const result = await guard({ toolName, input }, { cwd });
+        if (result?.block) return result;
+      }
+    };
+    assert.equal(await call("write", { path: "safe.txt" }), undefined);
+    for (const path of ["@../outside.txt", "@.git", ".git/config", "nested/.git/config", "@nested/.git/config"]) {
+      assert.equal((await call("write", { path }))?.block, true, path);
+    }
+    assert.equal((await call("ls", {}, root))?.block, true, "omitted path uses guarded cwd");
+    assert.equal((await call("bash", { command: "git status" }))?.block, true);
+  } finally {
+    if (previousChild === undefined) delete process.env.PI_JAR_CHILD;
+    else process.env.PI_JAR_CHILD = previousChild;
+    if (previousRoot === undefined) delete process.env.PI_JAR_WORKTREE_ROOT;
+    else process.env.PI_JAR_WORKTREE_ROOT = previousRoot;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("quota waits for startup to settle, skips unsupported providers and can be toggled", async () => {

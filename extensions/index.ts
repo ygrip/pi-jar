@@ -5,6 +5,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { registerAskTool } from "../src/ask-tool.ts";
+import { registerDemocracy } from "../src/democracy.ts";
+import type { DelegateController } from "../src/delegate.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
@@ -59,6 +61,18 @@ const SESSION_SETUP_ENTRIES = new Set(["thinking_level_change", "model_change", 
 export default function piJar(pi: ExtensionAPI): void {
   const delegatedChild = process.env[CHILD_ENV] === "1";
   const delegatedWorktree = delegatedChild ? process.env[CHILD_WORKTREE_ENV] : undefined;
+  if (delegatedChild) {
+    // Forked transcripts retain custom prompt messages even though their automation stores
+    // and handlers are disabled. Remove only parent automation, not task/user context.
+    const parentAutomation = new Set([
+      "pi-jar.goal-context", "pi-jar.goal-continuation",
+      "pi-jar.plan-context", "pi-jar.plan-reminder", "pi-jar.moderator-context"
+    ]);
+    pi.on("context", (event) => {
+      const messages = event.messages.filter((message) => !parentAutomation.has((message as { customType?: string }).customType ?? ""));
+      if (messages.length !== event.messages.length) return { messages };
+    });
+  }
   if (delegatedWorktree) {
     const pathTools = new Set(["read", "edit", "write", "grep", "find", "ls"]);
     const shellTools = new Set(["bash", "powershell", "jar_shell"]);
@@ -68,9 +82,12 @@ export default function piJar(pi: ExtensionAPI): void {
       }
       if (!pathTools.has(event.toolName)) return;
       const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
+      if (!workspacePathAllowed(delegatedWorktree, ctx.cwd, ".")) {
+        return { block: true, reason: "Sandboxed worktree subagent working directory is outside its workspace." };
+      }
       for (const key of ["path", "file_path", "cwd"]) {
         const value = input[key];
-        if (typeof value === "string" && value && !workspacePathAllowed(delegatedWorktree, ctx.cwd, value)) {
+        if (typeof value === "string" && value && !workspacePathAllowed(delegatedWorktree, ctx.cwd, value, event.toolName === "read")) {
           return { block: true, reason: `Sandboxed worktree subagent cannot access outside its workspace: ${value}` };
         }
       }
@@ -251,13 +268,17 @@ export default function piJar(pi: ExtensionAPI): void {
   registerAdvisor(pi, modelRoles, { enabled: () => visualSettings.advisor, gates: () => visualSettings.advisorGates, usage: sideUsage });
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
-  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles));
-  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges, discussionFile: () => discussionFile });
+  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild });
+  let delegateController: DelegateController | undefined;
+  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges, discussionFile: () => discussionFile,
+    getMaxSubagents: () => visualSettings.maxSubagents, onController: (controller) => { delegateController = controller; } });
+  if (!delegatedChild) registerDemocracy(pi, () => delegateController, () => visualSettings.maxSubagents);
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
   if (!delegatedChild) planMode.register();
   const goalLoop = new GoalLoop(pi, {
     goals: () => goals, todos: () => todos, roles: modelRoles, planActive: () => planMode.isEnabled(),
     maxRounds: () => visualSettings.goalRounds,
+    subagentMode: (agent) => subagents.resolve(agent)?.run.mode,
     changed: (ctx) => { footerTui?.requestRender(); welcomeTui?.requestRender(); updateTaskWidget(ctx); },
     completed: () => composer.flash("complete", 4000)
   });

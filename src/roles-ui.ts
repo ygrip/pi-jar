@@ -43,7 +43,6 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
     let scroll = 0;
     let layout = { top: 1, rows: 0, leftWidth: 0, bodyX: 2, footerTop: 0 };
     let width = 80;
-    let actionsTop = -1;
     const rows = () => roles.list();
     const finish = (action: RoleAction) => done({ action, index: selected });
     return {
@@ -69,9 +68,9 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
         if (event.type !== "click" || event.button !== "left") return;
         if (event.y === 0 && event.x >= width - 3) { done(undefined); return { handled: true }; }
         const row = event.y - layout.top;
-        // Actions are listed in the detail pane, one per row.
-        const actionIndex = row - actionsTop;
-        if (row >= 0 && row < layout.rows && event.x >= layout.bodyX && actionIndex >= 0 && actionIndex < ACTIONS.length) {
+        // Actions stay in the footer so even short terminals can click every action.
+        const actionIndex = event.y - layout.footerTop;
+        if (event.x >= 2 && event.x < width - 2 && actionIndex >= 0 && actionIndex < ACTIONS.length) {
           finish(ACTIONS[actionIndex]!.action); return { handled: true };
         }
         if (row >= 0 && row < layout.rows && (layout.leftWidth === 0 || event.x < layout.leftWidth + 3)) {
@@ -83,7 +82,7 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
         width = Math.max(24, available);
         const list = rows();
         selected = Math.max(0, Math.min(list.length - 1, selected));
-        const height = Math.min(contentRows(5, 8), Math.max(12 + ACTIONS.length + 2, list.length));
+        const height = Math.min(contentRows(ACTIONS.length + 4, 4), Math.max(13, list.length));
         if (selected < scroll) scroll = selected;
         if (selected >= scroll + height) scroll = selected - height + 1;
         const active = roles.activeRole();
@@ -99,11 +98,9 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
         const header = narrow ? [theme.fg("accent", `‹ ${selected + 1}/${list.length} ${row.role} ›`)] : [];
         const actions = optionList(theme, ACTIONS.map((item) => item.label), -1, ACTIONS.map((item) => item.hint))
           .map((line, at) => ACTIONS[at]!.action === "delete" && !row.custom ? theme.fg("dim", stripTerminalSequences(line)) : line);
-        // Actions come right after the facts; the spec help (last three lines) goes last.
-        const facts = info.slice(0, -3), help = info.slice(-3);
-        const body = [...header, ...facts, theme.fg("accent", "Actions"), ...actions, ...help];
-        actionsTop = header.length + facts.length + 1;
+        const body = [...header, ...info];
         const split = splitFrame(theme, width, "pi-jar · roles", narrow ? [] : left, body, [
+          ...actions,
           theme.fg("dim", "↑↓ choose role · press a key or click an action · Esc close")
         ], height);
         layout = split.layout;

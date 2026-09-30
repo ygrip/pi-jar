@@ -25,6 +25,7 @@ export interface FakeChild extends EventEmitter {
   exitCode: number | null;
   killed: string[];
   kill(signal: string): void;
+  exit(code: number, signal?: string, close?: boolean): void;
 }
 
 export interface SpawnCall { command: string; args: string[]; env: NodeJS.ProcessEnv; cwd?: string }
@@ -40,11 +41,15 @@ export function fakeChild(script?: (child: FakeChild, prompt: string) => void): 
   child.stderr = new EventEmitter();
   child.exitCode = null;
   child.killed = [];
-  const exit = (code: number, signal?: string) => {
+  const exit = (code: number, signal?: string, close = true) => {
     if (child.exitCode !== null) return;
     child.exitCode = code;
-    queueMicrotask(() => child.emit("close", code, signal ?? null));
+    queueMicrotask(() => {
+      child.emit("exit", code, signal ?? null);
+      if (close) child.emit("close", code, signal ?? null);
+    });
   };
+  child.exit = exit;
   child.kill = (signal: string) => { child.killed.push(signal); exit(143, signal); };
   child.stdin.on("finish", () => exit(0));
   child.stdin.on("command", (command: Record<string, unknown>) => {
@@ -59,7 +64,7 @@ export function fakeChild(script?: (child: FakeChild, prompt: string) => void): 
     }
     if (command.type !== "prompt") return;
     emit(child, { type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
-    queueMicrotask(() => script?.(child, String(command.message)));
+    queueMicrotask(() => { if (child.exitCode === null) script?.(child, String(command.message)); });
   });
   return child;
 }

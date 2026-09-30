@@ -354,7 +354,9 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
       const shellLive = item.kind === "shell" && item.status === "running";
       if (!subagentLive && !shellLive) return;
       try {
-        if (item.kind === "subagent") void sources.subagents.stop(item.id);
+        if (item.kind === "subagent") void sources.subagents.stop(item.id).catch((error: unknown) => {
+ctx.ui.notify("pi-jar: " + (error instanceof Error ? error.message : String(error)), "error");
+});
         else shells?.kill(item.id);
       } catch (error) { ctx.ui.notify("pi-jar: " + (error instanceof Error ? error.message : String(error)), "error"); }
     };

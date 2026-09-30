@@ -350,7 +350,7 @@ export class ModelRoleManager {
     if (scope === "project") this.project = next; else this.global = next;
   }
 
-  register(openUi?: (ctx: ExtensionContext) => Promise<void>): void {
+  register(openUi?: (ctx: ExtensionContext) => Promise<void>, options: { activateDefault?: () => boolean } = {}): void {
     const manual = (_event: unknown, ctx: ExtensionContext) => {
       if (this.applying) return;
       this.manualEpoch++;
@@ -361,7 +361,8 @@ export class ModelRoleManager {
     this.pi.on("session_start", async (_event, ctx) => {
       this.load(ctx.cwd);
       this.active = undefined;
-      if (this.resolveCandidates("default").length) await this.activate("default", ctx, true);
+      // Delegated children already received their role model/effort via CLI arguments.
+      if (options.activateDefault?.() !== false && this.resolveCandidates("default").length) await this.activate("default", ctx, true);
     });
 
     this.pi.registerCommand("roles", {
