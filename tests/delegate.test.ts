@@ -337,3 +337,58 @@ test("worktree mode retains isolated edits until stop, then safely applies them 
     assert.equal(existsSync(call.cwd), false, "finalized worktree is cleaned up");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test("moderator can peek, resume, pause, ask and stop the same retained subagent", async () => {
+  const registry = new DelegateRegistry();
+  const tools = new Map<string, Tool>();
+  let prompts = 0;
+  const fake = fakeSpawn((child, prompt) => {
+    prompts++;
+    if (prompt.includes("Moderator BTW:")) {
+      say(child, "The auth guard is in middleware.ts.");
+      settle(child);
+      return;
+    }
+    if (prompt.includes("continue slowly")) {
+      emit(child, { type: "message_update", assistantMessageEvent: { type: "thinking_start" } });
+      return;
+    }
+    say(child, prompts === 1 ? "initial report" : "finished follow-up");
+    settle(child);
+  });
+  registerDelegate({ registerTool(definition: Tool) { tools.set(definition.name, definition); } } as never,
+    roles({ scout: { provider: "p", model: "cheap" } }), registry, { spawnProcess: fake.spawn as never });
+  const delegate = tools.get("jar_delegate")!;
+  const control = tools.get("jar_subagent")!;
+  await delegate.execute("d", { tasks: [{ task: "inspect auth", name: "auth scout" }] }, undefined, undefined, {
+    ...quiet, model: { provider: "p", id: "current" }, modelRegistry: { getAvailable: () => [{ provider: "p", id: "cheap" }] }
+  });
+  const [record] = registry.records();
+  assert.equal(record!.run.state, "idle");
+
+  const peek = await control.execute("p", { action: "peek" }, undefined, undefined, quiet);
+  assert.match(peek.content[0]!.text, /auth scout · idle[\s\S]*task: inspect auth/);
+
+  const resumed = await control.execute("r", { action: "resume", agent: record!.key, message: "continue slowly" }, undefined, undefined, quiet);
+  assert.match(resumed.content[0]!.text, /Resumed/);
+  await tick();
+  assert.equal(record!.run.state, "working");
+
+  const paused = await control.execute("pa", { action: "pause", agent: "auth scout" }, undefined, undefined, quiet);
+  assert.match(paused.content[0]!.text, /Paused/);
+  assert.equal(record!.run.state, "paused");
+
+  const answer = await control.execute("a", { action: "ask", agent: record!.key, message: "Where is the guard?" }, undefined, undefined, quiet);
+  assert.match(answer.content[0]!.text, /middleware\.ts/);
+  assert.equal(record!.run.state, "paused", "BTW on a paused worker returns it to paused");
+
+  await control.execute("r2", { action: "resume", agent: record!.key, message: "finish now" }, undefined, undefined, quiet);
+  await tick();
+  assert.equal(record!.run.state, "idle");
+
+  const stopped = await control.execute("s", { action: "stop", agent: record!.key }, undefined, undefined, quiet);
+  assert.match(stopped.content[0]!.text, /workspace: none[\s\S]*changed: none[\s\S]*remaining:/);
+  assert.equal(record!.run.state, "done");
+  assert.equal(fake.children[0]!.stdin.writableEnded, true);
+});
