@@ -43,7 +43,7 @@ const gitText = (cwd: string, args: string[], input?: string): string =>
 
 const gitBuffer = (cwd: string, args: string[]): Buffer =>
   execFileSync("git", ["-C", cwd, ...args], {
-    encoding: "buffer",
+    encoding: null,
     maxBuffer: MAX_GIT_OUTPUT,
     stdio: ["ignore", "pipe", "pipe"]
   });
