@@ -216,7 +216,7 @@ function subagentHead(run: DelegateRun, status: Status, width: number, fg: Fg): 
   ].filter(Boolean);
   const head = [
     fg("accent", [run.name, run.role, run.model].filter(Boolean).join(" · ")),
-    fg(COLOR[status], withIcon(status, status === "stopped" ? "stopped" : run.state)) + fg("dim", " · " + facts.join(" · "))
+    fg(COLOR[status], withIcon(status, run.state === "paused" ? "paused" : status === "stopped" ? "stopped" : run.state)) + fg("dim", " · " + facts.join(" · "))
   ];
   // A turning glyph on the 1 s tick: a long tool call or a slow model still looks alive.
   if (run.activity) head.push(fg("muted", (run.state === "working" ? SPINNER[Math.floor(Date.now() / 1000) % SPINNER.length] + " " : "") + run.activity));
