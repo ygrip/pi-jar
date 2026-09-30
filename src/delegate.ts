@@ -594,8 +594,15 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       if (run.state === "working") {
         const waiting = waitSettled();
         send({ type: "clear_queue" });
-        if (send({ type: "abort" })) await waiting;
-        else { hardStop(); await closed; return; }
+        if (send({ type: "abort" })) {
+          let settledInTime = false;
+          const grace = new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 3000);
+            timer.unref?.();
+          });
+          await Promise.race([waiting.then(() => { settledInTime = true; }), grace]);
+          if (!settledInTime && !finished) hardStop();
+        } else hardStop();
       }
       if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
       const killer = setTimeout(() => { if (child.exitCode === null) hardStop(); }, 3000);
