@@ -852,6 +852,38 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     return resolved ? [resolved] : [];
   };
 
+  let moderatorContextDirty = true;
+  registry.subscribe(() => { moderatorContextDirty = true; });
+  pi.on("before_agent_start", () => {
+    moderatorContextDirty = true;
+    const retained = registry.records().filter((record) => isRetained(record.run.state));
+    if (!retained.length) return;
+    const fleet = retained.map((record) =>
+      `- ${record.key} · ${record.run.name} · ${record.run.state} · ${record.run.role}: ${cleanText(record.run.task, 140)}`).join("\n");
+    return { message: { customType: "pi-jar.moderator-context", display: false, content: [
+      "[PI-JAR MODERATOR MODE]",
+      "You are the coordinator while retained subagents do delegated work. Decompose and route work, inspect with jar_subagent peek, steer only to correct direction, use ask for terse BTW questions, and use jar_discuss for structured cross-agent Q/A.",
+      "Do not duplicate work already owned by a retained subagent. Stop completed workers to obtain their handoff and reconcile worktree changes into /diff. Synthesize the final answer from their reports and evidence.",
+      "Retained fleet:",
+      fleet
+    ].join("\n") } };
+  });
+  pi.on("context", (event) => {
+    if (!moderatorContextDirty) return;
+    const active = registry.retained() > 0;
+    let latest = -1;
+    let prune = false;
+    for (let index = event.messages.length - 1; index >= 0; index--) {
+      if ((event.messages[index] as { customType?: string }).customType !== "pi-jar.moderator-context") continue;
+      if (!active || latest >= 0) prune = true;
+      else latest = index;
+    }
+    moderatorContextDirty = false;
+    if (!prune) return;
+    return { messages: event.messages.filter((raw, index) =>
+      (raw as { customType?: string }).customType !== "pi-jar.moderator-context" || (active && index === latest)) };
+  });
+
   pi.registerTool({
     name: DELEGATE_TOOL,
     label: "delegate",
