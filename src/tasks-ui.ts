@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { promptChoice, promptText, todoView, type TodoFilter } from "./dialogs.ts";
-import { TodoStore } from "./tasks.ts";
+import { TodoStore, todoProgress } from "./tasks.ts";
 
 const help = "Usage: /jar tasks [list|add TITLE|done ID|open ID|edit ID TITLE|delete ID]";
 
@@ -11,7 +11,15 @@ export async function manageTasks(args: string, ctx: ExtensionContext, store: To
   };
   const list = () => {
     const items = store.all();
-    notify(items.length ? items.map((item) => `${item.done ? "[x]" : "[ ]"} ${item.title} (${item.id})`).join("\n") : "pi-jar to-do: empty (separate from other task managers)");
+    notify(items.length ? items.map((item) => {
+      const progress = todoProgress(items, item.id);
+      return `${item.parentId ? "  " : ""}${item.done ? "[x]" : "[ ]"} ${item.title}${progress.total ? ` (${progress.done}/${progress.total})` : ""} (${item.id})`;
+    }).join("\n") : "pi-jar to-do: empty (separate from other task managers)");
+  };
+  /** Deleting a parent also deletes its subtasks, so say so before confirming. */
+  const deleteLabel = (id: string, title: string) => {
+    const count = todoProgress(store.all(), id).total;
+    return count ? `${title} (and ${count} subtask${count === 1 ? "" : "s"})` : title;
   };
   if (!args && ctx.hasUI && ctx.mode === "tui") {
     const filter: { value: TodoFilter } = { value: "all" };
@@ -29,7 +37,7 @@ export async function manageTasks(args: string, ctx: ExtensionContext, store: To
         if (title) success = store.edit(action.id, title);
       } else if (action.id && action.kind === "delete") {
         const item = store.get(action.id);
-        const choice = item && await promptChoice(ctx, "Delete to-do?", item.title, ["Delete item", "Keep item"], 1);
+        const choice = item && await promptChoice(ctx, "Delete to-do?", deleteLabel(item.id, item.title), ["Delete item", "Keep item"], 1);
         if (choice === 0) success = store.delete(action.id);
       }
       if (success) changed();
@@ -47,8 +55,10 @@ export async function manageTasks(args: string, ctx: ExtensionContext, store: To
     }
     case "done":
     case "open": {
+      // On a parent, done completes and open reopens every subtask.
       const item = id && store.get(id);
-      if (item && item.done !== (verb === "done") && store.toggle(id)) { changed(); notify("Updated pi-jar to-do"); }
+      const already = item && (verb === "done" ? item.done : item.status === "pending");
+      if (item && !already && store.setStatus(id, verb === "done" ? "completed" : "pending")) { changed(); notify("Updated pi-jar to-do"); }
       else notify("To-do not found or already in that state", "error");
       return;
     }
@@ -61,7 +71,7 @@ export async function manageTasks(args: string, ctx: ExtensionContext, store: To
     case "delete": {
       if (!id || !store.get(id)) { notify("To-do not found", "error"); return; }
       if (ctx.hasUI && ctx.mode === "tui") {
-        const choice = await promptChoice(ctx, "Delete pi-jar to-do?", store.get(id)!.title, ["Delete item", "Keep item"], 1);
+        const choice = await promptChoice(ctx, "Delete pi-jar to-do?", deleteLabel(id, store.get(id)!.title), ["Delete item", "Keep item"], 1);
         if (choice !== 0) return;
       }
       // Headless deletion is explicit and requires the full ID; TUI deletion asks for confirmation.

@@ -143,6 +143,8 @@ export class ModelRoleManager {
   private applying = false;
   /** Bumped whenever the user picks a model or effort themselves. */
   private manualEpoch = 0;
+  /** Last `summary()`, valid while the same (replaced-on-write) configs are loaded. */
+  private summaryMemo: { global: RoleConfig; project: RoleConfig; limit: number; text: string } | undefined;
 
   constructor(pi: ExtensionAPI) {
     this.pi = pi;
@@ -188,12 +190,16 @@ export class ModelRoleManager {
     });
   }
 
-  /** Summary for compact surfaces such as the welcome card. */
+  /** Summary for compact surfaces such as the welcome card, which repaints every frame. */
   summary(limit = 3): string {
+    const memo = this.summaryMemo;
+    if (memo?.global === this.global && memo.project === this.project && memo.limit === limit) return memo.text;
     const rows = this.list().filter((row) => row.resolved || row.spec);
-    if (!rows.length) return "all roles follow the current model";
-    return rows.slice(0, limit).map((row) => row.role + "→" + (row.spec?.startsWith("@") ? row.spec.split(":")[0] : row.resolved?.model ?? "?")).join(" · ")
-      + (rows.length > limit ? ` · +${rows.length - limit}` : "");
+    const text = !rows.length ? "all roles follow the current model"
+      : rows.slice(0, limit).map((row) => row.role + "→" + (row.spec?.startsWith("@") ? row.spec.split(":")[0] : row.resolved?.model ?? "?")).join(" · ")
+        + (rows.length > limit ? ` · +${rows.length - limit}` : "");
+    this.summaryMemo = { global: this.global, project: this.project, limit, text };
+    return text;
   }
 
   private status(ctx: ExtensionContext): void {

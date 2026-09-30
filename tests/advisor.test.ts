@@ -36,6 +36,18 @@ test("stuck detector fires on repeated calls and failure streaks, within a per-p
   assert.ok(stuck.result(true, "x"));
 });
 
+test("loop keys for huge inputs stay small but still tell calls apart", () => {
+  const content = "x".repeat(100_000);
+  const key = callKey("write", { path: "a.ts", content });
+  assert.ok(key.length < 1500, "the recent-call window never pins whole file contents");
+  assert.ok(key.startsWith('write {"path":"a.ts","content":"xxx'), "the loop message keeps a readable prefix");
+  assert.equal(callKey("write", { path: "a.ts", content }), key);
+  assert.notEqual(callKey("write", { path: "a.ts", content: content.slice(1) + "y" }), key);
+  const stuck = new StuckDetector();
+  stuck.call(key); stuck.call(key);
+  assert.match(stuck.call(callKey("write", { path: "a.ts", content }))!, /same tool call 3 times: write \{"path":"a\.ts"/);
+});
+
 test("advisor tool, /advisor and the loop gate consult the advisor role", async () => {
   const tools = new Map<string, any>();
   const commands = new Map<string, Function>();

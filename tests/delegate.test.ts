@@ -1,39 +1,39 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter, once } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
-import { CHILD_ENV, DelegateRegistry, delegateArgs, piInvocation, READ_ONLY_TOOLS, registerDelegate } from "../src/delegate.ts";
+import { ChangeTracker } from "../src/changes.ts";
+import { CHILD_BASELINE_ENV, writeChildBaseline } from "../src/child-baselines.ts";
+import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation, READ_ONLY_TOOLS, registerDelegate, type DelegateOptions } from "../src/delegate.ts";
+import { emit, fakeSpawn, say, settle, taskOf, type FakeChild } from "./fake-rpc.ts";
 
-interface FakeChild extends EventEmitter { stdout: EventEmitter; stderr: EventEmitter; exitCode: number | null; killed: string[]; kill(signal: string): void }
-function fakeSpawn(script: (child: FakeChild, args: string[]) => void) {
-  const calls: { command: string; args: string[]; env: NodeJS.ProcessEnv }[] = [];
-  const spawn = (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
-    const child = new EventEmitter() as FakeChild;
-    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.killed = [];
-    child.kill = (signal: string) => { child.killed.push(signal); child.exitCode = 143; queueMicrotask(() => child.emit("close", 143)); };
-    calls.push({ command, args, env: options.env ?? {} });
-    queueMicrotask(() => script(child, args));
-    return child as never;
-  };
-  return { spawn, calls };
-}
-const emit = (child: FakeChild, event: object) => child.stdout.emit("data", JSON.stringify(event) + "\n");
 const roles = (map: Record<string, { provider: string; model: string; thinking?: string }>) => ({ resolve: (role: string) => map[role] }) as never;
 type Result = { content: Array<{ text: string }>; details: { runs: Array<Record<string, unknown>> } };
-interface Tool { execute(id: string, params: object, signal: AbortSignal | undefined, onUpdate: ((update: Result) => void) | undefined, ctx: object): Promise<Result> }
-const register = (registry: DelegateRegistry, spawn: unknown): Tool => {
+interface Tool {
+  execute(id: string, params: object, signal: AbortSignal | undefined, onUpdate: ((update: Result) => void) | undefined, ctx: object): Promise<Result>;
+  renderResult(result: Result, options: { expanded: boolean }, theme: { fg(color: string, text: string): string }): { render(width: number): string[] };
+}
+const register = (registry: DelegateRegistry, spawn: unknown, options: DelegateOptions = {}, map: Parameters<typeof roles>[0] = {}): Tool => {
   let tool: Tool | undefined;
-  registerDelegate({ registerTool(definition: Tool) { tool = definition; } } as never, roles({}), registry, spawn as never);
+  registerDelegate({ registerTool(definition: Tool) { tool = definition; } } as never, roles(map), registry, { ...options, spawnProcess: spawn as never });
   return tool!;
 };
 const quiet = { cwd: "/repo", hasUI: false };
 
-test("subagent args are one-shot JSON, read-only by default, and never recurse", () => {
-  const args = delegateArgs("Find the auth code", "anthropic/claude-haiku", "low", false);
-  assert.deepEqual(args.slice(0, 4), ["--mode", "json", "-p", "--no-session"]);
-  assert.deepEqual(args.slice(4, 10), ["--model", "anthropic/claude-haiku", "--thinking", "low", "--tools", READ_ONLY_TOOLS.join(",")]);
-  assert.match(args.at(-1)!, /read-only[\s\S]*Task: Find the auth code/);
-  assert.ok(!delegateArgs("x", undefined, undefined, true).includes("--tools"), "write mode keeps the default tools");
+test("subagents run in RPC mode with the parent's extensions, read-only tools plus jar_todo, and never recurse", () => {
+  const argv = ["node", "/opt/pi/cli.js", "-ne", "-e", "./extensions", "--extension=/abs/other.ts", "--tui-mode", "fullscreen"];
+  const args = delegateArgs("anthropic/claude-haiku", "low", false, argv);
+  assert.deepEqual(args.slice(0, 3), ["--mode", "rpc", "--no-session"]);
+  assert.deepEqual(args.slice(3, 8), ["-ne", "--extension", join(process.cwd(), "extensions"), "--extension", "/abs/other.ts"], "extension flags are forwarded with absolute paths");
+  assert.deepEqual(args.slice(8), ["--model", "anthropic/claude-haiku", "--thinking", "low", "--tools", READ_ONLY_TOOLS.join(",")]);
+  assert.ok(READ_ONLY_TOOLS.includes("jar_todo"));
+  assert.ok(!delegateArgs(undefined, undefined, true, ["node", "cli"]).includes("--tools"), "write mode keeps the default tools");
+  const prompt = delegatePrompt("Find the auth code", false);
+  assert.match(prompt, /read-only[\s\S]*jar_todo[\s\S]*## Summary[\s\S]*## Details[\s\S]*## Verification[\s\S]*## Open issues[\s\S]*Task: Find the auth code$/);
+  assert.match(delegatePrompt("x", true), /You may edit files/);
   assert.deepEqual(piInvocation(["-p"], ["node", "/definitely/missing.js"], "/usr/bin/node"), { command: "pi", args: ["-p"] });
   assert.deepEqual(piInvocation(["-p"], ["pi"], "/opt/pi/bin/pi"), { command: "/opt/pi/bin/pi", args: ["-p"] });
   process.env[CHILD_ENV] = "1";
@@ -44,84 +44,101 @@ test("subagent args are one-shot JSON, read-only by default, and never recurse",
   } finally { delete process.env[CHILD_ENV]; }
 });
 
-test("jar_delegate runs tasks in parallel on roles, streams progress and publishes teammates", async () => {
-  const { spawn, calls } = fakeSpawn((child, args) => {
-    const task = args.at(-1)!;
-    emit(child, { type: "tool_execution_start", toolName: "grep" });
-    emit(child, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: task.includes("fail") ? "partial" : "Report: " + task.split("Task: ")[1] }], usage: { cost: { total: 0.01 } } } });
-    child.emit("close", task.includes("fail") ? 1 : 0);
+test("jar_delegate runs tasks in parallel on roles and returns a detailed report per subagent", async () => {
+  const { spawn, calls, children } = fakeSpawn((child, prompt) => {
+    const task = taskOf(prompt);
+    emit(child, { type: "tool_execution_start", toolCallId: "a", toolName: "read", args: { path: "src/auth.ts" } });
+    emit(child, { type: "tool_execution_end", toolCallId: "a", toolName: "read", result: { content: [{ type: "text", text: "code" }] }, isError: false });
+    emit(child, { type: "tool_execution_start", toolCallId: "b", toolName: "grep", args: { pattern: "login" } });
+    emit(child, { type: "tool_execution_end", toolCallId: "b", toolName: "grep", result: { content: [{ type: "text", text: "no match" }] }, isError: true });
+    if (task.includes("fail")) { say(child, "partial"); child.emit("close", 1); return; }
+    say(child, "## Summary\nReport: " + task, 0.01);
+    settle(child);
   });
-  let tool: any;
-  registerDelegate({ registerTool(definition: unknown) { tool = definition; } } as never,
-    roles({ task: { provider: "p", model: "small", thinking: "low" }, default: { provider: "p", model: "big" } }), new DelegateRegistry(), spawn as never);
+  let tool: Tool | undefined;
+  registerDelegate({ registerTool(definition: Tool) { tool = definition; } } as never,
+    roles({ task: { provider: "p", model: "small", thinking: "low" }, default: { provider: "p", model: "big" } }), new DelegateRegistry(), { spawnProcess: spawn as never });
   const statuses = new Map<string, string | undefined>();
   const updates: string[] = [];
   const ctx = { cwd: "/repo", hasUI: true, model: { provider: "p", id: "current" }, ui: { setStatus(key: string, value?: string) { statuses.set(key, value); } } };
-  const result = await tool.execute("d", { tasks: [{ task: "scan api", name: "api" }, { task: "please fail", role: "review" }] }, undefined,
-    (update: { content: { text: string }[] }) => updates.push(update.content[0]!.text), ctx);
+  const result = await tool!.execute("d", { tasks: [{ task: "scan api", name: "api" }, { task: "please fail", role: "review" }] }, undefined,
+    (update) => updates.push(update.content[0]!.text), ctx);
   assert.equal(calls.length, 2);
   assert.ok(calls.every((call) => call.env[CHILD_ENV] === "1"));
   assert.ok(calls[0]!.args.includes("p/small") && calls[0]!.args.includes("low"), "task role resolves");
   assert.ok(calls[1]!.args.includes("p/big"), "unknown role falls back to default");
-  const text = result.content[0].text;
-  assert.match(text, /\[1\] api \(task · p\/small\) — done\nReport: scan api/);
-  assert.match(text, /\[2\] agent 2 \(review · p\/big\) — failed: exited 1\npartial/);
+  assert.equal(children[0]!.stdin.commands[0]!.type, "prompt");
+  assert.match(String(children[0]!.stdin.commands[0]!.message), /Task: scan api$/);
+  assert.equal(children[0]!.stdin.writableEnded, true, "stdin is closed once the child settles");
+  const text = result.content[0]!.text;
+  assert.match(text, /## \[1\] api \(task · p\/small\) — done\n- took \d+s · 1 turn · 2 tool calls \(read×1, grep×1\) · \$0\.010\n- files read: src\/auth\.ts\n- failed tool calls: grep login\n\n## Summary\nReport: scan api/);
+  assert.match(text, /## \[2\] agent 2 \(review · p\/big\) — failed: exited 1 before finishing[\s\S]*\npartial/);
   assert.ok(updates.some((update) => /api: working/.test(update)));
   assert.ok([...statuses.keys()].every((key) => key.startsWith("pi-jar.role.delegate-")));
   assert.ok([...statuses.values()].every((value) => value === undefined), "teammates are cleared when finished");
-  const rendered = tool.renderResult(result, { expanded: false }, { fg: (_c: string, t: string) => t }).render(100).join("\n");
-  assert.match(rendered, /✔ api · task · 1 tools · \$0\.010/);
+  const rendered = tool!.renderResult(result, { expanded: false }, { fg: (_c, t) => t }).render(120).join("\n");
+  assert.match(rendered, /✔ api · task · 2 tools · \$0\.010/);
   assert.match(rendered, /✖ agent 2/);
 });
 
-test("aborting stops running subagents", async () => {
-  let running: FakeChild | undefined;
-  const { spawn } = fakeSpawn((child) => { running = child; });
-  let tool: any;
-  registerDelegate({ registerTool(definition: unknown) { tool = definition; } } as never, roles({}), new DelegateRegistry(), spawn as never);
+test("a rejected prompt and an aborted call fail with the reason", async () => {
+  const rejecting = fakeSpawn(() => {});
+  const failing = register(new DelegateRegistry(), (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+    const child = rejecting.spawn(command, args, options) as unknown as FakeChild;
+    child.stdin.write = (line: string) => { const request = JSON.parse(line); if (request.type === "prompt") queueMicrotask(() => emit(child, { type: "response", id: request.id, command: "prompt", success: false, error: "No model" })); return true; };
+    return child as never;
+  });
+  assert.match((await failing.execute("d", { tasks: [{ task: "x" }] }, undefined, undefined, quiet)).content[0]!.text, /failed: No model/);
+  const hanging = fakeSpawn(() => {});
   const controller = new AbortController();
-  const pending = tool.execute("d", { tasks: [{ task: "long" }] }, controller.signal, undefined, { cwd: "/repo", hasUI: false });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  const pending = register(new DelegateRegistry(), hanging.spawn).execute("d", { tasks: [{ task: "long" }] }, controller.signal, undefined, quiet);
+  await tick();
   controller.abort();
-  const result = await pending;
-  assert.deepEqual(running?.killed[0], "SIGTERM");
-  assert.match(result.content[0].text, /failed: aborted/);
+  assert.match((await pending).content[0]!.text, /failed: aborted/);
+  assert.deepEqual(hanging.children[0]!.killed, ["SIGTERM"]);
 });
 
-test("the registry shows each run live with a bounded transcript that never reaches tool details", async () => {
+test("the transcript keeps structured, bounded tool calls and text that never reach tool details", async () => {
   const gate = new EventEmitter();
   const { spawn } = fakeSpawn(async (child) => {
-    emit(child, { type: "tool_execution_start", toolName: "bash", args: { command: "npm test", path: "ignored" } });
-    emit(child, { type: "tool_execution_start", toolName: "read", args: { path: "src/a.ts" } });
-    emit(child, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Found it.\n\n\x1b[31mred\x1b[0m " + "y".repeat(400) }] } });
+    emit(child, { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "npm test", path: "ignored" } });
+    emit(child, { type: "tool_execution_update", toolCallId: "t1", toolName: "bash", partialResult: { content: [{ type: "text", text: "running 3 tests" }] } });
+    emit(child, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Found " } });
+    emit(child, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "it" } });
     await once(gate, "open");
-    for (let index = 0; index < 250; index++) emit(child, { type: "tool_execution_start", toolName: "grep", args: { pattern: `p${index}` } });
-    child.emit("close", 0);
+    emit(child, { type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { content: [{ type: "text", text: "\x1b[32mok\x1b[0m 3 passed" }] }, isError: false });
+    say(child, "Found it.\n\n\n\x1b[31mred\x1b[0m " + "y".repeat(5000));
+    for (let index = 0; index < 250; index++) emit(child, { type: "tool_execution_start", toolCallId: `g${index}`, toolName: "grep", args: { pattern: `p${index}` } });
+    settle(child);
   });
   const registry = new DelegateRegistry();
   let notified = 0;
   const unsubscribe = registry.subscribe(() => notified++);
   const updates: Result[] = [];
   const pending = register(registry, spawn).execute("d", { tasks: [{ task: "look", name: "scout" }] }, undefined, (update) => updates.push(update), quiet);
-  await tick();
-  const records = registry.records();
-  assert.deepEqual(records.map((record) => record.key), ["delegate-1-1"]);
-  const { run } = records[0]!;
+  await tick(); await tick();
+  const { run } = registry.records()[0]!;
   assert.equal(run.state, "working");
-  assert.equal(registry.running(), 1);
-  assert.equal(typeof run.startedAt, "number");
-  assert.equal(run.endedAt, undefined);
-  assert.deepEqual(run.log.slice(0, 3), ["▸ bash npm test", "▸ read src/a.ts", "Found it."], "the command wins over other args; blank lines are skipped");
-  assert.equal(run.log[3], "red " + "y".repeat(236), "escapes are stripped and lines clipped to 240 chars");
-  assert.ok(notified >= 4, "listeners hear about the add and every event");
+  const [call] = run.transcript;
+  assert.ok(call?.kind === "tool");
+  assert.deepEqual([call.name, call.hint, call.status, call.output], ["bash", "npm test", "running", "running 3 tests"], "the command wins over other args; partial output streams in");
+  assert.match(call.args, /"command": "npm test"/);
+  assert.equal(run.live, "Found it", "streaming text is visible before the message ends");
+  assert.equal(run.activity, "writing");
+  assert.ok(notified >= 4, "listeners hear about every event");
   gate.emit("open");
   const result = await pending;
   assert.equal(run.state, "done");
-  assert.ok(run.endedAt! >= run.startedAt!);
-  assert.equal(run.log.length, 200);
-  assert.equal(run.log.at(-1), "▸ grep p249");
-  assert.ok(updates.length > 0);
-  assert.ok([result.details, ...updates.map((update) => update.details)].every((details) => details.runs.every((run) => !("log" in run))));
+  assert.equal(run.live, "");
+  assert.equal(call.status, "done");
+  assert.equal(call.output, "ok 3 passed", "escapes are stripped from tool output");
+  assert.ok(call.endedAt! >= call.startedAt);
+  assert.equal(run.transcript.length, 200, "the transcript keeps the newest 200 entries");
+  const last = run.transcript.at(-1)!;
+  assert.ok(last.kind === "tool" && last.hint === "p249" && last.status === "error", "calls still running when the child ends are marked failed");
+  const text = registry.records()[0]!.run.output;
+  assert.ok(text.startsWith("Found it."));
+  assert.ok([result.details, ...updates.map((update) => update.details)].every((details) => details.runs.every((item) => !("transcript" in item) && !("live" in item))));
   unsubscribe();
   const before = notified;
   registry.clear();
@@ -129,9 +146,82 @@ test("the registry shows each run live with a bounded transcript that never reac
   assert.deepEqual(registry.records(), []);
 });
 
+test("a working subagent can be steered, its dialogs never block, and its checklist is mirrored into the report", async () => {
+  const gate = new EventEmitter();
+  const { spawn, children } = fakeSpawn(async (child) => {
+    emit(child, { type: "extension_ui_request", id: "ask-1", method: "select", title: "Pick", options: ["a", "b"] });
+    emit(child, { type: "extension_ui_request", id: "note-1", method: "notify", message: "hi" });
+    emit(child, { type: "tool_execution_start", toolCallId: "todo", toolName: "jar_todo", args: {} });
+    emit(child, { type: "tool_execution_end", toolCallId: "todo", toolName: "jar_todo", isError: false, result: { content: [], details: { items: [
+      { id: "p", title: "Audit", status: "in_progress", done: false },
+      { id: "c1", title: "Read routes", status: "completed", done: true, parentId: "p" },
+      { id: "c2", title: "Check \x1b[31mauth", status: "in_progress", done: false, parentId: "p", activeForm: "Checking auth" },
+      { id: "bad", title: 3, status: "done" }
+    ] } } });
+    await once(gate, "open");
+    say(child, "done");
+    settle(child);
+  });
+  const registry = new DelegateRegistry();
+  const pending = register(registry, spawn).execute("d", { tasks: [{ task: "audit", name: "auditor" }] }, undefined, undefined, quiet);
+  await tick(); await tick();
+  const child = children[0]!;
+  assert.deepEqual(child.stdin.commands.filter((command) => command.type === "extension_ui_response"), [{ type: "extension_ui_response", id: "ask-1", cancelled: true }],
+    "dialogs are answered as cancelled; notifications need no answer");
+  const [record] = registry.records();
+  assert.deepEqual(record!.run.todos.map((todo) => [todo.id, todo.title, todo.status, todo.parentId ?? ""]),
+    [["p", "Audit", "in_progress", ""], ["c1", "Read routes", "completed", "p"], ["c2", "Check auth", "in_progress", "p"]], "invalid items are dropped and titles cleaned");
+  assert.equal(registry.steer(record!.key, "  focus on\nthe login flow  "), true);
+  assert.deepEqual(child.stdin.commands.at(-1), { type: "steer", message: "focus on\nthe login flow" });
+  const steer = record!.run.transcript.at(-1)!;
+  assert.ok(steer.kind === "steer" && steer.text === "focus on\nthe login flow");
+  assert.equal(registry.steer(record!.key, "   "), false, "empty messages are not sent");
+  assert.equal(registry.steer("delegate-9-9", "x"), false);
+  gate.emit("open");
+  const text = (await pending).content[0]!.text;
+  assert.equal(registry.steer(record!.key, "too late"), false, "finished runs cannot be steered");
+  assert.match(text, /steered 1×/);
+  assert.match(text, /- tasks: 1\/2 done\n  \[~\] Audit\n    \[x\] Read routes\n    \[~\] Check auth/);
+});
+
+test("files a subagent edits join the parent's /diff once each, with the subagent's baseline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-jar-delegate-"));
+  try {
+    writeFileSync(join(root, "a.ts"), "before\n");
+    const tracker = new ChangeTracker(() => root);
+    let changed = 0;
+    let baselineDir = "";
+    const { spawn, calls } = fakeSpawn((child) => {
+      baselineDir = calls[0]!.env[CHILD_BASELINE_ENV] ?? "";
+      // What pi-jar's own tool_call hook does inside the child before each edit runs.
+      writeChildBaseline(baselineDir, join(root, "a.ts"), readFileSync(join(root, "a.ts"), "utf8"));
+      writeFileSync(join(root, "a.ts"), "after\n");
+      for (const id of ["e1", "e2"]) {
+        emit(child, { type: "tool_execution_start", toolCallId: id, toolName: "edit", args: { path: "a.ts", oldText: "before", newText: "after" } });
+        emit(child, { type: "tool_execution_end", toolCallId: id, toolName: "edit", result: { content: [] }, isError: false });
+      }
+      writeChildBaseline(baselineDir, join(root, "new.ts"), null);
+      writeFileSync(join(root, "new.ts"), "created\n");
+      emit(child, { type: "tool_execution_start", toolCallId: "w", toolName: "write", args: { path: join(root, "new.ts"), content: "created\n" } });
+      emit(child, { type: "tool_execution_end", toolCallId: "w", toolName: "write", result: { content: [] }, isError: false });
+      settle(child);
+    });
+    const tool = register(new DelegateRegistry(), spawn, { changes: () => tracker, changed: () => { changed++; } });
+    const result = await tool.execute("d", { tasks: [{ task: "edit", name: "editor" }], write: true }, undefined, undefined, { cwd: root, hasUI: false });
+    assert.ok(baselineDir, "editing subagents get a baseline directory");
+    assert.equal(existsSync(baselineDir), false, "the baseline directory is removed afterwards");
+    assert.equal(tracker.count(), 2, "two files, counted once each");
+    assert.equal(changed, 3);
+    assert.deepEqual(tracker.changes().map((change) => [change.rel, change.status, change.before]), [["a.ts", "modified", "before\n"], ["new.ts", "added", ""]]);
+    assert.match(result.content[0]!.text, /- files edited: a\.ts, .*new\.ts/);
+    const readOnly = fakeSpawn((child) => settle(child));
+    await register(new DelegateRegistry(), readOnly.spawn, { changes: () => tracker }).execute("d", { tasks: [{ task: "look" }] }, undefined, undefined, { cwd: root, hasUI: false });
+    assert.equal(readOnly.calls[0]!.env[CHILD_BASELINE_ENV], undefined, "read-only subagents need no baselines");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("stopping one subagent from the registry leaves the rest of its batch running", async () => {
-  const children: FakeChild[] = [];
-  const { spawn } = fakeSpawn((child) => { children.push(child); });
+  const { spawn, children } = fakeSpawn(() => {});
   const registry = new DelegateRegistry();
   const pending = register(registry, spawn).execute("d", { tasks: [{ task: "one", name: "first" }, { task: "two", name: "second" }] }, undefined, undefined, quiet);
   await tick();
@@ -144,16 +234,15 @@ test("stopping one subagent from the registry leaves the rest of its batch runni
   assert.equal(first!.run.error, "stopped");
   assert.equal(registry.running(), 1);
   assert.deepEqual(registry.records().map((record) => record.key), [second!.key, first!.key], "live runs first, finished after");
-  emit(children[1]!, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "two done" }] } });
-  children[1]!.emit("close", 0);
+  say(children[1]!, "two done");
+  settle(children[1]!);
   const text = (await pending).content[0]!.text;
   assert.match(text, /\[1\] first \(task\) — failed: stopped/);
-  assert.match(text, /\[2\] second \(task\) — done\ntwo done/);
+  assert.match(text, /\[2\] second \(task\) — done\n[\s\S]*\ntwo done$/);
 });
 
 test("clearing a session stops its live subagents and removes their details", async () => {
-  const children: FakeChild[] = [];
-  const { spawn } = fakeSpawn((child) => { children.push(child); });
+  const { spawn, children } = fakeSpawn(() => {});
   const registry = new DelegateRegistry();
   const pending = register(registry, spawn).execute("d", { tasks: [{ task: "one" }, { task: "two" }] }, undefined, undefined, quiet);
   await tick();
@@ -165,7 +254,7 @@ test("clearing a session stops its live subagents and removes their details", as
 });
 
 test("the registry keeps only the newest eight finished subagents", async () => {
-  const { spawn } = fakeSpawn((child) => child.emit("close", 0));
+  const { spawn } = fakeSpawn((child) => settle(child));
   const registry = new DelegateRegistry();
   const tool = register(registry, spawn);
   for (let batch = 0; batch < 3; batch++) await tool.execute("d", { tasks: [1, 2, 3, 4].map((n) => ({ task: `t${n}` })) }, undefined, undefined, quiet);

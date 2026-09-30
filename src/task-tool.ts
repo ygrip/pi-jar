@@ -1,53 +1,72 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import type { Todo } from "./tasks.ts";
-import { TODO_STATUSES, TodoStore, todoMark } from "./tasks.ts";
+import type { Todo, TodoInput, TodoStatus } from "./tasks.ts";
+import { TODO_STATUSES, TodoStore, todoMark, todoProgress, todoTotals } from "./tasks.ts";
 
 const ACTIONS = ["write", "list", "add", "start", "done", "open", "edit", "delete"] as const;
-const Action = Type.Unsafe<(typeof ACTIONS)[number]>({ type: "string", enum: ACTIONS as any });
-const Status = Type.Unsafe<(typeof TODO_STATUSES)[number]>({ type: "string", enum: TODO_STATUSES as any });
+const Action = Type.Unsafe<(typeof ACTIONS)[number]>({ type: "string", enum: [...ACTIONS] });
+const Status = Type.Unsafe<(typeof TODO_STATUSES)[number]>({ type: "string", enum: [...TODO_STATUSES] });
+const Content = Type.String({ description: "Imperative task title, e.g. \"Run the tests\"." });
+const ActiveForm = Type.Optional(Type.String({ description: "Present-continuous form shown while it runs, e.g. \"Running the tests\"." }));
 
 const Parameters = Type.Object({
   todos: Type.Optional(Type.Array(Type.Object({
-    content: Type.String({ description: "Imperative task title, e.g. \"Run the tests\"." }),
+    content: Content,
     status: Status,
-    activeForm: Type.Optional(Type.String({ description: "Present-continuous form shown while it runs, e.g. \"Running the tests\"." }))
+    activeForm: ActiveForm,
+    subtasks: Type.Optional(Type.Array(Type.Object({ content: Content, status: Status, activeForm: ActiveForm }), {
+      description: "Optional steps of this task (one level deep). The task's status then follows its subtasks."
+    }))
   }), { description: "The complete, updated task list. Replaces the current list." })),
   action: Type.Optional(Action),
-  id: Type.Optional(Type.String({ description: "Task id for start/done/open/edit/delete." })),
+  id: Type.Optional(Type.String({ description: "Task id for start/done/open/edit/delete. On a parent, start runs its first open subtask; done/open apply to all its subtasks." })),
   title: Type.Optional(Type.String({ description: "Concise actionable task title for add/edit." })),
+  parent: Type.Optional(Type.String({ description: "For add: id of a top-level task to add the new task under as a subtask." })),
   details: Type.Optional(Type.String({ description: "Optional short task context for a new task." }))
 });
 
 interface TaskToolDetails {
   action: string;
-  /** Bounded preview only; the canonical list lives in TodoStore. */
+  /** Bounded preview (the full list in a subagent); the canonical list lives in TodoStore. */
   items: Todo[];
+  /** Leaf tasks: subtasks plus top-level tasks without subtasks. */
   total: number;
   done: number;
+  /** Every item, parents included. */
+  count?: number;
   current?: string;
   changed?: string;
   truncated?: boolean;
+  /** Subtask counts of previewed parents when the preview cuts the list. */
+  progress?: { id: string; done: number; total: number }[];
 }
 
+type TodoParam = { content: string; status: TodoStatus; activeForm?: string; subtasks?: readonly TodoParam[] };
+/** Deeper nesting is passed through so the store rejects it with a clear message. */
+const toInput = (item: TodoParam): TodoInput => ({
+  title: item.content, status: item.status,
+  ...(item.activeForm ? { activeForm: item.activeForm } : {}),
+  ...(item.subtasks ? { subtasks: item.subtasks.map(toInput) } : {})
+});
+
 const stats = (items: readonly Todo[]) => {
-  let done = 0;
-  let current: Todo | undefined;
-  for (const item of items) {
-    if (item.done) done++;
-    if (!current && item.status === "in_progress") current = item;
-  }
-  return { total: items.length, done, current };
+  const parents = new Set<string>();
+  for (const item of items) if (item.parentId) parents.add(item.parentId);
+  const current = items.find((item) => item.status === "in_progress" && !parents.has(item.id));
+  const parent = current?.parentId ? items.find((item) => item.id === current.parentId) : undefined;
+  return { ...todoTotals(items), current: current && (parent ? parent.title + " › " : "") + current.title };
 };
 const summary = (items: readonly Todo[]) => {
   const value = stats(items);
-  return `${value.done}/${value.total} done` + (value.current ? ` · now: ${value.current.title}` : "");
+  return `${value.done}/${value.total} done` + (value.current ? ` · now: ${value.current}` : "");
 };
 
-const lines = (items: readonly Todo[]) => items.length
-  ? items.map((item) => `${todoMark(item)} [${item.status}] ${item.title} (${item.id})`).join("\n")
-  : "No tracked tasks.";
+const line = (items: readonly Todo[], item: Todo) => {
+  const progress = todoProgress(items, item.id);
+  return `${item.parentId ? "  " : ""}${todoMark(item)} [${item.status}] ${item.title}${progress.total ? ` (${progress.done}/${progress.total} done)` : ""} (${item.id})`;
+};
+const lines = (items: readonly Todo[]) => items.length ? items.map((item) => line(items, item)).join("\n") : "No tracked tasks.";
 
 const REMINDER = "Keep using jar_todo to track progress: mark the next task in_progress before starting it and completed as soon as it is verified.";
 
@@ -60,12 +79,13 @@ export function registerTaskTool(
   pi.registerTool({
     name: "jar_todo",
     label: "tasks",
-    description: "Maintain pi-jar's session task list, shown live to the user. Send `todos` with the complete updated list (each with content, status pending|in_progress|completed, and activeForm). Single-task actions (start, done, open, add, edit, delete, list) are also available.",
+    description: "Maintain pi-jar's session task list, shown live to the user. Send `todos` with the complete updated list (each with content, status pending|in_progress|completed, activeForm, and optional one-level `subtasks` of the same shape). Single-task actions (start, done, open, add, edit, delete, list) are also available; add with `parent` creates a subtask.",
     promptSnippet: "Track multi-step work with jar_todo: write the full list, keep exactly one task in_progress, complete tasks as they finish.",
     promptGuidelines: [
       "Use jar_todo proactively, without waiting for the user, for any task with three or more distinct steps, when the user gives several tasks, or right after receiving new instructions. Skip it for single trivial requests and pure questions.",
       "Prefer jar_todo with `todos` (the full updated list). Each item has `content` (imperative, e.g. \"Run tests\"), `status`, and `activeForm` (present continuous, e.g. \"Running tests\"), which the user sees while it runs.",
-      "Keep exactly one task in_progress at a time. Mark a task in_progress before you start it and completed immediately after it is verified; do not batch completions.",
+      "Break a large task into `subtasks` (same shape, one level deep). A parent's status follows its subtasks: it is completed when all of them are. Progress counts leaf tasks (subtasks and tasks without subtasks).",
+      "Keep exactly one leaf task in_progress at a time. Mark a task in_progress before you start it and completed immediately after it is verified; do not batch completions.",
       "Only mark a task completed when it is fully done. If tests fail, work is partial or you are blocked, keep it in_progress and add a task for what must be resolved. Remove tasks that are no longer relevant."
     ],
     parameters: Parameters,
@@ -82,20 +102,28 @@ export function registerTaskTool(
           break;
         case "write":
           if (!params.todos) { error = "write needs `todos`: the complete updated list."; break; }
-          error = current.write(params.todos.map((item) => ({ title: item.content, status: item.status, ...(item.activeForm ? { activeForm: item.activeForm } : {}) })));
+          error = current.write(params.todos.map(toInput));
           break;
         case "add": {
-          const item = params.title?.trim() ? current.add(params.title, params.details) : undefined;
-          if (!item) error = "add needs a short title.";
+          const parent = params.parent?.trim() || undefined;
+          const title = params.title ?? "";
+          error = current.addError(title, parent);
+          const item = error ? undefined : current.add(title, params.details, parent);
+          if (!error && !item) error = "Could not save the task.";
           changedId = item?.id;
           break;
         }
         case "start":
         case "done":
-        case "open":
-          if (!params.id || !current.setStatus(params.id, action === "start" ? "in_progress" : action === "done" ? "completed" : "pending")) error = `${action} needs a valid id from jar_todo list.`;
-          else changedId = params.id;
+        case "open": {
+          const item = params.id ? current.get(params.id) : undefined;
+          const progress = item ? todoProgress(current.all(), item.id) : { done: 0, total: 0 };
+          if (!item) error = `${action} needs a valid id from jar_todo list.`;
+          else if (action === "start" && progress.total && progress.done === progress.total) error = `every subtask of ${item.id} is completed; open it or add a subtask first.`;
+          else if (!current.setStatus(item.id, action === "start" ? "in_progress" : action === "done" ? "completed" : "pending")) error = "Could not save the task.";
+          else changedId = item.id;
           break;
+        }
         case "edit":
           if (!params.id || !params.title?.trim() || !current.edit(params.id, params.title)) error = "edit needs a valid id and a title.";
           else changedId = params.id;
@@ -108,19 +136,29 @@ export function registerTaskTool(
       if (action !== "list" && !error) changed(ctx);
       const items = current.all();
       const state = stats(items);
+      // The changed task in context: its whole parent group, subtasks indented.
       const changedItem = changedId ? items.find((item) => item.id === changedId) : undefined;
+      const root = changedItem?.parentId ?? changedItem?.id;
+      const group = root ? items.filter((item) => item.id === root || item.parentId === root) : [];
       const message = error
         ? `Could not ${action} tasks: ${error} (${summary(items)}).`
         : action === "list"
           ? `Tasks (${summary(items)}):\n${lines(items)}`
-          : `Task list updated (${summary(items)}).${changedItem ? `\n${todoMark(changedItem)} [${changedItem.status}] ${changedItem.title} (${changedItem.id})` : ""}\n${REMINDER}`;
-      const preview = items.slice(0, 8);
+          : `Task list updated (${summary(items)}).${group.length ? "\n" + group.map((item) => line(items, item)).join("\n") : ""}\n${REMINDER}`;
+      // A subagent's parent mirrors the checklist from these details, so children send it whole.
+      const preview = process.env.PI_JAR_CHILD ? items : items.slice(0, 8);
+      const truncated = preview.length < items.length;
+      const progress = truncated ? preview.flatMap((item) => {
+        const value = todoProgress(items, item.id);
+        return value.total ? [{ id: item.id, ...value }] : [];
+      }) : [];
       return {
         content: [{ type: "text", text: message }],
         details: {
-          action, items: preview, total: state.total, done: state.done,
-          ...(state.current ? { current: state.current.title } : {}),
-          ...(preview.length < items.length ? { truncated: true } : {}),
+          action, items: preview, total: state.total, done: state.done, count: items.length,
+          ...(state.current ? { current: state.current } : {}),
+          ...(truncated ? { truncated: true } : {}),
+          ...(progress.length ? { progress } : {}),
           ...(changedId ? { changed: changedId } : {})
         } satisfies TaskToolDetails
       };
@@ -138,22 +176,29 @@ export function registerTaskTool(
       if (isPartial) return new Text(theme.fg("warning", "Updating tasks…"), 0, 0);
       const details = result.details as TaskToolDetails | undefined;
       const items = details?.items ?? [];
-      const total = details?.total ?? items.length;
-      const done = details?.done ?? items.filter((item) => item.done).length;
-      if (!total) return new Text(theme.fg("dim", "No tracked tasks."), 0, 0);
+      // Older results predate `count`, when `total` counted every item.
+      const count = details?.count ?? details?.total ?? items.length;
+      const totals = details?.total === undefined ? todoTotals(items) : { done: details.done, total: details.total };
+      if (!count) return new Text(theme.fg("dim", "No tracked tasks."), 0, 0);
+      const known = new Map((details?.progress ?? []).map((value) => [value.id, value]));
       const shown = expanded ? items : items.slice(0, 8);
-      let text = theme.fg("dim", `${done}/${total} done${details?.current ? " · now: " + details.current : ""}`);
-      for (const item of shown) text += "\n" + todoRow(item, (color, value) => theme.fg(color, value), (value) => theme.bold(value));
-      if (details?.truncated || shown.length < total) text += "\n" + theme.fg("dim", `  … +${Math.max(0, total - shown.length)} more · /jar tasks`);
+      let text = theme.fg("dim", `${totals.done}/${totals.total} done${details?.current ? " · now: " + details.current : ""}`);
+      for (const item of shown) text += "\n" + todoRow(item, (color, value) => theme.fg(color, value), (value) => theme.bold(value), known.get(item.id) ?? todoProgress(items, item.id));
+      if (details?.truncated || shown.length < count) text += "\n" + theme.fg("dim", `  … +${Math.max(0, count - shown.length)} more · /jar tasks`);
       return new Text(text, 0, 0);
     }
   });
 }
 
 type TodoColor = "accent" | "muted" | "dim" | "success";
-/** One checklist row: completed rows are struck through, the running one is bold. */
-export function todoRow(item: Todo, fg: (color: TodoColor, text: string) => string, bold: (text: string) => string = (text) => text): string {
-  if (item.status === "completed") return fg("success", "  ✔ ") + fg("dim", "\x1b[9m" + item.title + "\x1b[29m");
-  if (item.status === "in_progress") return fg("accent", "  ◼ ") + fg("accent", bold(item.title));
-  return fg("muted", "  ☐ " + item.title);
+/**
+ * One checklist row: completed rows are struck through, the running one is bold. Subtasks are
+ * indented; pass a parent's subtask `progress` to show its `(done/total)`.
+ */
+export function todoRow(item: Todo, fg: (color: TodoColor, text: string) => string, bold: (text: string) => string = (text) => text, progress?: { done: number; total: number }): string {
+  const indent = item.parentId ? "    " : "  ";
+  const suffix = progress?.total ? fg("dim", ` (${progress.done}/${progress.total})`) : "";
+  if (item.status === "completed") return fg("success", indent + "✔ ") + fg("dim", "\x1b[9m" + item.title + "\x1b[29m") + suffix;
+  if (item.status === "in_progress") return fg("accent", indent + "◼ ") + fg("accent", bold(item.title)) + suffix;
+  return fg("muted", indent + "☐ " + item.title) + suffix;
 }

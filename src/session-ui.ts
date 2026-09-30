@@ -1,7 +1,7 @@
 import type { ExtensionContext, SessionInfo } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { sessionDisplayName } from "./composer.ts";
-import { withIcon } from "./icons.ts";
+import { iconSet, withIcon } from "./icons.ts";
 import { contentRows, sidebarWidth, splitFrame } from "./split-view.ts";
 import { cleanText } from "./status.ts";
 
@@ -68,8 +68,13 @@ export async function pickSession(ctx: ExtensionContext, sessions: readonly Sess
       const settle = (value: SessionDetails) => { if (closed) return; cache.set(session.path, value); tui.requestRender(); };
       Promise.resolve().then(() => details(session)).then((value) => settle(value ?? {}), () => settle({}));
     };
+    // Wrapping a 4 KiB first prompt is the costliest part of a frame; redo it only when its inputs change.
+    let described: { session: SessionInfo; inputs: string; loaded: SessionDetails | null | undefined; lines: string[] } | undefined;
     const describe = (session: SessionInfo, bodyWidth: number, height: number): string[] => {
       const date = session.modified;
+      const inputs = `${bodyWidth}\0${height}\0${age(date)}\0${iconSet()}`;
+      const loaded = details ? cache.get(session.path) : undefined;
+      if (described?.session === session && described.inputs === inputs && described.loaded === loaded) return described.lines;
       const when = Number.isNaN(date.getTime()) ? "unknown"
         : `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}` + (age(date) ? ` · ${age(date)} ago` : "");
       const lines = [
@@ -80,7 +85,6 @@ export async function pickSession(ctx: ExtensionContext, sessions: readonly Sess
       ];
       if (session.cwd) lines.push(fg("muted", withIcon("folder", cleanText(session.cwd, 400))));
       if (details) {
-        const loaded = cache.get(session.path);
         if (!loaded) lines.push(fg("dim", "Loading details…"));
         else {
           for (const [key, text] of [["goal", loaded.goal], ["plan", loaded.plan]] as const) {
@@ -91,10 +95,11 @@ export async function pickSession(ctx: ExtensionContext, sessions: readonly Sess
       lines.push("", fg("dim", "First prompt"));
       const prompt = cleanText(session.firstMessage, 4096);
       lines.push(...(prompt ? wrapTextWithAnsi(prompt, Math.max(1, bodyWidth)).map((line) => fg("muted", line)) : [fg("dim", "No first prompt")]));
-      return lines.slice(0, height).map((line) => truncateToWidth(line, Math.max(0, bodyWidth)));
+      described = { session, inputs, loaded, lines: lines.slice(0, height).map((line) => truncateToWidth(line, Math.max(0, bodyWidth))) };
+      return described.lines;
     };
     return {
-      invalidate() {},
+      invalidate() { described = undefined; },
       handleInput(data: string) {
         if (matchesKey(data, Key.escape)) return finish(undefined);
         if (matchesKey(data, Key.enter)) return finish(rows[selected]?.path);

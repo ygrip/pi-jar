@@ -104,7 +104,8 @@ export class ChangeTracker {
   private readonly cwd: () => string;
   constructor(cwd: () => string) { this.cwd = cwd; }
 
-  private absolute(path: string): string { return isAbsolute(path) ? resolve(path) : resolve(this.cwd(), path); }
+  /** Resolve like every other tracker method; baselines are keyed by this absolute path. */
+  absolute(path: string): string { return isAbsolute(path) ? resolve(path) : resolve(this.cwd(), path); }
   private bytes(content: string | null): number { return content === null ? 0 : Buffer.byteLength(content, "utf8"); }
   private drop(target: string): void {
     if (this.baselines.has(target)) this.baselineBytes = Math.max(0, this.baselineBytes - this.bytes(this.baselines.get(target)!));
@@ -112,20 +113,43 @@ export class ChangeTracker {
     this.dirty.delete(target);
   }
 
-  /** Record the pre-change content once; returns false when the file cannot be tracked. */
-  capture(path: string): boolean {
-    const target = this.absolute(path);
-    if (this.baselines.has(target)) return true;
-    // Only project files: plan files and scratch space elsewhere are not part of the review.
+  /**
+   * Store a baseline when the file is inside the project (plan files and scratch space elsewhere are
+   * not reviewed) and within the file/byte caps. `content` is lazy so outside files are never read.
+   */
+  private admit(target: string, content: () => string | null | undefined): boolean {
     const rel = relative(this.cwd(), target);
     if (!rel || rel.startsWith("..") || isAbsolute(rel)) return false;
     if (this.baselines.size >= MAX_TRACKED_FILES) return false;
-    const content = readText(target);
-    if (content === undefined) return false;
-    const bytes = this.bytes(content);
-    if (this.baselineBytes + bytes > MAX_TRACKED_TOTAL_BYTES) return false;
-    this.baselines.set(target, content);
+    const before = content();
+    if (before === undefined) return false;
+    const bytes = this.bytes(before);
+    if (bytes > MAX_TRACKED_BYTES || this.baselineBytes + bytes > MAX_TRACKED_TOTAL_BYTES) return false;
+    this.baselines.set(target, before);
     this.baselineBytes += bytes;
+    return true;
+  }
+
+  /** Record the pre-change content once; returns false when the file cannot be tracked. */
+  capture(path: string): boolean {
+    const target = this.absolute(path);
+    return this.baselines.has(target) || this.admit(target, () => readText(target));
+  }
+
+  /** Captured pre-change content (`null` = file did not exist), or `undefined` when untracked. */
+  baseline(path: string): string | null | undefined {
+    const target = this.absolute(path);
+    return this.baselines.has(target) ? this.baselines.get(target)! : undefined;
+  }
+
+  /**
+   * Take over a baseline captured elsewhere (a subagent's first-edit content) and mark the file
+   * dirty. An existing baseline is older and wins, so each absolute path counts once.
+   */
+  adopt(path: string, baseline: string | null): boolean {
+    const target = this.absolute(path);
+    if (!this.baselines.has(target) && !this.admit(target, () => baseline)) return false;
+    this.dirty.add(target);
     return true;
   }
 

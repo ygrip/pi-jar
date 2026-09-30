@@ -3,7 +3,7 @@ import { sep } from "node:path";
 import { sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { DEFAULT_FOOTER_SETTINGS, type FooterSettings } from "./footer-settings.ts";
 import { roleFrame } from "./animations.ts";
-import { icon, type IconKey, withIcon } from "./icons.ts";
+import { icon, iconSet, type IconKey, withIcon } from "./icons.ts";
 import type { RoleStatus } from "./roles.ts";
 import { ACTIVE_STATES, cleanText, type JarStatus } from "./status.ts";
 import type { Quota } from "./quota.ts";
@@ -53,6 +53,12 @@ const MAX_ACTIVITY_ROWS = 3;
 const THINKING_ICONS: Record<string, IconKey> = {
   minimal: "thinkingMinimal", low: "thinkingLow", medium: "thinkingMedium", high: "thinkingHigh", xhigh: "thinkingXhigh", max: "thinkingMax"
 };
+const EFFORT_COLORS = {
+  off: "thinkingOff", minimal: "thinkingMinimal", low: "thinkingLow", medium: "thinkingMedium",
+  high: "thinkingHigh", xhigh: "thinkingXhigh", max: "thinkingMax"
+} as const;
+/** Every other color the footer paints; one sample of each keys the render cache to the live theme. */
+const FOOTER_COLORS: readonly Color[] = ["accent", "warning", "success", "error", "dim", "muted"];
 
 /** `ctx 58%` → `◫ 58%`: the icon replaces the word, and ascii keeps the word. */
 const metric = (key: IconKey, word: string, text: string) => withIcon(key, text.startsWith(word + " ") ? text.slice(word.length + 1) : text);
@@ -70,10 +76,15 @@ function activityRow(item: FooterActivity, width: number, theme: FooterTheme): s
   const head = theme.fg(color, glyph) + " " + theme.fg(item.state === "running" ? "accent" : "muted",
     withIcon(item.kind === "subagent" ? "agent" : "shell", cleanText(item.name, 28)));
   const stats = item.stats ? theme.fg("dim", cleanText(item.stats, 40)) : "";
-  const room = width - visibleWidth(head) - visibleWidth(stats) - 4;
+  const headWidth = visibleWidth(head);
+  const statsWidth = visibleWidth(stats);
+  const room = width - headWidth - statsWidth - 4;
   const detail = item.detail && room >= 6 ? "  " + theme.fg("dim", truncateToWidth(cleanText(item.detail, 200), room, "…")) : "";
-  const gap = " ".repeat(Math.max(1, width - visibleWidth(head) - visibleWidth(detail) - visibleWidth(stats)));
-  return truncateToWidth(head + detail + (stats ? gap + stats : ""), width);
+  const detailWidth = visibleWidth(detail);
+  const gap = Math.max(1, width - headWidth - detailWidth - statsWidth);
+  const row = head + detail + (stats ? " ".repeat(gap) + stats : "");
+  // The parts are already measured; only a head and stats too wide on their own need cutting.
+  return headWidth + detailWidth + (stats ? gap + statsWidth : 0) <= width ? row : truncateToWidth(row, width);
 }
 
 function fitCwd(cwd: string, width: number): string {
@@ -94,11 +105,18 @@ export function renderFooter(view: FooterView, width: number, theme: FooterTheme
   return renderFooterLayout(view, width, theme).lines;
 }
 
+/** Pi repaints the footer on every render (each streamed token) while its inputs change far less often. */
+let lastFooter: { key: string; lines: string[]; hits: FooterHit[] } | undefined;
+
 /** Footer lines plus the clickable regions (activity rows, the session name) they contain. */
 export function renderFooterLayout(view: FooterView, width: number, theme: FooterTheme): { lines: string[]; hits: FooterHit[] } {
-  const hits: FooterHit[] = [];
-  const lines = footerLines(view, width, theme, hits);
-  return { lines, hits };
+  const colors = FOOTER_COLORS.map((color) => theme.fg(color, "x")).join("") + (view.effort ? theme.fg(EFFORT_COLORS[view.effort], "x") : "");
+  const key = `${width}\0${iconSet()}\0${homedir()}\0${colors}\0${JSON.stringify(view)}`;
+  if (lastFooter?.key !== key) {
+    const hits: FooterHit[] = [];
+    lastFooter = { key, lines: footerLines(view, width, theme, hits), hits };
+  }
+  return { lines: lastFooter.lines.slice(), hits: lastFooter.hits.slice() };
 }
 
 function footerLines(view: FooterView, width: number, theme: FooterTheme, hits: FooterHit[]): string[] {
@@ -123,11 +141,7 @@ function footerLines(view: FooterView, width: number, theme: FooterTheme, hits: 
   const cost = view.cost ? metric("cost", "cost", cleanText(view.cost, 20)) : undefined;
   const memory = view.memory ? metric("memory", "ram", view.memory) : undefined;
   const prefix = view.demo ? theme.fg("warning", "DEMO") : "";
-  const effortColors = {
-    off: "thinkingOff", minimal: "thinkingMinimal", low: "thinkingLow", medium: "thinkingMedium",
-    high: "thinkingHigh", xhigh: "thinkingXhigh", max: "thinkingMax"
-  } as const;
-  const effort = show.effort && view.effort ? theme.fg(effortColors[view.effort], THINKING_ICONS[view.effort] ? withIcon(THINKING_ICONS[view.effort]!, view.effort) : view.effort) : "";
+  const effort = show.effort && view.effort ? theme.fg(EFFORT_COLORS[view.effort], THINKING_ICONS[view.effort] ? withIcon(THINKING_ICONS[view.effort]!, view.effort) : view.effort) : "";
   const firstRole = primary ? `${primary.label} ${roleFrame(primary.state, view.frame, view.animations)}` : undefined;
   const attention = firstRole ?? (show.extras ? view.extras[0] : undefined);
   // At narrow widths reserve the right-hand slot for critical/active status, then context.
@@ -168,12 +182,16 @@ function footerLines(view: FooterView, width: number, theme: FooterTheme, hits: 
     namedLeft += theme.fg("dim", " · ") + theme.fg("muted", label);
     hits.push({ y: offsetY, x0: offsetX + start, x1: offsetX + start + visibleWidth(label), target: { kind: "session" } });
   }
-  const gap = " ".repeat(Math.max(1, contentWidth - visibleWidth(namedLeft) - visibleWidth(right)));
-  const lines = [truncateToWidth(namedLeft + gap + right, contentWidth)];
+  const namedWidth = visibleWidth(namedLeft);
+  const rightWidth = visibleWidth(right);
+  const gap = Math.max(1, contentWidth - namedWidth - rightWidth);
+  const first = namedLeft + " ".repeat(gap) + right;
+  const lines = [namedWidth + gap + rightWidth <= contentWidth ? first : truncateToWidth(first, contentWidth)];
   if (goal) {
     const goalPrefix = theme.fg("accent", "◎ goal") + theme.fg("dim", " · ");
-    const room = Math.max(0, contentWidth - visibleWidth(goalPrefix));
-    lines.push(truncateToWidth(goalPrefix + theme.fg("muted", truncateToWidth(goal, room, "…")), contentWidth));
+    const prefixWidth = visibleWidth(goalPrefix);
+    const line = goalPrefix + theme.fg("muted", truncateToWidth(goal, Math.max(0, contentWidth - prefixWidth), "…"));
+    lines.push(prefixWidth <= contentWidth ? line : truncateToWidth(line, contentWidth));
   }
   if (contentWidth < 52) {
     const small = [...(show.memory && memory ? [memory] : []), ...(show.quota ? windows : [])];

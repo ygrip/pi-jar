@@ -46,9 +46,17 @@ function hexRgb(hex: string): [number, number, number] | undefined {
   return [0, 2, 4].map((at) => Number.parseInt(value.slice(at, at + 2), 16)) as [number, number, number];
 }
 
+/** 24-bit foreground prefix per hex color: the flame and Ember repaint the same ramp colors every frame. */
+const foregrounds = new Map<string, string>();
+
 export function rgb(hex: string, text: string): string {
-  const color = hexRgb(hex);
-  return color ? `\x1b[38;2;${color[0]};${color[1]};${color[2]}m${text}\x1b[39m` : text;
+  let prefix = foregrounds.get(hex);
+  if (prefix === undefined) {
+    const color = hexRgb(hex);
+    prefix = color ? `\x1b[38;2;${color[0]};${color[1]};${color[2]}m` : "";
+    if (foregrounds.size < 64) foregrounds.set(hex, prefix);
+  }
+  return prefix ? prefix + text + "\x1b[39m" : text;
 }
 
 function cell(top: number, bottom: number): string {
@@ -59,6 +67,8 @@ function cell(top: number, bottom: number): string {
   if (down) return `\x1b[38;2;${down[0]};${down[1]};${down[2]}m▄\x1b[39m`;
   return " ";
 }
+/** Every truecolor half-block pair, built once instead of parsing two hex colors per cell per frame. */
+const CELLS = Array.from({ length: FLAME_RAMP.length ** 2 }, (_, index) => cell(Math.floor(index / FLAME_RAMP.length), index % FLAME_RAMP.length));
 
 /** Terminals without 24-bit color get shaded blocks in theme colors instead. */
 function shadedCell(top: number, bottom: number, paint: FlamePaint): string {
@@ -217,7 +227,7 @@ export class FlameSim {
     const rows: string[][] = Array.from({ length: this.rows / 2 }, (_, row) => Array.from({ length: this.width }, (_, x) => {
       const top = this.heat[row * 2 * this.width + x]!;
       const bottom = this.heat[(row * 2 + 1) * this.width + x]!;
-      return truecolor ? cell(top, bottom) : shadedCell(top, bottom, paint);
+      return truecolor ? CELLS[top * FLAME_RAMP.length + bottom] ?? cell(top, bottom) : shadedCell(top, bottom, paint);
     }));
     for (const particle of this.particles) {
       const x = Math.round(particle.x);
@@ -234,12 +244,15 @@ export class FlameSim {
   }
 }
 
-let cached: { seed: number; sim: FlameSim } | undefined;
+let cached: { seed: number; sim: FlameSim; frame?: number; rows?: string[] } | undefined;
 
 /** Rendered flame rows for an absolute frame; replays deterministically for a seed. */
 export function flameFrame(frame: number, seed = 1, paint?: FlamePaint, truecolor = supportsTruecolor()): string[] {
   const target = Math.max(0, Math.floor(Number.isFinite(frame) ? frame : 0));
   if (!cached || cached.seed !== seed || cached.sim.frame > target) cached = { seed, sim: new FlameSim(seed) };
   while (cached.sim.frame < target) cached.sim.step();
-  return cached.sim.render(paint, truecolor);
+  if (!truecolor) return cached.sim.render(paint, truecolor);
+  // Truecolor rows never use `paint`, so repaints between flame ticks (typing, streaming) reuse the frame.
+  if (cached.frame !== target || !cached.rows) { cached.rows = cached.sim.render(paint, true); cached.frame = target; }
+  return cached.rows.slice();
 }

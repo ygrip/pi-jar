@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { fuzzyFilter, Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { fuzzyFilter, Key, matchesKey, truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { cleanText } from "./status.ts";
 
 export interface PastPrompt { text: string; source: "this session" | "earlier session"; at?: number }
@@ -58,6 +58,13 @@ export async function openPromptSearch(ctx: ExtensionContext, prompts: readonly 
     let visible: PastPrompt[] = pool;
     const rows = 10;
     const filter = () => { visible = query ? fuzzyFilter(pool, query, (item) => item.text) : pool; selected = 0; first = 0; };
+    // Prompts can be several KiB; sanitize each once, not on every repaint.
+    const cleaned = new Map<PastPrompt, string>();
+    const preview = (item: PastPrompt) => {
+      let text = cleaned.get(item);
+      if (text === undefined) cleaned.set(item, text = cleanText(item.text, 400));
+      return text;
+    };
     return {
       invalidate() {},
       handleInput(data: string) {
@@ -81,21 +88,22 @@ export async function openPromptSearch(ctx: ExtensionContext, prompts: readonly 
         const inner = w - 4;
         if (selected < first) first = selected;
         if (selected >= first + rows) first = selected - rows + 1;
-        const fit = (text: string) => { const value = truncateToWidth(text, inner); return value + " ".repeat(Math.max(0, inner - visibleWidth(value))); };
         const dim = (text: string) => theme.fg("dim", text);
+        // Rows are exactly `w` wide; only the two borders can overflow a narrow overlay.
         const lines = [
-          theme.fg("accent", "╭─ ⌕ PROMPT HISTORY ") + dim("─".repeat(Math.max(0, w - 21)) + "╮"),
-          dim("│ ") + fit(theme.fg("accent", "› ") + query + "\x1b[7m \x1b[0m" + dim(`  ${visible.length}/${prompts.length}`)) + dim(" │")
+          truncateToWidth(theme.fg("accent", "╭─ ⌕ PROMPT HISTORY ") + dim("─".repeat(Math.max(0, w - 21)) + "╮"), w),
+          dim("│ ") + truncateToWidth(theme.fg("accent", "› ") + query + "\x1b[7m \x1b[0m" + dim(`  ${visible.length}/${prompts.length}`), inner, "...", true) + dim(" │")
         ];
         for (let row = 0; row < rows; row++) {
           const item = visible[first + row];
           const active = first + row === selected;
-          const text = item ? (active ? "❯ " : "  ") + cleanText(item.text, 400) : "";
+          const text = item ? (active ? "❯ " : "  ") + preview(item) : "";
           const tag = item?.source === "earlier session" ? dim(" · earlier") : "";
-          lines.push(dim("│ ") + fit(item ? theme.fg(active ? "accent" : "muted", truncateToWidth(text, Math.max(4, inner - 10))) + tag : "") + dim(" │"));
+          const content = item ? theme.fg(active ? "accent" : "muted", truncateToWidth(text, Math.max(4, inner - 10))) + tag : "";
+          lines.push(dim("│ ") + truncateToWidth(content, inner, "...", true) + dim(" │"));
         }
-        lines.push(dim("╰─ type to filter · ↑↓ select · Enter edit · Esc close " + "─".repeat(Math.max(0, w - 57)) + "╯"));
-        return lines.map((line) => truncateToWidth(line, w));
+        lines.push(truncateToWidth(dim("╰─ type to filter · ↑↓ select · Enter edit · Esc close " + "─".repeat(Math.max(0, w - 57)) + "╯"), w));
+        return lines;
       }
     };
   }, { overlay: true, overlayOptions: { width: "80%", maxHeight: "60%" } });

@@ -4,6 +4,7 @@ import { Mascot, MASCOT_FACE_WIDTH, mascotFace, paintFace, paintTip, type Mascot
 import type { SuggestionState } from "./suggest.ts";
 import type { WorkingPhase } from "./working.ts";
 import { imageChip, imageInfo, imagePaths } from "./attachments.ts";
+import { RowCache } from "./row-cache.ts";
 // Aliased: roundedInput has a parameter named `icon`.
 import { icon as glyph, type IconKey } from "./icons.ts";
 
@@ -77,12 +78,27 @@ export interface RoundedInputOptions {
   dim?: (text: string) => string;
 }
 
+/** The last framed editor: Pi repaints the composer on every render (each streamed token) while the draft sits still. */
+let lastFrame: { lines: string[]; key: string; border: (text: string) => string; dim?: (text: string) => string; framed: string[] } | undefined;
+/** While typing only the edited row changes; the rest of a long draft is reused. */
+const framedRows = new RowCache();
+const fittedLines = new RowCache();
+const sameLines = (a: readonly string[], b: readonly string[]) => {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return false;
+  return true;
+};
+
 /** Frame a real editor without changing its keyboard, history or autocomplete implementation. */
 export function roundedInput(lines: string[], width: number, focused: boolean, theme: EditorTheme, focusPaint?: (text: string) => string,
   icon = composerIcon("idle"), session = "", options: RoundedInputOptions = {}): string[] {
   if (width < 8 || lines.length < 2) return lines.map((line) => truncateToWidth(line, Math.max(0, width)));
   const border = focused && focusPaint ? focusPaint : theme.borderColor;
   const dim = options.dim ?? ((text: string) => text);
+  // Painter samples catch a theme change behind the same function.
+  const key = [width, icon, session, options.ghost ?? "", options.hint ?? "", options.paintedIcon ?? "", options.visibleRows ?? "",
+    options.below ?? "", glyph("tab"), border("─"), dim("─")].join("\0");
+  if (lastFrame?.key === key && lastFrame.border === border && lastFrame.dim === options.dim && sameLines(lastFrame.lines, lines)) return lastFrame.framed.slice();
   const bottom = bottomBorderIndex(lines, options.visibleRows);
   const inner = width - 2;
   const meta = session ? `${icon} · session ${session}` : icon;
@@ -97,6 +113,10 @@ export function roundedInput(lines: string[], width: number, focused: boolean, t
   const left = below ? `─ ${below} ` : "";
   const fill = Math.max(0, width - 2 - visibleWidth(left) - visibleWidth(hint) - 1);
   const bottomLine = border("╰" + left + "─".repeat(fill)) + (hint ? dim(hint) : "") + border((hint ? "─" : "─") + "╯");
+  const side = border("│");
+  framedRows.begin(`${inner}\0${side}`);
+  fittedLines.begin(String(width));
+  const fit = (text: string) => fittedLines.get(text, (value) => truncateToWidth(value, width));
   const content = lines.slice(1, bottom).map((line, index) => {
     let row = line;
     if (index === 0 && options.ghost && row.includes(CURSOR)) {
@@ -106,13 +126,13 @@ export function roundedInput(lines: string[], width: number, focused: boolean, t
       const tab = glyph("tab") === "tab" ? "tab" : keyHint("tab", "tab");
       if (room > 2) row = base + dim(truncateToWidth(options.ghost + "   " + tab, room, "…"));
     }
-    const fitted = truncateToWidth(row, inner);
-    return border("│") + fitted + " ".repeat(Math.max(0, inner - visibleWidth(fitted))) + border("│");
+    return framedRows.get(row, (value) => side + truncateToWidth(value, inner, "...", true) + side);
   });
   // Autocomplete rows stay below the frame, indented to line up with the text.
-  const trailing = lines.slice(bottom + 1).map((line) => truncateToWidth(" " + line, width));
-  return [truncateToWidth(top, width), ...content, truncateToWidth(bottomLine, width),
-    ...(options.below ? [truncateToWidth(" " + options.below, width)] : []), ...trailing];
+  const trailing = lines.slice(bottom + 1).map((line) => fit(" " + line));
+  const framed = [fit(top), ...content, fit(bottomLine), ...(options.below ? [fit(" " + options.below)] : []), ...trailing];
+  lastFrame = { lines: lines.slice(), key, border, ...(options.dim ? { dim: options.dim } : {}), framed };
+  return framed.slice();
 }
 
 export interface ComposerDecor {
@@ -174,15 +194,19 @@ class RoundedEditor extends CustomEditor {
     const ghost = empty && !this.isShowingAutocomplete() ? this.decor.ghost() : undefined;
     this.ghostShown = !!ghost;
     const visibleRows = (this as unknown as { renderedVisibleLineCount?: number }).renderedVisibleLineCount;
-    const framed = roundedInput(inner, width, this.focused, this.colors, this.paint, this.decor.icon(), this.decor.session(), {
-      ...(ghost ? { ghost } : {}), ...(this.decor.hint() ? { hint: this.decor.hint()! } : {}),
-      ...(this.decor.paintedIcon() ? { paintedIcon: this.decor.paintedIcon()! } : {}),
+    const icon = this.decor.icon();
+    const session = this.decor.session();
+    const hint = this.decor.hint();
+    const paintedIcon = this.decor.paintedIcon();
+    const framed = roundedInput(inner, width, this.focused, this.colors, this.paint, icon, session, {
+      ...(ghost ? { ghost } : {}), ...(hint ? { hint } : {}), ...(paintedIcon ? { paintedIcon } : {}),
       ...(visibleRows != null ? { visibleRows } : {}), dim: this.decor.dim,
       ...(below ? { below } : {})
     });
     const tip = width >= 8 ? this.decor.tip(width) : undefined;
     this.tipRows = tip ? 1 : 0;
-    return tip ? [truncateToWidth(tip, width), ...framed] : framed;
+    // The tip is a few painted cells; measuring (cached) skips re-segmenting it on every frame.
+    return tip ? [visibleWidth(tip) <= width ? tip : truncateToWidth(tip, width), ...framed] : framed;
   }
 
   override handleInput(data: string): void {
@@ -244,13 +268,16 @@ class ThemedEditor implements EditorComponent {
     const text = this.base.getText();
     const ghost = text === "" ? this.decor.ghost() : undefined;
     const below = this.decor.attachments(text);
-    const framed = roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, this.decor.icon(), this.decor.session(), {
-      ...(ghost ? { ghost } : {}), ...(this.decor.paintedIcon() ? { paintedIcon: this.decor.paintedIcon()! } : {}), dim: this.decor.dim,
+    const icon = this.decor.icon();
+    const session = this.decor.session();
+    const paintedIcon = this.decor.paintedIcon();
+    const framed = roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, icon, session, {
+      ...(ghost ? { ghost } : {}), ...(paintedIcon ? { paintedIcon } : {}), dim: this.decor.dim,
       ...(below ? { below } : {})
     });
     const tip = width >= 8 ? this.decor.tip(width) : undefined;
     this.tipRows = tip ? 1 : 0;
-    return tip ? [truncateToWidth(tip, width), ...framed] : framed;
+    return tip ? [visibleWidth(tip) <= width ? tip : truncateToWidth(tip, width), ...framed] : framed;
   }
   addToHistory(text: string) { this.base.addToHistory?.(text); }
   insertTextAtCursor(text: string) { this.base.insertTextAtCursor?.(text); }

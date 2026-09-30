@@ -114,6 +114,7 @@ Manual choices win: a model or effort you select yourself (model picker, cycling
 - `/diff` (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) compares the baseline with the file on disk using a line diff with 3 lines of context. Files that are back to their baseline drop out.
 - **Accept** forgets the baseline. **Revert** writes the baseline back (or removes a file the agent created) after a second key press to confirm. Errors are reported and the file stays listed.
 - Baselines live in memory for the session; changes made through `bash` or by you are not tracked.
+- **Subagent edits** join the same review. An editing `jar_delegate` batch gets a private temporary directory (`PI_JAR_BASELINE_DIR`); pi-jar inside each subagent writes a file's baseline there right before the subagent's first edit to it. After each successful subagent `edit`/`write` the parent adopts that baseline, unless it already tracks the file (the older baseline wins), so every file is counted once in the footer and `/diff`. The directory is removed when the batch ends. A subagent without pi-jar loaded cannot record baselines, so its edits are listed in its report but not in `/diff`.
 
 ## Background shells
 
@@ -129,11 +130,13 @@ watch matches  or  process exits  →  pi-jar.shell message  →  agent wakes (o
 
 ## Subagents
 
-- `jar_delegate` takes 1–4 tasks. Each runs `pi --mode json -p --no-session --model <role model> [--thinking <effort>] [--tools read,grep,find,ls] "<task>"` in the project directory, with `PI_JAR_CHILD=1`.
+- `jar_delegate` takes 1–4 tasks. Each runs `pi --mode rpc --no-session [parent's -e/--extension/-ne flags] --model <role model> [--thinking <effort>] [--tools read,grep,find,ls,jar_todo]` in the project directory, with `PI_JAR_CHILD=1`, and receives the task as an RPC `prompt` (with instructions to track work in `jar_todo` and to report in Summary / Details / Verification / Open issues sections). Once the child emits `agent_settled`, stdin is closed and Pi exits in order. Dialogs a child opens are answered as cancelled so it never blocks.
 - The model comes from the task's role (default `task`), falling back to `default` and then the current model.
-- Progress (tools used, turns, cost) streams into the tool card; each running subagent is published as a teammate for the welcome TEAM row and footer, and cleared when it ends.
-- The activity view reads a live transcript per subagent (each tool call with its command, path or pattern, then the assistant's text; last 200 lines). It lives only in memory with the 8 most recent finished runs; the tool result saved in the session carries the reports, not the transcript.
-- Subagents time out after 20 minutes and stop when the turn is aborted; `x` in the activity view stops one without touching the rest of its batch (its report reads `failed: stopped`). The result lists every report with its role, model and outcome. In goal mode, `write: true` needs an open task.
+- Progress (current tool, streaming text, tools used, turns, cost) streams into the tool card; each running subagent is published as a teammate for the welcome TEAM row and footer, and cleared when it ends.
+- The activity view keeps a structured transcript per subagent: every tool call (arguments, streamed and final output, duration, success) and each assistant message, plus steering messages; the newest 200 entries, each clipped to 4000 characters, and the text still streaming. Entries are collapsed to one line and rendered only when expanded (`Tab` into the transcript, `↑↓`, `Enter`, or a click on the entry). The subagent's own `jar_todo` checklist (with subtasks) is mirrored from its tool results. It all lives only in memory with the 8 most recent finished runs; the tool result saved in the session carries the reports, not the transcript.
+- **Steering:** `s` in the activity view (or a click on the input row) opens an input; `Enter` sends the text as an RPC `steer` message, delivered after the subagent's current tool calls. Steering works while the subagent is running.
+- **Report back:** for each subagent the parent reads its outcome and duration, turns, tool calls by name, files read and edited, its checklist with per-task progress, failed tool calls, and then the subagent's own report.
+- Subagents time out after 20 minutes and stop when the turn is aborted; `x` in the activity view stops one without touching the rest of its batch (its report reads `failed: stopped`). In goal mode, `write: true` needs an open task.
 
 ## Sessions and prompt history
 

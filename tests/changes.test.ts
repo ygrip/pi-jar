@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { ChangeTracker, diffRows, lineDiff, MAX_TRACKED_TOTAL_BYTES } from "../src/changes.ts";
+import { ChangeTracker, diffRows, lineDiff, MAX_TRACKED_BYTES, MAX_TRACKED_TOTAL_BYTES } from "../src/changes.ts";
+import { CHILD_BASELINE_ENV, readChildBaseline, writeChildBaseline } from "../src/child-baselines.ts";
 import { openDiffView, registerChangeReview, renderDiff, safeLine } from "../src/diff-view.ts";
 
 const plain = (_color: string, text: string) => text;
@@ -83,6 +84,98 @@ test("tracker caps total retained baseline bytes", () => {
     tracker.clear();
     assert.equal(tracker.trackedBytes(), 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("child baselines round trip, keep the first write and ignore malformed records", () => {
+  const dir = workspace();
+  try {
+    const file = join(dir, "project", "a.ts");
+    assert.equal(readChildBaseline(dir, file), undefined, "absent");
+    writeChildBaseline(dir, file, "old\n");
+    writeChildBaseline(dir, file, "newer\n");
+    assert.equal(readChildBaseline(dir, file), "old\n", "first write wins");
+    writeChildBaseline(dir, join(dir, "project", "created.ts"), null);
+    assert.equal(readChildBaseline(dir, join(dir, "project", "created.ts")), null, "null = file did not exist");
+    assert.equal(readdirSync(dir).filter((name) => name.endsWith(".tmp")).length, 0, "no temp files left behind");
+    const records = readdirSync(dir).filter((name) => name.endsWith(".json"));
+    for (const name of records) writeFileSync(join(dir, name), "{not json");
+    assert.equal(readChildBaseline(dir, file), undefined);
+    for (const name of records) writeFileSync(join(dir, name), JSON.stringify({ path: "/elsewhere", content: "x" }));
+    assert.equal(readChildBaseline(dir, file), undefined, "record for another path");
+    for (const name of records) writeFileSync(join(dir, name), JSON.stringify({ path: file, content: 3 }));
+    assert.equal(readChildBaseline(dir, file), undefined, "non-string content");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("adopt keeps the older baseline, dedupes counts and rejects untrackable files", () => {
+  const root = workspace();
+  try {
+    writeFileSync(join(root, "a.ts"), "a\n");
+    const tracker = new ChangeTracker(() => root);
+    tracker.capture("a.ts");
+    writeFileSync(join(root, "a.ts"), "A\n");
+    tracker.markDirty("a.ts");
+    assert.equal(tracker.adopt(join(root, "a.ts"), "A-by-child\n"), true);
+    assert.equal(tracker.count(), 1, "same absolute path counts once");
+    assert.equal(tracker.baseline("a.ts"), "a\n", "older parent baseline wins");
+    writeFileSync(join(root, "b.ts"), "B\n");
+    writeFileSync(join(root, "c.ts"), "made by child\n");
+    assert.equal(tracker.adopt(join(root, "b.ts"), "b\n"), true);
+    assert.equal(tracker.adopt("c.ts", null), true);
+    assert.equal(tracker.adopt(join(root, "b.ts"), "later\n"), true);
+    assert.equal(tracker.count(), 3);
+    assert.deepEqual(tracker.changes().map((change) => [change.rel, change.status, change.before, change.after]),
+      [["a.ts", "modified", "a\n", "A\n"], ["b.ts", "modified", "b\n", "B\n"], ["c.ts", "added", "", "made by child\n"]]);
+    assert.equal(tracker.adopt(join(tmpdir(), "outside.ts"), "x"), false, "outside the project");
+    assert.equal(tracker.adopt("huge.ts", "x".repeat(MAX_TRACKED_BYTES + 1)), false, "over the per-file limit");
+    assert.equal(tracker.count(), 3);
+    assert.equal(tracker.baseline("huge.ts"), undefined);
+    tracker.revert("c.ts");
+    assert.equal(existsSync(join(root, "c.ts")), false, "reverting an adopted created file removes it");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("in a subagent the tool_call hook shares first-edit baselines with the parent", () => {
+  const root = workspace();
+  const dir = workspace();
+  const previous = process.env[CHILD_BASELINE_ENV];
+  const error = console.error;
+  try {
+    process.env[CHILD_BASELINE_ENV] = dir;
+    writeFileSync(join(root, "a.ts"), "a\n");
+    const child = new ChangeTracker(() => root);
+    const events = new Map<string, Function>();
+    registerChangeReview({ on: (name: string, handler: Function) => events.set(name, handler), registerCommand() {}, registerShortcut() {} } as never, () => child, () => {});
+    events.get("tool_call")!({ toolName: "edit", toolCallId: "1", input: { path: "a.ts" } });
+    events.get("tool_call")!({ toolName: "write", toolCallId: "2", input: { path: "new.ts" } });
+    events.get("tool_call")!({ toolName: "edit", toolCallId: "3", input: { path: join(tmpdir(), "outside.ts") } });
+    writeFileSync(join(root, "a.ts"), "A\n");
+    writeFileSync(join(root, "new.ts"), "n\n");
+    events.get("tool_call")!({ toolName: "edit", toolCallId: "4", input: { path: "a.ts" } });
+    assert.equal(readChildBaseline(dir, join(root, "a.ts")), "a\n");
+    assert.equal(readChildBaseline(dir, join(root, "new.ts")), null);
+    assert.equal(readdirSync(dir).length, 2, "untracked files are not shared");
+    const parent = new ChangeTracker(() => root);
+    for (const name of ["a.ts", "new.ts"]) parent.adopt(join(root, name), readChildBaseline(dir, join(root, name))!);
+    assert.deepEqual(parent.changes().map((change) => [change.rel, change.status]), [["a.ts", "modified"], ["new.ts", "added"]]);
+
+    const errors: unknown[] = [];
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    process.env[CHILD_BASELINE_ENV] = join(root, "a.ts"); // a file, so every write fails
+    const broken = new ChangeTracker(() => root);
+    registerChangeReview({ on: (name: string, handler: Function) => events.set(name, handler), registerCommand() {}, registerShortcut() {} } as never, () => broken, () => {});
+    events.get("tool_call")!({ toolName: "edit", toolCallId: "5", input: { path: "a.ts" } });
+    events.get("tool_call")!({ toolName: "edit", toolCallId: "6", input: { path: "a.ts" } });
+    events.get("tool_result")!({ toolName: "edit", toolCallId: "5" });
+    assert.equal(errors.length, 1, "write failures are reported once per path");
+    assert.equal(broken.count(), 1, "the tool call itself is still tracked");
+  } finally {
+    console.error = error;
+    if (previous === undefined) delete process.env[CHILD_BASELINE_ENV];
+    else process.env[CHILD_BASELINE_ENV] = previous;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("rendered diff keeps indentation, strips escapes and fits the pane", () => {

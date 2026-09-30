@@ -53,10 +53,11 @@ export class ShellManager {
   constructor(onEvent: (event: ShellEvent) => void, spawnShell: typeof spawn = spawn) { this.onEvent = onEvent; this.spawnShell = spawnShell; }
 
   list(): ShellJob[] { return [...this.jobs.values()].map(({ job }) => ({ ...job, lines: [...job.lines] })); }
+  /** Read by the footer on every render: one shallow copy per job, never the output lines. */
   summaries(): Array<Omit<ShellJob, "lines">> {
     return [...this.jobs.values()].map(({ job }) => {
       const { lines: _lines, ...summary } = job;
-      return { ...summary };
+      return summary;
     });
   }
   get(id: string): ShellJob | undefined { const entry = this.jobs.get(id); return entry && { ...entry.job, lines: [...entry.job.lines] }; }

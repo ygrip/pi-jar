@@ -58,7 +58,7 @@ Then check:
 - the composer: typing `/pl` shows autocomplete below the frame; long drafts grow before scrolling; Ember changes mood while dialogs are open;
 - `/jar settings`: Tab through Appearance → Footer → Pi; cycle Unicode/Nerd Font/ASCII icons and toggle mouse mode in the temporary agent dir;
 - `/jar sessions`: search, move between rows, inspect the selected prompt/goal/plan, then resume; the footer session name or `sessions` indicator opens the same picker;
-- `/jar activity`: select a subagent or background shell, scroll its live transcript/output, pause and resume follow, and stop/kill only the selected run;
+- `/jar activity`: select a subagent or background shell, scroll its live transcript/output, pause and resume follow, `Tab` into a subagent's transcript and expand/collapse entries, steer it with `s`, and stop/kill only the selected run;
 - `/roles`: the split manager, `n` new role, `a` alias, `s` scope;
 - `/plan`: the status shows `◆ PLAN · read-only` and a directory appears under `$TMPDIR/pi-jar/plans/`.
 

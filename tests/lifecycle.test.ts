@@ -114,7 +114,8 @@ test("footer never schedules repaint timers, even in demo; motion toggles and sh
     assert.equal(renders, beforeEffort + 1);
     assert.match(footer?.render(80).join(" ") ?? "", /model.*high/);
     sessionName = "Renamed session";
-    assert.match(footer?.render(80).join(" ") ?? "", /Renamed session/);
+    events.get("session_info_changed")?.({}, ctx);
+    assert.match(footer?.render(80).join(" ") ?? "", /Renamed session/, "a rename repaints the footer from the event");
     assert.equal(intervals.size, 0);
     assert.equal(subscribed, 1);
     const command = commands.get("jar")!;

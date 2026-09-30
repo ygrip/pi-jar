@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { diffRows, lineDiff, type ChangeTracker, type DiffRow, type FileChange } from "./changes.ts";
+import { CHILD_BASELINE_ENV, writeChildBaseline } from "./child-baselines.ts";
 import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
 
 const ACTIONS = [
@@ -146,10 +147,21 @@ export function registerChangeReview(pi: ExtensionAPI, tracker: () => ChangeTrac
   // that file. Older Pi builds may omit toolCallId here, hence the small FIFO fallback.
   const pending = new Map<string, string>();
   const fallback: string[] = [];
+  // Subagent side: hand each first-edit baseline to the parent so its /diff covers our edits.
+  const reported = new Set<string>();
   pi.on("tool_call", (event) => {
     if (event.toolName !== "edit" && event.toolName !== "write") return;
     const path = (event.input as { path?: unknown }).path;
-    if (typeof path !== "string" || !path.trim() || !tracker()?.capture(path)) return;
+    const current = tracker();
+    if (typeof path !== "string" || !path.trim() || !current?.capture(path)) return;
+    const dir = process.env[CHILD_BASELINE_ENV];
+    const abs = current.absolute(path);
+    const before = current.baseline(abs);
+    // A failed write is reported once and not retried: a later retry would share a newer baseline.
+    if (dir && before !== undefined && !reported.has(abs)) {
+      try { writeChildBaseline(dir, abs, before); }
+      catch (error) { reported.add(abs); console.error(`pi-jar: cannot share baseline for ${abs}: ${String(error)}`); }
+    }
     const id = (event as { toolCallId?: unknown }).toolCallId;
     if (typeof id === "string" && id) pending.set(id, path);
     fallback.push(path);

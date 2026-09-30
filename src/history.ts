@@ -139,8 +139,10 @@ export function historyPage(snapshot: HistorySnapshot, page = 0, size = HISTORY_
   return { items, page: at, totalPages };
 }
 
+export interface HistoryChunk { lines: string[]; more: boolean; nextOffset: number; trailingNewline: boolean }
+
 /** Fetch only the requested 2 KiB / 30-line segment; nextOffset never skips hidden lines. */
-export function historyChunk(item: HistoryItem, offset = 0): { lines: string[]; more: boolean; nextOffset: number; trailingNewline: boolean } {
+export function historyChunk(item: HistoryItem, offset = 0): HistoryChunk {
   const at = Math.max(0, Math.min(200_000_000, Math.floor(offset) || 0));
   const { raw, more } = excerpt(item.entry, HISTORY_CHUNK_SIZE, at);
   // Limit UTF-8 bytes as well as UTF-16 code units (CJK/emoji can exceed 2 KiB).

@@ -111,12 +111,8 @@ export async function openJarSettings(
       render(available: number): string[] {
         width = Math.max(8, available);
         const state = current();
-        const fit = (text: string) => truncateToWidth(text, width);
-        const line = (text: string) => {
-          const inner = Math.max(0, width - 5);
-          const content = truncateToWidth(text, inner);
-          return fit(theme.fg("dim", "│  ") + content + " ".repeat(Math.max(0, inner - visibleWidth(content))) + theme.fg("dim", " │"));
-        };
+        // Rows are assembled from exact-width parts, so one truncate-and-pad pass per row is enough.
+        const line = (text: string) => theme.fg("dim", "│  ") + truncateToWidth(text, Math.max(0, width - 5), "...", true) + theme.fg("dim", " │");
         const title = " pi-jar · settings ";
         const top = theme.fg("accent", "╭─" + truncateToWidth(title, Math.max(0, width - 6))
           + "─".repeat(Math.max(0, width - 4 - visibleWidth(title))) + "×╮");
@@ -144,13 +140,13 @@ export async function openJarSettings(
           ];
         const start = firstVisible();
         const rows = allRows.slice(start, start + pageSize());
-        return [fit(top), tabs, divider,
+        return [top, tabs, divider,
           line(theme.fg("accent", page === "footer" ? " FOOTER VISIBILITY" : page === "pi" ? " PI & WORKFLOWS" : " APPEARANCE & MOTION")),
           line(theme.fg("dim", page === "footer" ? ` Footer fields ${start + 1}–${start + rows.length}/${fields()}`
             : page === "pi" ? " Fullscreen mode enables clicks and copy-on-select" : " Accent cycles through loaded themes")),
-          ...rows.map(fit),
+          ...rows,
           line(theme.fg("dim", " Tab: section · ↑↓: choose · Enter/click: change · Esc")),
-          fit(theme.fg("dim", "╰" + "─".repeat(Math.max(0, width - 2)) + "╯"))];
+          theme.fg("dim", "╰" + "─".repeat(Math.max(0, width - 2)) + "╯")];
       }
     };
   });

@@ -208,14 +208,19 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
 }
 
 const CARD_COLORS: readonly WelcomeColor[] = ["accent", "warning", "error", "muted", "dim"];
-let cardCache: { key: string; lines: string[] } | undefined;
+let cardCache: { key: string; lines: string[]; widths: number[] } | undefined;
 
 /** The card only changes with its inputs and theme; the flame beside it repaints every tick. */
-function cachedCard(width: number, fg: Paint, info: WelcomeInfo): string[] {
-  const key = `${width}\0${supportsTruecolor()}\0${iconSet()}\0${CARD_COLORS.map((color) => fg(color, "x")).join("")}\0${JSON.stringify(info)}`;
-  if (cardCache?.key !== key) cardCache = { key, lines: card(width, fg, info) };
-  return cardCache.lines;
+function cachedCard(width: number, fg: Paint, info: WelcomeInfo, inputs: string): { lines: string[]; widths: number[] } {
+  const key = `${width}\0${inputs}`;
+  if (cardCache?.key !== key) {
+    const lines = card(width, fg, info);
+    cardCache = { key, lines, widths: lines.map((line) => visibleWidth(line)) };
+  }
+  return cardCache;
 }
+/** Pi repaints the welcome on every render, not only on flame ticks; identical inputs reuse the last lines. */
+let welcomeCache: { key: string; lines: string[] } | undefined;
 
 /** Which welcome action (if any) sits under a zero-based cell in the rendered lines. */
 export function welcomeHit(lines: readonly string[], x: number, y: number): WelcomeAction | undefined {
@@ -241,10 +246,17 @@ export function welcomeSettingsHit(lines: readonly string[], x: number, y: numbe
 
 export function welcomeLines(width: number, frame: number, fg: Paint, info: WelcomeInfo = {}): string[] {
   if (width <= 0) return [];
-  const fit = (line: string) => fitTo(line, width);
+  const inputs = `${supportsTruecolor()}\0${iconSet()}\0${CARD_COLORS.map((color) => fg(color, "x")).join("")}\0${JSON.stringify(info)}`;
+  const key = `${width}\0${frame}\0${inputs}`;
+  if (welcomeCache?.key !== key) welcomeCache = { key, lines: renderWelcome(width, frame, fg, info, inputs) };
+  return welcomeCache.lines.slice();
+}
+
+function renderWelcome(width: number, frame: number, fg: Paint, info: WelcomeInfo, inputs: string): string[] {
   const seed = info.flameSeed ?? 1;
   const flame = flameFrame(frame, seed, (color, text) => fg(color, text));
   if (width < 32) {
+    const fit = (line: string) => fitTo(line, width);
     const start = Math.max(0, Math.floor((FLAME_WIDTH - width) / 2));
     return [
       ...flame.slice(4).map((line) => fit(sliceByColumn(line, start, Math.min(width, FLAME_WIDTH)))),
@@ -264,17 +276,18 @@ export function welcomeLines(width: number, frame: number, fg: Paint, info: Welc
   if (!wide) {
     // width >= 32 here, so ART_WIDTH-wide art rows always fit.
     const art = [...flameArt.slice(2), ...PI_COMPACT.map((line) => fg("accent", center(line, ART_WIDTH)))];
-    return [...art, ...cachedCard(width, fg, info).map(fit), ""];
+    const details = cachedCard(width, fg, info, inputs);
+    return [...art, ...details.lines.map((line, index) => details.widths[index]! <= width ? line : truncateToWidth(line, width)), ""];
   }
   const art = [...flameArt, ...PI_LARGE.map((line) => fg("accent", center(fixedCell(line, 21), ART_WIDTH)))];
-  const details = cachedCard(width - ART_WIDTH - 2, fg, info);
-  const topPad = Math.max(0, Math.floor((details.length - art.length) / 2));
+  const details = cachedCard(width - ART_WIDTH - 2, fg, info, inputs);
+  const topPad = Math.max(0, Math.floor((details.lines.length - art.length) / 2));
   const artRows = [...Array.from({ length: topPad }, () => " ".repeat(ART_WIDTH)), ...art];
-  const merged = Array.from({ length: Math.max(artRows.length, details.length) }, (_, index) => {
+  const merged = Array.from({ length: Math.max(artRows.length, details.lines.length) }, (_, index) => {
     const left = artRows[index] ?? " ".repeat(ART_WIDTH);
-    const right = details[index] ?? "";
-    // Every art row is ART_WIDTH cells; the cached card rows hit Pi's width cache.
-    return ART_WIDTH + 2 + visibleWidth(right) <= width ? left + "  " + right : truncateToWidth(left + "  " + right, width);
+    const right = details.lines[index] ?? "";
+    // Every art row is ART_WIDTH cells and card widths are measured once per card.
+    return ART_WIDTH + 2 + (details.widths[index] ?? 0) <= width ? left + "  " + right : truncateToWidth(left + "  " + right, width);
   });
   return [...merged, "", ""];
 }

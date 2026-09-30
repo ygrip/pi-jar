@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ModelRoleManager } from "./model-roles.ts";
@@ -16,6 +17,8 @@ export const FAILURE_STREAK = 3;
 /** Automatic consultations allowed per user prompt. */
 export const GATES_PER_PROMPT = 2;
 const WINDOW = 8;
+/** Serialized inputs up to this length stay verbatim in a loop key; longer ones keep a prefix and a digest. */
+const KEY_INPUT_CHARS = 1024;
 
 export const ADVISOR_SYSTEM = [
   "You are the advisor: a senior engineer giving a second opinion to a coding agent (the executor) mid-task.",
@@ -85,8 +88,11 @@ export function advisorPrompt(request: AdvisorRequest, conversation: string, git
   ].filter(Boolean).join("\n\n");
 }
 
-/** Stable key for loop detection. */
-export const callKey = (tool: string, input: unknown) => tool + " " + JSON.stringify(input ?? {});
+/** Stable key for loop detection. A `write` of a large file must not pin its whole content in the recent window. */
+export function callKey(tool: string, input: unknown): string {
+  const json = String(JSON.stringify(input ?? {}));
+  return tool + " " + (json.length <= KEY_INPUT_CHARS ? json : json.slice(0, 200) + "…#" + createHash("sha1").update(json).digest("hex"));
+}
 
 /** Tracks repeated calls and failure streaks within one user prompt. */
 export class StuckDetector {

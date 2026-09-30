@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { createHistorySnapshot, historyChunk, historyPage, safeHistoryText, type HistoryItem } from "./history.ts";
+import { createHistorySnapshot, historyChunk, historyPage, safeHistoryText, type HistoryChunk, type HistoryItem } from "./history.ts";
+import { RowCache } from "./row-cache.ts";
 import { sessionBranch } from "./session-branch.ts";
 
 /** Separate, read-only view. Pi's native transcript and session file are never modified. */
@@ -52,7 +53,15 @@ export async function openJarHistory(ctx: ExtensionContext): Promise<void> {
       tui.requestRender();
     };
     input.onEscape = () => { searching = false; input.focused = false; tui.requestRender(); };
-    const chunks = () => selectedItem() ? historyChunk(selectedItem()!, offsets.at(-1)!) : undefined;
+    // Every render (each streamed token while this is open) needs the selected chunk; re-slice only on change.
+    let loaded: { item: HistoryItem; offset: number; chunk: HistoryChunk } | undefined;
+    const chunks = () => {
+      const item = selectedItem();
+      if (!item) return undefined;
+      const offset = offsets.at(-1)!;
+      if (loaded?.item !== item || loaded.offset !== offset) loaded = { item, offset, chunk: historyChunk(item, offset) };
+      return loaded.chunk;
+    };
     const moveChunk = (direction: number) => {
       const chunk = chunks();
       if (direction > 0 && chunk?.more && chunk.nextOffset > offsets.at(-1)!) offsets.push(chunk.nextOffset);
@@ -60,13 +69,10 @@ export async function openJarHistory(ctx: ExtensionContext): Promise<void> {
       detailScroll = 0;
       expanded = true;
     };
-    const fit = (text: string) => truncateToWidth(text, Math.max(0, width));
-    const line = (content: string) => {
-      const inside = Math.max(0, width - 4);
-      const clipped = truncateToWidth(content, inside);
-      return fit(theme.fg("dim", "│ ") + clipped + " ".repeat(Math.max(0, inside - visibleWidth(clipped))) + theme.fg("dim", " │"));
-    };
-    const border = (left: string, middle: string, right: string) => fit(theme.fg("dim", left + middle.repeat(Math.max(0, width - 2)) + right));
+    // Rows are built from exact-width parts: one truncate-and-pad pass per new row, reused while it stays on screen.
+    const framed = new RowCache();
+    const line = (content: string) => framed.get(content, (row) => theme.fg("dim", "│ ") + truncateToWidth(row, Math.max(0, width - 4), "...", true) + theme.fg("dim", " │"));
+    const border = (left: string, middle: string, right: string) => theme.fg("dim", left + middle.repeat(Math.max(0, width - 2)) + right);
     return {
       invalidate() { input.invalidate(); },
       handleInput(data: string) {
@@ -103,11 +109,12 @@ export async function openJarHistory(ctx: ExtensionContext): Promise<void> {
       },
       render(available: number): string[] {
         width = Math.max(8, available);
+        framed.begin(`${width}\0${theme.fg("dim", "│")}`);
         const start = first();
         const items = current.items.slice(start, start + listRows());
         const heading = ` pi-jar · history · ${snapshot.visible.length} turns`;
-        const top = fit(theme.fg("accent", "╭─" + truncateToWidth(heading, Math.max(0, width - 6))
-          + "─".repeat(Math.max(0, width - 4 - visibleWidth(heading))) + "×╮"));
+        const top = theme.fg("accent", "╭─" + truncateToWidth(heading, Math.max(0, width - 6))
+          + "─".repeat(Math.max(0, width - 4 - visibleWidth(heading))) + "×╮");
         const subtitle = ` Active branch · page ${current.page + 1}/${current.totalPages} · snapshot at open`;
         const rows = items.length ? items.map((item, position) => {
           const index = start + position;
@@ -130,7 +137,7 @@ export async function openJarHistory(ctx: ExtensionContext): Promise<void> {
         const help = searching ? line(input.render(Math.max(1, width - 4))[0] ?? "/")
           : line(theme.fg("dim", notice || (width >= 66 ? "↑↓/Pg: move · /: search · n/N: next · e: expand · d/u: detail · [ ]: chunks · p/o: pages · Esc" : "↑↓ move · / search · e expand · p/o pages · Esc")));
         return [top, line(theme.fg("muted", subtitle)), border("├", "─", "┤"), ...rows,
-          border("├", "─", "┤"), line(theme.fg("accent", headingDetail)), ...body, help, border("╰", "─", "╯")].map(fit);
+          border("├", "─", "┤"), line(theme.fg("accent", headingDetail)), ...body, help, border("╰", "─", "╯")];
       }
     };
   }, { overlay: true, overlayOptions: { anchor: "center", width: 92, maxHeight: "80%" } });

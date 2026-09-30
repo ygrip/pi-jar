@@ -1,33 +1,57 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { basename } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, isAbsolute, join, resolve } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import type { ChangeTracker } from "./changes.ts";
+import { CHILD_BASELINE_ENV, readChildBaseline } from "./child-baselines.ts";
 import type { ModelRoleManager } from "./model-roles.ts";
-import { ROLE_PREFIX } from "./status.ts";
-import { cleanText } from "./status.ts";
+import { cleanText, ROLE_PREFIX } from "./status.ts";
+import type { Todo } from "./tasks.ts";
 
 export const DELEGATE_TOOL = "jar_delegate";
 /** Set in child processes so a subagent never delegates again. */
 export const CHILD_ENV = "PI_JAR_CHILD";
 export const MAX_DELEGATES = 4;
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
+/** Read-only subagents also keep jar_todo so their checklist shows in the activity view. */
+export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "jar_todo"] as const;
 const MAX_OUTPUT_CHARS = 12_000;
 const TIMEOUT_MS = 20 * 60_000;
 const STATUS_REFRESH_MS = 20_000;
 const LIVE_UPDATE_MS = 1000;
 const MAX_EVENT_TEXT = 16_000;
-const MAX_LOG_LINES = 200;
-const MAX_LOG_CHARS = 240;
+/** Transcript entries kept per run; tool output and text are clipped so a run stays well under 2 MiB. */
+const MAX_ENTRIES = 200;
+const MAX_ENTRY_TEXT = 4000;
+const MAX_ARGS_CHARS = 2000;
+/** Tail of the assistant text still streaming, shown so a long answer never looks stuck. */
+const MAX_LIVE_CHARS = 1200;
+const LIVE_REPAINT_MS = 50;
+/** One RPC record larger than this (a huge tool result) is skipped instead of buffered. */
+const MAX_LINE_CHARS = 16 * 1024 * 1024;
+const MAX_FILES = 50;
+const MAX_TODOS = 50;
+const MAX_STEER_CHARS = 4000;
 /** Finished subagents the registry keeps for the activity view after their tool call returns. */
 const MAX_FINISHED = 8;
 /** Abort reason for stopping one subagent from the activity view (vs. aborting the whole tool call). */
 const STOP_REASON = "stopped";
 /** Tool arguments that best describe a call in the transcript, most telling first. */
 const HINT_KEYS = ["command", "path", "file_path", "pattern", "query", "url"] as const;
+/** RPC dialogs a subagent cannot show: answered as cancelled so the child never blocks on them. */
+const DIALOGS = new Set(["select", "confirm", "input", "editor"]);
+const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 
 export type DelegateState = "queued" | "working" | "done" | "failed";
+export type ToolStatus = "running" | "done" | "error";
+/** One transcript row; `rev` changes whenever the entry does, so views can cache their rendering. */
+export type TranscriptEntry =
+  | { kind: "tool"; rev: number; id: string; name: string; hint: string; args: string; status: ToolStatus; output: string; startedAt: number; endedAt?: number }
+  | { kind: "text" | "steer" | "note"; rev: number; text: string };
+export type ToolEntry = Extract<TranscriptEntry, { kind: "tool" }>;
+
 export interface DelegateRun {
   index: number;
   name: string;
@@ -43,8 +67,17 @@ export interface DelegateRun {
   error?: string;
   startedAt?: number;
   endedAt?: number;
-  /** Live transcript (tool calls, assistant text), last MAX_LOG_LINES; never copied into tool details. */
-  log: string[];
+  /** Tool calls by name, for the report. */
+  toolCounts: Record<string, number>;
+  filesRead: string[];
+  filesEdited: string[];
+  /** The subagent's own jar_todo checklist, mirrored from its tool results. */
+  todos: Todo[];
+  steered: number;
+  /** Live transcript (tool calls with output, assistant text, steering); never copied into tool details. */
+  transcript: TranscriptEntry[];
+  /** Assistant text still streaming; never copied into tool details. */
+  live: string;
 }
 
 type Spawn = (command: string, args: string[], options: Parameters<typeof spawn>[2]) => ChildProcess;
@@ -57,18 +90,51 @@ export function piInvocation(args: string[], argv = process.argv, execPath = pro
   return { command: "pi", args };
 }
 
-/** CLI arguments for one subagent: JSON events, one-shot, no session, read-only tools unless `write`. */
-export function delegateArgs(task: string, model: string | undefined, thinking: string | undefined, write: boolean): string[] {
-  const args = ["--mode", "json", "-p", "--no-session"];
+/**
+ * The parent's extension flags (`-e`, `--extension`, `-ne`), so a subagent loads the same extensions.
+ * In particular pi-jar itself, which records edit baselines for the parent's /diff and runs jar_todo.
+ */
+export function extensionFlags(argv = process.argv, cwd = process.cwd()): string[] {
+  const flags: string[] = [];
+  for (let index = 2; index < argv.length; index++) {
+    const arg = argv[index]!;
+    if (arg === "-ne" || arg === "--no-extensions") flags.push(arg);
+    else if ((arg === "-e" || arg === "--extension") && argv[index + 1]) flags.push("--extension", resolve(cwd, argv[++index]!));
+    else if (arg.startsWith("--extension=")) flags.push("--extension", resolve(cwd, arg.slice(12)));
+  }
+  return flags;
+}
+
+/** CLI arguments for one subagent: RPC (so it can be steered), no session, read-only tools unless `write`. */
+export function delegateArgs(model: string | undefined, thinking: string | undefined, write: boolean, argv = process.argv): string[] {
+  const args = ["--mode", "rpc", "--no-session", ...extensionFlags(argv)];
   if (model) args.push("--model", model);
   if (thinking) args.push("--thinking", thinking);
   if (!write) args.push("--tools", READ_ONLY_TOOLS.join(","));
+  return args;
+}
+
+/** The subagent's prompt: its rules, how to report back, then the task. */
+export function delegatePrompt(task: string, write: boolean): string {
   const rules = write
     ? "You may edit files. Stay strictly within the task; other subagents may be working in the same repository at the same time."
     : "You are read-only: investigate and report, do not attempt to modify anything.";
-  args.push(`You are a focused subagent working for another agent. ${rules} Finish with a concise, self-contained report of your findings or changes (include file paths).\n\nTask: ${task}`);
-  return args;
+  return [
+    `You are a focused subagent working for another agent. ${rules}`,
+    "Track multi-step work with jar_todo (when available) so your progress is visible. The user may steer you while you work; follow their messages.",
+    "Finish with a self-contained report in these sections:",
+    "## Summary — the outcome in one to three sentences.",
+    "## Details — findings or changes, with file paths (and line numbers where useful).",
+    "## Verification — what you checked or ran, and the results.",
+    "## Open issues — risks, unknowns and follow-ups, or \"none\".",
+    "",
+    `Task: ${task}`
+  ].join("\n");
 }
+
+/** Text without terminal controls, keeping line breaks; clipped to `limit`. */
+const cleanBlock = (value: string, limit: number): string => value.slice(0, limit * 2)
+  .replace(ANSI, "").replace(/\r\n?/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, limit);
 
 const textOf = (message: { content?: unknown }, limit = MAX_EVENT_TEXT): string => {
   if (typeof message.content === "string") return message.content.slice(0, limit);
@@ -85,12 +151,6 @@ const textOf = (message: { content?: unknown }, limit = MAX_EVENT_TEXT): string 
   return out;
 };
 
-/** Append transcript lines, cleaned and clipped, keeping only the newest MAX_LOG_LINES. */
-const appendLog = (run: DelegateRun, lines: readonly string[]) => {
-  for (const raw of lines) { const line = cleanText(raw, MAX_LOG_CHARS); if (line) run.log.push(line); }
-  if (run.log.length > MAX_LOG_LINES) run.log.splice(0, run.log.length - MAX_LOG_LINES);
-};
-
 /** The argument that says what a tool call does: the bash command, the file path, the search pattern… */
 const toolHint = (args: unknown): string => {
   if (!args || typeof args !== "object") return "";
@@ -100,43 +160,127 @@ const toolHint = (args: unknown): string => {
   }
   return "";
 };
+const toolPath = (args: unknown): string | undefined => {
+  if (!args || typeof args !== "object") return undefined;
+  const value = (args as Record<string, unknown>).path ?? (args as Record<string, unknown>).file_path;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+};
+const argsText = (args: unknown): string => {
+  if (args === undefined) return "";
+  try { return cleanBlock(JSON.stringify(args, null, 1) ?? "", MAX_ARGS_CHARS); } catch { return ""; }
+};
 
-/** The slice of Pi's JSON event stream a run reads; leaves are unknown because it is another process's output. */
+const pushEntry = (run: DelegateRun, entry: TranscriptEntry) => {
+  run.transcript.push(entry);
+  if (run.transcript.length > MAX_ENTRIES) run.transcript.splice(0, run.transcript.length - MAX_ENTRIES);
+};
+const addFile = (list: string[], path: string) => {
+  const clean = cleanText(path, 300);
+  if (clean && !list.includes(clean) && list.length < MAX_FILES) list.push(clean);
+};
+
+/** A subagent's jar_todo items from a tool result, or undefined when the result is not a checklist. */
+export function childTodos(details: unknown): Todo[] | undefined {
+  const items = details && typeof details === "object" ? (details as { items?: unknown }).items : undefined;
+  if (!Array.isArray(items)) return undefined;
+  const todos: Todo[] = [];
+  for (const raw of items.slice(0, MAX_TODOS)) {
+    if (!raw || typeof raw !== "object") continue;
+    const item = raw as Record<string, unknown>;
+    const status = item.status;
+    if (typeof item.id !== "string" || typeof item.title !== "string" || (status !== "pending" && status !== "in_progress" && status !== "completed")) continue;
+    todos.push({
+      id: cleanText(item.id, 64), title: cleanText(item.title, 120), status, done: status === "completed",
+      ...(typeof item.activeForm === "string" && item.activeForm.trim() ? { activeForm: cleanText(item.activeForm, 80) } : {}),
+      ...(typeof item.parentId === "string" && item.parentId ? { parentId: cleanText(item.parentId, 64) } : {})
+    });
+  }
+  return todos;
+}
+
+/** Tasks that count toward completion: subtasks, and top-level tasks without subtasks. */
+export const leafTodos = (todos: readonly Todo[]): Todo[] => {
+  const parents = new Set<string>();
+  for (const todo of todos) if (todo.parentId) parents.add(todo.parentId);
+  return todos.filter((todo) => !parents.has(todo.id));
+};
+
+/** The slice of Pi's RPC stream a run reads; leaves are unknown because it is another process's output. */
 interface ChildEvent {
   type?: unknown;
+  id?: unknown;
+  command?: unknown;
+  success?: unknown;
+  error?: unknown;
+  method?: unknown;
+  toolCallId?: unknown;
   toolName?: unknown;
   args?: unknown;
+  isError?: unknown;
+  result?: { content?: unknown; details?: unknown };
+  partialResult?: { content?: unknown };
+  assistantMessageEvent?: { type?: unknown; delta?: unknown };
   message?: { role?: unknown; content?: unknown; usage?: { cost?: { total?: unknown } }; stopReason?: unknown; errorMessage?: unknown };
 }
 
-/** Run one child Pi, feeding progress into `run` and calling `update` on every change. */
-export function runDelegate(run: DelegateRun, args: string[], cwd: string, signal: AbortSignal | undefined, update: () => void, spawnProcess: Spawn = spawn as Spawn): Promise<void> {
-  return new Promise((resolve) => {
+export interface DelegateHooks {
+  /** Extra environment for the child (the baseline directory for /diff). */
+  env?: Record<string, string>;
+  /** A successful edit/write by the child, with the path it gave. */
+  edited?(path: string): void;
+}
+export interface DelegateHandle { done: Promise<void>; steer(text: string): boolean }
+
+/**
+ * Run one child Pi in RPC mode, feeding progress into `run` and calling `update` on every change.
+ * RPC keeps stdin open so the user can steer the subagent; it is closed once the child settles.
+ */
+export function startDelegate(run: DelegateRun, args: string[], prompt: string, cwd: string, signal: AbortSignal | undefined,
+  update: () => void, spawnProcess: Spawn = spawn as Spawn, hooks: DelegateHooks = {}): DelegateHandle {
+  let steer: (text: string) => boolean = () => false;
+  const done = new Promise<void>((resolveDone) => {
     const invocation = piInvocation(args);
     let child: ChildProcess;
     try {
-      child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, [CHILD_ENV]: "1" } });
+      child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...hooks.env, [CHILD_ENV]: "1" } });
     } catch (error) {
-      run.state = "failed"; run.error = error instanceof Error ? error.message : String(error); run.endedAt = Date.now(); update(); resolve(); return;
+      run.state = "failed"; run.error = error instanceof Error ? error.message : String(error); run.endedAt = Date.now(); update(); resolveDone(); return;
     }
     run.state = "working";
     run.startedAt = Date.now();
     run.activity = "starting";
     update();
     let buffer = "";
+    // A JSON line past this is dropped whole rather than buffered without bound.
+    let overflow = false;
+    // Streamed text repaints at most every LIVE_REPAINT_MS; the trailing timer shows the last tokens.
+    let liveAt = 0;
+    let liveTimer: ReturnType<typeof setTimeout> | undefined;
     let stderr = "";
     let finished = false;
+    let settled = false;
+    const send = (command: object): boolean => {
+      const stdin = child.stdin;
+      if (!stdin || stdin.destroyed || stdin.writableEnded) return false;
+      try { stdin.write(JSON.stringify(command) + "\n"); return true; } catch { return false; }
+    };
+    // EPIPE after the child exits is expected; anything else is kept for the failure message.
+    child.stdin?.on("error", (error) => { if (!finished) stderr = (stderr + "\n" + error.message).slice(-4000); });
     const finish = (state: DelegateState, error?: string) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      clearTimeout(liveTimer);
       signal?.removeEventListener("abort", abort);
+      if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
       run.state = state;
       if (error) run.error = error;
       run.activity = undefined;
+      run.live = "";
+      for (const entry of run.transcript) if (entry.kind === "tool" && entry.status === "running") { entry.status = "error"; entry.endedAt = Date.now(); entry.rev++; }
       run.endedAt = Date.now();
       update();
-      resolve();
+      resolveDone();
     };
     const stop = () => { child.kill("SIGTERM"); setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 3000).unref?.(); };
     // Stopping one run from the activity view reads "stopped"; aborting the whole tool call reads "aborted".
@@ -145,6 +289,7 @@ export function runDelegate(run: DelegateRun, args: string[], cwd: string, signa
     timer.unref?.();
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener("abort", abort, { once: true });
+    const running = new Map<string, { entry: ToolEntry; path?: string }>();
     const line = (raw: string) => {
       // Output that arrives after an abort or timeout must not revive a finished run's activity.
       if (finished || !raw.trim()) return;
@@ -153,45 +298,140 @@ export function runDelegate(run: DelegateRun, args: string[], cwd: string, signa
       if (!parsed || typeof parsed !== "object") return;
       // Parsed child output: the object check above is all the cast assumes; every field stays unknown until read.
       const event = parsed as ChildEvent;
-      if (event.type === "tool_execution_start") {
-        run.tools++;
-        run.activity = cleanText(String(event.toolName ?? "tool"), 24);
-        appendLog(run, [`▸ ${run.activity} ${toolHint(event.args)}`]);
-        update();
-      }
-      else if (event.type === "message_end" && event.message?.role === "assistant") {
-        run.turns++;
-        run.cost += Number(event.message.usage?.cost?.total) || 0;
-        const text = textOf(event.message).trim();
-        if (text) { run.output = text.slice(0, MAX_OUTPUT_CHARS); appendLog(run, text.split("\n").slice(-MAX_LOG_LINES)); }
-        if (event.message.stopReason === "error" && event.message.errorMessage) run.error = cleanText(String(event.message.errorMessage), 200);
-        run.activity = "thinking";
-        update();
+      switch (event.type) {
+        case "response":
+          if (event.success !== false) return;
+          if (event.command === "prompt") { stop(); finish("failed", cleanText(String(event.error ?? "prompt rejected"), 300)); return; }
+          pushEntry(run, { kind: "note", rev: 0, text: `${cleanText(String(event.command ?? "command"), 24)} rejected: ${cleanText(String(event.error ?? ""), 200)}` });
+          update();
+          return;
+        case "extension_ui_request":
+          if (DIALOGS.has(String(event.method))) send({ type: "extension_ui_response", id: event.id, cancelled: true });
+          return;
+        case "message_update": {
+          const delta = event.assistantMessageEvent;
+          if (delta?.type === "text_delta" && typeof delta.delta === "string") {
+            run.live = (run.live + delta.delta).slice(-MAX_LIVE_CHARS);
+            run.activity = "writing";
+            const now = Date.now();
+            if (now - liveAt >= LIVE_REPAINT_MS) { liveAt = now; update(); }
+            else if (!liveTimer) {
+              liveTimer = setTimeout(() => { liveTimer = undefined; liveAt = Date.now(); if (!finished) update(); }, LIVE_REPAINT_MS - (now - liveAt));
+              liveTimer.unref?.();
+            }
+          } else if ((delta?.type === "thinking_start" || delta?.type === "thinking_delta") && run.activity !== "thinking") {
+            run.activity = "thinking";
+            update();
+          }
+          return;
+        }
+        case "tool_execution_start": {
+          const name = cleanText(String(event.toolName ?? "tool"), 24) || "tool";
+          const hint = cleanText(toolHint(event.args), 200);
+          const id = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : `call-${run.tools}`;
+          const entry: ToolEntry = { kind: "tool", rev: 0, id, name, hint, args: argsText(event.args), status: "running", output: "", startedAt: Date.now() };
+          const path = toolPath(event.args);
+          run.tools++;
+          run.toolCounts[name] = (run.toolCounts[name] ?? 0) + 1;
+          if (name === "read" && path) addFile(run.filesRead, path);
+          running.set(id, { entry, ...(path ? { path } : {}) });
+          pushEntry(run, entry);
+          run.activity = cleanText(hint ? `${name} ${hint}` : name, 60);
+          update();
+          return;
+        }
+        case "tool_execution_update": {
+          const call = typeof event.toolCallId === "string" ? running.get(event.toolCallId) : undefined;
+          if (!call || !event.partialResult) return;
+          call.entry.output = cleanBlock(textOf(event.partialResult, MAX_ENTRY_TEXT * 2), MAX_ENTRY_TEXT);
+          call.entry.rev++;
+          update();
+          return;
+        }
+        case "tool_execution_end": {
+          const call = typeof event.toolCallId === "string" ? running.get(event.toolCallId) : undefined;
+          if (call) running.delete(event.toolCallId as string);
+          const failed = event.isError === true;
+          const name = call?.entry.name ?? cleanText(String(event.toolName ?? ""), 24);
+          if (call) {
+            call.entry.status = failed ? "error" : "done";
+            call.entry.output = event.result ? cleanBlock(textOf(event.result, MAX_ENTRY_TEXT * 2), MAX_ENTRY_TEXT) : call.entry.output;
+            call.entry.endedAt = Date.now();
+            call.entry.rev++;
+          }
+          if (name === "jar_todo" && !failed) { const todos = childTodos(event.result?.details); if (todos) run.todos = todos; }
+          if ((name === "edit" || name === "write") && !failed && call?.path) {
+            addFile(run.filesEdited, call.path);
+            try { hooks.edited?.(call.path); } catch (error) { console.error("pi-jar: could not track a subagent edit", error); }
+          }
+          run.activity = "thinking";
+          update();
+          return;
+        }
+        case "message_end": {
+          if (event.message?.role !== "assistant") return;
+          run.turns++;
+          run.cost += Number(event.message.usage?.cost?.total) || 0;
+          const text = textOf(event.message).trim();
+          if (text) { run.output = text.slice(0, MAX_OUTPUT_CHARS); pushEntry(run, { kind: "text", rev: 0, text: cleanBlock(text, MAX_ENTRY_TEXT) }); }
+          if (event.message.stopReason === "error" && event.message.errorMessage) run.error = cleanText(String(event.message.errorMessage), 200);
+          run.live = "";
+          run.activity = "thinking";
+          update();
+          return;
+        }
+        case "agent_settled":
+          // Nothing more will run on its own: close stdin so Pi shuts down in order.
+          settled = true;
+          run.activity = "finishing";
+          if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
+          update();
+          return;
       }
     };
+    // Decode as UTF-8 across chunk boundaries, and scan only each new chunk for line ends.
+    child.stdout?.setEncoding?.("utf8");
     child.stdout?.on("data", (chunk) => {
-      buffer += String(chunk);
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const item of lines) line(item);
+      const text = String(chunk);
+      let start = 0;
+      for (let end = text.indexOf("\n", start); end >= 0; end = text.indexOf("\n", start)) {
+        const item = buffer + text.slice(start, end);
+        if (!overflow) line(item.endsWith("\r") ? item.slice(0, -1) : item);
+        buffer = "";
+        overflow = false;
+        start = end + 1;
+      }
+      if (overflow) return;
+      buffer += text.slice(start);
+      if (buffer.length > MAX_LINE_CHARS) { buffer = ""; overflow = true; }
     });
     child.stderr?.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-4000); });
     child.on("error", (error) => finish("failed", error.message));
     child.on("close", (code) => {
-      if (buffer) line(buffer);
-      if (code === 0 && !run.error) finish("done");
-      else finish("failed", run.error ?? (cleanText(stderr, 300) || `exited ${code}`));
+      if (buffer && !overflow) line(buffer);
+      if (code === 0 && settled && !run.error) finish("done");
+      else finish("failed", run.error ?? (cleanText(stderr, 300) || (settled ? `exited ${code}` : `exited ${code} before finishing`)));
     });
+    steer = (text) => {
+      const message = cleanBlock(text, MAX_STEER_CHARS);
+      if (finished || settled || !message || !send({ type: "steer", message })) return false;
+      pushEntry(run, { kind: "steer", rev: 0, text: message });
+      run.steered++;
+      update();
+      return true;
+    };
+    if (!send({ id: "prompt", type: "prompt", message: prompt })) { stop(); finish("failed", "could not send the task to the subagent"); }
   });
+  return { done, steer: (text) => steer(text) };
 }
 
 const isActive = (state: DelegateState) => state === "queued" || state === "working";
 
-export interface SubagentRecord { key: string; batch: number; run: DelegateRun; stop(): void }
+export interface SubagentRecord { key: string; batch: number; run: DelegateRun; stop(): void; steer(text: string): boolean }
 
 /**
  * Live subagents for the activity view. Tool details are saved in the session, so they stay small;
- * the transcript and the per-run stop handle live only here, for this process.
+ * the transcript and the per-run stop and steer handles live only here, for this process.
  */
 export class DelegateRegistry {
   private entries = new Map<string, { record: SubagentRecord; finished?: number }>();
@@ -221,6 +461,11 @@ export class DelegateRegistry {
     record.stop();
     this.notify();
     return true;
+  }
+  /** Send a steering message to one working run; false when it cannot take one. */
+  steer(key: string, text: string): boolean {
+    const record = this.entries.get(key)?.record;
+    return !!record && record.run.state === "working" && record.steer(text);
   }
   running(): number {
     let count = 0;
@@ -260,6 +505,33 @@ export class DelegateRegistry {
   }
 }
 
+/** `12s` / `3m 4s`. */
+export const duration = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; };
+const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+const fileList = (files: readonly string[], limit: number) => files.slice(0, limit).join(", ") + (files.length > limit ? ` (+${files.length - limit} more)` : "");
+const todoLine = (todo: Todo) => `${todo.parentId ? "    " : "  "}${todo.status === "completed" ? "[x]" : todo.status === "in_progress" ? "[~]" : "[ ]"} ${todo.title}`;
+
+/** What the parent agent reads back: the run's facts (time, tools, files, tasks, failures), then its own report. */
+export function runReport(run: DelegateRun, now = Date.now()): string {
+  const counts = Object.entries(run.toolCounts).sort((a, b) => b[1] - a[1]).map(([name, count]) => `${name}×${count}`).join(", ");
+  const facts = [
+    run.startedAt !== undefined ? `took ${duration((run.endedAt ?? now) - run.startedAt)}` : "never started",
+    plural(run.turns, "turn"), `${plural(run.tools, "tool call")}${counts ? ` (${counts})` : ""}`,
+    run.cost ? `$${run.cost.toFixed(3)}` : "", run.steered ? `steered ${run.steered}×` : ""
+  ].filter(Boolean).join(" · ");
+  const lines = [`## [${run.index}] ${run.name} (${run.role}${run.model ? " · " + run.model : ""}) — ${run.state}${run.error ? ": " + run.error : ""}`, `- ${facts}`];
+  if (run.filesEdited.length) lines.push(`- files edited: ${fileList(run.filesEdited, 20)}`);
+  if (run.filesRead.length) lines.push(`- files read: ${fileList(run.filesRead, 12)}`);
+  if (run.todos.length) {
+    const leaves = leafTodos(run.todos);
+    lines.push(`- tasks: ${leaves.filter((todo) => todo.done).length}/${leaves.length} done`, ...run.todos.map(todoLine));
+  }
+  const failures = run.transcript.filter((entry): entry is ToolEntry => entry.kind === "tool" && entry.status === "error").slice(-5);
+  if (failures.length) lines.push(`- failed tool calls: ${failures.map((entry) => cleanText(`${entry.name} ${entry.hint}`, 80)).join("; ")}`);
+  lines.push("", run.output || "(no report)");
+  return lines.join("\n");
+}
+
 const Parameters = Type.Object({
   tasks: Type.Array(Type.Object({
     task: Type.String({ description: "A complete, self-contained instruction: the subagent sees nothing else." }),
@@ -271,19 +543,28 @@ const Parameters = Type.Object({
 
 const glyph = (state: DelegateState) => state === "done" ? "✔" : state === "failed" ? "✖" : state === "working" ? "●" : "○";
 const color = (state: DelegateState) => state === "done" ? "success" : state === "failed" ? "error" : state === "working" ? "accent" : "dim";
+type RunDetails = Omit<DelegateRun, "transcript" | "live">;
 
-/** jar_delegate. Every run is listed live in `registry` (with its transcript and a stop handle) for the activity view. */
-export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, registry: DelegateRegistry, spawnProcess?: Spawn): void {
+export interface DelegateOptions {
+  spawnProcess?: Spawn;
+  /** The parent's change tracker: subagent edits join /diff. */
+  changes?: () => ChangeTracker | undefined;
+  /** Called after a subagent edit was added to the tracker. */
+  changed?: () => void;
+}
+
+/** jar_delegate. Every run is listed live in `registry` (with its transcript and stop/steer handles) for the activity view. */
+export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, registry: DelegateRegistry, options: DelegateOptions = {}): void {
   if (process.env[CHILD_ENV] || typeof (pi as ExtensionAPI & { registerTool?: unknown }).registerTool !== "function") return;
   let batch = 0;
   pi.registerTool({
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Run up to ${MAX_DELEGATES} subagents in parallel, each an isolated Pi with a fresh context, on a pi-jar model role (default "task"). Read-only unless write is true. Returns each subagent's report.`,
+    description: `Run up to ${MAX_DELEGATES} subagents in parallel, each an isolated Pi with a fresh context, on a pi-jar model role (default "task"). Read-only unless write is true. Returns each subagent's report with its tool calls, files read/edited, task checklist and failures.`,
     promptSnippet: "Use jar_delegate to fan out independent investigations to parallel subagents.",
     promptGuidelines: [
       "Use jar_delegate for independent, parallelizable investigation (scouting several areas, reviewing, researching); give each task complete context because subagents see nothing else.",
-      "Keep delegated work read-only by default. Only set write for clearly separated edits that cannot conflict; never have two subagents edit the same files."
+      "Keep delegated work read-only by default. Only set write for clearly separated edits that cannot conflict; never have two subagents edit the same files. Files they edit join /diff for review."
     ],
     parameters: Parameters,
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -294,16 +575,34 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const resolved = roles.resolve(role) ?? roles.resolve("default");
         const model = resolved ? `${resolved.provider}/${resolved.model}` : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
         return { index: index + 1, name: cleanText(item.name ?? `agent ${index + 1}`, 24), task: item.task, role, ...(model ? { model } : {}),
-          state: "queued", tools: 0, turns: 0, cost: 0, output: "", log: [] };
+          state: "queued", tools: 0, turns: 0, cost: 0, output: "", toolCounts: {}, filesRead: [], filesEdited: [], todos: [], steered: 0, transcript: [], live: "" };
       });
       // One controller per run: aborting the tool call stops them all, the activity view stops one.
       const controllers = runs.map(() => new AbortController());
       const abortAll = () => { for (const controller of controllers) controller.abort(); };
       if (signal?.aborted) abortAll(); else signal?.addEventListener("abort", abortAll, { once: true });
+      let handles: DelegateHandle[] = [];
       // The key doubles as the role-status id, so views can tell our own teammates from other extensions'.
-      const records: SubagentRecord[] = runs.map((run, index) => ({ key: `delegate-${id}-${run.index}`, batch: id, run, stop: () => controllers[index]!.abort(STOP_REASON) }));
+      const records: SubagentRecord[] = runs.map((run, index) => ({
+        key: `delegate-${id}-${run.index}`, batch: id, run,
+        stop: () => controllers[index]!.abort(STOP_REASON),
+        steer: (text) => handles[index]?.steer(text) ?? false
+      }));
       registry.add(...records);
       const thinking = (role: string) => (roles.resolve(role) ?? roles.resolve("default"))?.thinking;
+      // Editing subagents record each file's content before their first change here, for the parent's /diff.
+      let baselines: string | undefined;
+      if (write && options.changes) {
+        try { baselines = mkdtempSync(join(tmpdir(), "pi-jar-baselines-")); }
+        catch (error) { console.error("pi-jar: subagent edits will not join /diff", error); }
+      }
+      const edited = (path: string) => {
+        const tracker = options.changes?.();
+        if (!baselines || !tracker) return;
+        const absolute = isAbsolute(path) ? resolve(path) : resolve(ctx.cwd, path);
+        const baseline = readChildBaseline(baselines, absolute);
+        if (baseline !== undefined && tracker.adopt(absolute, baseline)) options.changed?.();
+      };
       // Live teammates: the welcome TEAM row and the footer read this public status contract.
       const publish = () => {
         if (!ctx.hasUI) return;
@@ -315,15 +614,17 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           } catch { /* status is decoration */ }
         }
       };
-      // Details are persisted with the session: never the transcript, which the registry holds instead.
-      const details = (includeOutput = true) => ({ runs: runs.map(({ log: _log, ...run }) => includeOutput ? run : { ...run, output: "" }), write });
+      // Details are persisted with the session: never the transcript or live text, which the registry holds instead.
+      const details = (includeOutput = true) => ({
+        runs: runs.map(({ transcript: _transcript, live: _live, ...run }): RunDetails => includeOutput ? run : { ...run, output: "" }), write
+      });
       let updateTimer: ReturnType<typeof setTimeout> | undefined;
       let lastUpdateAt = 0;
       const emitUpdate = () => {
         updateTimer = undefined;
         lastUpdateAt = Date.now();
         publish();
-        onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}`).join("\n") }], details: details(false) });
+        onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}${run.activity ? ` · ${run.activity}` : ""}`).join("\n") }], details: details(false) });
       };
       const update = () => {
         registry.notify();
@@ -341,17 +642,20 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       };
       const refresh = setInterval(publish, STATUS_REFRESH_MS);
       refresh.unref?.();
+      const hooks: DelegateHooks = { ...(baselines ? { env: { [CHILD_BASELINE_ENV]: baselines } } : {}), edited };
       try {
-        await Promise.all(runs.map((run, index) => runDelegate(run, delegateArgs(run.task, run.model, thinking(run.role), write), ctx.cwd, controllers[index]!.signal, update, spawnProcess)));
+        handles = runs.map((run, index) => startDelegate(run, delegateArgs(run.model, thinking(run.role), write), delegatePrompt(run.task, write),
+          ctx.cwd, controllers[index]!.signal, update, options.spawnProcess, hooks));
+        await Promise.all(handles.map((handle) => handle.done));
       } finally {
         clearInterval(refresh);
         signal?.removeEventListener("abort", abortAll);
+        if (baselines) rmSync(baselines, { recursive: true, force: true });
         for (const run of runs) if (run.state !== "done") { run.state = "failed"; run.endedAt ??= Date.now(); }
         registry.notify();
         flushUpdate();
       }
-      const report = runs.map((run) => `## [${run.index}] ${run.name} (${run.role}${run.model ? " · " + run.model : ""}) — ${run.state}${run.error ? ": " + run.error : ""}\n${run.output || "(no report)"}`).join("\n\n");
-      return { content: [{ type: "text", text: report }], details: details() };
+      return { content: [{ type: "text", text: runs.map((run) => runReport(run)).join("\n\n") }], details: details() };
     },
     renderCall(args, theme) {
       const count = Array.isArray(args.tasks) ? args.tasks.length : 0;
@@ -359,9 +663,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         + theme.fg("dim", args.write ? " · can edit" : " · read-only"), 0, 0);
     },
     renderResult(result, { expanded }, theme) {
-      const runs = (result.details as { runs?: Array<Omit<DelegateRun, "log">> } | undefined)?.runs ?? [];
+      const runs = (result.details as { runs?: Array<Partial<RunDetails> & Pick<DelegateRun, "name" | "state" | "role">> } | undefined)?.runs ?? [];
       const rows = runs.map((run) => {
-        const meta = [run.role, run.activity, run.tools ? `${run.tools} tools` : "", run.cost ? `$${run.cost.toFixed(3)}` : "", run.error].filter(Boolean).join(" · ");
+        const leaves = leafTodos(run.todos ?? []);
+        const meta = [run.role, run.activity, run.tools ? `${run.tools} tools` : "", leaves.length ? `${leaves.filter((todo) => todo.done).length}/${leaves.length} tasks` : "",
+          run.filesEdited?.length ? `${run.filesEdited.length} edited` : "", run.cost ? `$${run.cost.toFixed(3)}` : "", run.error].filter(Boolean).join(" · ");
         let row = theme.fg(color(run.state) as never, `  ${glyph(run.state)} ${run.name}`) + theme.fg("dim", " · " + meta);
         if (expanded && run.output) row += "\n" + run.output.split("\n").map((line) => theme.fg("muted", "    " + line)).join("\n");
         return row;

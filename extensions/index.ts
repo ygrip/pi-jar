@@ -30,7 +30,7 @@ import { createDemoRoles } from "../src/roles.ts";
 import { ACTIVE_STATES, cleanText, collectStatuses, type JarRole } from "../src/status.ts";
 import { manageTasks } from "../src/tasks-ui.ts";
 import { registerTaskTool, todoRow } from "../src/task-tool.ts";
-import { TASK_ENTRY, TodoStore } from "../src/tasks.ts";
+import { TASK_ENTRY, TodoStore, todoProgress, todoTotals } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
 import { ChangeTracker } from "../src/changes.ts";
@@ -62,6 +62,17 @@ export default function piJar(pi: ExtensionAPI): void {
   let enabled = visualSettings.ui;
   let disposeFooter: (() => void) | undefined;
   let footerTui: { requestRender(): void } | undefined;
+  /** Footer facts that walk the session to compute; refreshed on the events that change them, never per frame. */
+  let footerContext = "ctx ?";
+  let footerSessionName: string | undefined;
+  const sampleFooter = (ctx: ExtensionContext) => {
+    try {
+      const usage = ctx.getContextUsage();
+      footerContext = usage?.percent == null || !Number.isFinite(usage.percent) ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
+    } catch { footerContext = "ctx ?"; }
+    try { footerSessionName = ctx.sessionManager?.getSessionName?.(); } catch { footerSessionName = undefined; }
+    footerTui?.requestRender();
+  };
   let quotaCache: QuotaCache | undefined;
   let cost = 0;
   let welcomeInterval: ReturnType<typeof setInterval> | undefined;
@@ -93,27 +104,37 @@ export default function piJar(pi: ExtensionAPI): void {
     if (open.length) todosAcknowledged = false;
     const visible = enabled && items.length > 0 && (open.length > 0 || !todosAcknowledged);
     try {
-      ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (_tui, theme) => ({
-        invalidate() {},
-        render(width: number) {
-          const colors = ctx.ui.theme ?? theme;
-          const all = todos?.all() ?? [];
-          const done = all.filter((item) => item.done).length;
-          // Show a window of up to 8 rows that keeps the running (or next open) task in view.
-          const focus = Math.max(0, all.findIndex((item) => item.status === "in_progress") >= 0
-            ? all.findIndex((item) => item.status === "in_progress") : all.findIndex((item) => !item.done));
-          const start = Math.max(0, Math.min(focus - 2, all.length - 8));
-          const shown = all.slice(start, start + 8);
-          const rows = [
-            colors.fg("accent", "Tasks") + colors.fg("dim", ` · ${done}/${all.length} done` + (done === all.length ? " · all complete" : "") + " · /jar tasks"),
-            ...(start > 0 ? [colors.fg("dim", `  … ${start} earlier`)] : []),
-            ...shown.map((item) => todoRow(item, (color, text) => colors.fg(color, text), (text) => colors.bold(text))),
-            ...(start + shown.length < all.length ? [colors.fg("dim", `  … +${all.length - start - shown.length} more`)] : [])
-          ];
-          // Pi inserts a spacer before widgets, but not between widgets and the composer.
-          return [...rows.map((line) => truncateToWidth(line, Math.max(0, width))), truncateToWidth(" ", Math.max(0, width))];
-        }
-      }));
+      // Rows are rebuilt only when the list changes (every change reinstalls the widget), the width or the theme.
+      ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (_tui, theme) => {
+        let memo: { width: number; sample: string; lines: string[] } | undefined;
+        return {
+          invalidate() { memo = undefined; },
+          render(width: number) {
+            const colors = ctx.ui.theme ?? theme;
+            const sample = colors.fg("accent", "·") + colors.fg("dim", "·");
+            if (memo && memo.width === width && memo.sample === sample) return memo.lines.slice();
+            const all = todos?.all() ?? [];
+            const { done, total } = todoTotals(all);
+            const parents = new Set<string>();
+            for (const item of all) if (item.parentId) parents.add(item.parentId);
+            // Show a window of up to 8 rows that keeps the running leaf (or next open one) in view.
+            const running = all.findIndex((item) => item.status === "in_progress" && !parents.has(item.id));
+            const focus = Math.max(0, running >= 0 ? running : all.findIndex((item) => !item.done && !parents.has(item.id)));
+            const start = Math.max(0, Math.min(focus - 2, all.length - 8));
+            const shown = all.slice(start, start + 8);
+            const rows = [
+              colors.fg("accent", "Tasks") + colors.fg("dim", ` · ${done}/${total} done` + (done === total ? " · all complete" : "") + " · /jar tasks"),
+              ...(start > 0 ? [colors.fg("dim", `  … ${start} earlier`)] : []),
+              ...shown.map((item) => todoRow(item, (color, text) => colors.fg(color, text), (text) => colors.bold(text), parents.has(item.id) ? todoProgress(all, item.id) : undefined)),
+              ...(start + shown.length < all.length ? [colors.fg("dim", `  … +${all.length - start - shown.length} more`)] : [])
+            ];
+            // Pi inserts a spacer before widgets, but not between widgets and the composer.
+            const lines = [...rows.map((line) => truncateToWidth(line, Math.max(0, width))), truncateToWidth(" ", Math.max(0, width))];
+            memo = { width, sample, lines };
+            return lines.slice();
+          }
+        };
+      });
     } catch { /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
   };
   registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
@@ -207,7 +228,7 @@ export default function piJar(pi: ExtensionAPI): void {
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
   modelRoles.register((ctx) => openRolesUi(ctx, modelRoles));
-  registerDelegate(pi, modelRoles, subagents);
+  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges });
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
   planMode.register();
   const goalLoop = new GoalLoop(pi, {
@@ -420,8 +441,6 @@ export default function piJar(pi: ExtensionAPI): void {
         let expiryAt: number | undefined;
         let memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
         let memorySampledAt = 0;
-        let context = "ctx ?";
-        let contextSampledAt = 0;
         let disposed = false;
         let hits: FooterHit[] = [];
         let pressed: { target: FooterTarget; at: number } | undefined;
@@ -473,13 +492,8 @@ export default function piJar(pi: ExtensionAPI): void {
               // Do not schedule cosmetic footer repaints. Role state still updates on Pi's native
               // stream/tool renders, which keeps long transcripts responsive.
               const active = animations && footerSettings.roles && roles.some((role) => ACTIVE_STATES.has(role.state));
-              if (active) frame++;
-              if (now - contextSampledAt >= 1000) {
-                const usage = ctx.getContextUsage();
-                context = usage?.percent == null || !Number.isFinite(usage.percent)
-                  ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
-                contextSampledAt = now;
-              }
+              // Role glyphs advance with time, not with the render rate, so the footer memo still hits between steps.
+              if (active) frame = Math.floor(now / 250);
               if (now - memorySampledAt >= 5000) {
                 memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
                 memorySampledAt = now;
@@ -487,9 +501,9 @@ export default function piJar(pi: ExtensionAPI): void {
               const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, now) : undefined;
               const layout = renderFooterLayout({
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
-                sessionName: ctx.sessionManager?.getSessionName?.(),
+                sessionName: footerSessionName,
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
-                context, goal: goalLoop.progress(), chips: footerChips(), activity: footerActivity(now),
+                context: footerContext, goal: goalLoop.progress(), chips: footerChips(), activity: footerActivity(now),
                 memory, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
@@ -609,6 +623,7 @@ export default function piJar(pi: ExtensionAPI): void {
     quotaDisabledByUser = false;
     updateCost(ctx);
     installUi(ctx);
+    sampleFooter(ctx);
     composer.setMascot(visualSettings.mascot);
     if (visualSettings.composer && enabled) composer.enable(ctx);
     suggest.sync();
@@ -649,6 +664,8 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("agent_start", (_event, ctx) => { dismissWelcome(ctx); working.start(); applyWorking(ctx); });
   pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
   pi.on("message_end", (event, ctx) => {
+    // Every message (user, assistant, tool result) moves the context window.
+    sampleFooter(ctx);
     if (event.message.role === "assistant") {
       working.reportOutputTokens(event.message.usage?.output ?? 0);
       addMessageCost(event.message);
@@ -671,11 +688,12 @@ export default function piJar(pi: ExtensionAPI): void {
     restoreGoal(ctx, branch);
     updateCost(ctx);
     composer.refreshSession(ctx);
+    sampleFooter(ctx);
   });
-  pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); });
-  pi.on("model_select", (_event, _ctx) => footerTui?.requestRender());
+  pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); sampleFooter(ctx); });
+  pi.on("model_select", (_event, ctx) => sampleFooter(ctx));
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
-  pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); footerTui?.requestRender(); });
+  pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); sampleFooter(ctx); });
   pi.on("session_shutdown", (_event, ctx) => {
     clearSessionBranchCache(ctx);
     stopWelcome(ctx);

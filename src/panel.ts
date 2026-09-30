@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { RowCache } from "./row-cache.ts";
 
 export type Paint = (color: string, text: string) => string;
 export interface PanelTab { name: string; render(width: number, fg: Paint): string[] }
@@ -13,6 +14,8 @@ export async function openPanel(ctx: ExtensionContext, tabs: readonly PanelTab[]
     let body: string[] = [];
     let rows = 10;
     let tabHits: { start: number; end: number }[] = [];
+    // The panel repaints on every Pi render while open; its body rows rarely change between frames.
+    const framed = new RowCache();
     const fg: Paint = (color, text) => theme.fg(color as never, text);
     const move = (delta: number) => { scroll = Math.max(0, Math.min(Math.max(0, body.length - rows), scroll + delta)); };
     const select = (index: number) => { tab = (index + tabs.length) % tabs.length; scroll = 0; };
@@ -40,7 +43,8 @@ export async function openPanel(ctx: ExtensionContext, tabs: readonly PanelTab[]
         rows = Math.max(4, (process.stdout.rows ?? 24) - 6);
         body = tabs[tab]!.render(inner, fg);
         scroll = Math.min(scroll, Math.max(0, body.length - rows));
-        const line = (text: string) => fg("dim", "│ ") + truncateToWidth(text, inner) + " ".repeat(Math.max(0, inner - visibleWidth(truncateToWidth(text, inner)))) + fg("dim", " │");
+        framed.begin(`${inner}\0${fg("dim", "│")}`);
+        const line = (text: string) => framed.get(text, (row) => fg("dim", "│ ") + truncateToWidth(row, inner, "...", true) + fg("dim", " │"));
         tabHits = [];
         // Every tab label is name + 2 cells wide ("[name]" or " name "), separated by one space.
         let x = 2;
