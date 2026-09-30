@@ -8,7 +8,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Container, Text } from "@earendil-works/pi-tui";
 
 type ToolResult = { content: Array<{ type: string; text?: string }>; details?: unknown };
 
@@ -67,6 +67,61 @@ function boundedLineCount(text: string, limit = SUMMARY_SCAN_CHARS): { lines: nu
 
 const expandHint = " · [ expand ] Ctrl+O";
 
+/** Streaming arguments arrive partially: a field can be missing or not yet a string. */
+const str = (value: unknown): string => typeof value === "string" ? value : "";
+
+type CardTheme = { bg(color: "toolPendingBg" | "toolErrorBg" | "toolSuccessBg", text: string): string };
+interface CardContext { state?: { compactCard?: Box }; isPartial?: boolean; isError?: boolean; lastComponent?: unknown }
+/**
+ * Pi's edit tool renders its own framing (`renderShell: "self"`) so its expanded diff can own the
+ * background. Collapsed, pi-jar draws the same padded, state-colored box Pi gives read/write, with the
+ * call line and result summary in one card; the result renderer then contributes nothing.
+ */
+function compactCard(theme: CardTheme, context: CardContext, header: Text): Box | Text {
+  if (!context.state) return header;
+  const card = context.state.compactCard ??= new Box(1, 1);
+  const color = context.isPartial !== false ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg";
+  card.setBgFn((text) => theme.bg(color, text));
+  card.clear();
+  card.addChild(header);
+  return card;
+}
+function intoCard(context: CardContext, line: Text): Container | Text {
+  const card = context.state?.compactCard;
+  if (!card) return line;
+  card.addChild(line);
+  const empty = context.lastComponent instanceof Container && !(context.lastComponent instanceof Box) ? context.lastComponent : new Container();
+  empty.clear();
+  return empty;
+}
+
+/** One collapsed edit result line: +/− counts from the diff, or the tool's own message. */
+function editSummary(result: ToolResult, isPartial: boolean | undefined, theme: { fg(color: string, text: string): string }): Text {
+  if (isPartial) return new Text(theme.fg("warning", "editing…"), 0, 0);
+  const details = result.details as { diff?: string } | undefined;
+  const diff = details?.diff ?? "";
+  if (!diff) {
+    const text = summarizeResult(result).sample;
+    return new Text(theme.fg(text.startsWith("Error") ? "error" : "success", compactText(text || "applied", 96)), 0, 0);
+  }
+  if (diff.length > DIFF_SCAN_CHARS) return new Text(theme.fg("muted", `large diff${expandHint}`), 0, 0);
+  let counts = diffCountCache.get(details!);
+  if (counts?.diff !== diff) {
+    counts = { diff, additions: 0, removals: 0 };
+    for (let start = 0; start < diff.length;) {
+      const end = diff.indexOf("\n", start);
+      const stop = end < 0 ? diff.length : end;
+      const first = diff[start];
+      if (first === "+" && !diff.startsWith("+++", start)) counts.additions++;
+      else if (first === "-" && !diff.startsWith("---", start)) counts.removals++;
+      start = stop + 1;
+    }
+    diffCountCache.set(details!, counts);
+  }
+  return new Text(theme.fg("success", `+${counts.additions}`) + theme.fg("dim", " / ")
+    + theme.fg("error", `-${counts.removals}`) + theme.fg("dim", expandHint), 0, 0);
+}
+
 /**
  * Whitespace-collapsed, trimmed text cut to `max` characters. Only a bounded prefix is scanned: a call
  * card re-renders on every streamed argument delta, so collapsing a whole heredoc each time was O(n²).
@@ -114,10 +169,10 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     ...read,
     renderCall(args, theme, context) {
       if (context.expanded && read.renderCall) return read.renderCall(args, theme, context);
-      const range = args.offset || args.limit
+      const range = args?.offset || args?.limit
         ? theme.fg("dim", ` · ${args.offset ?? 1}${args.limit ? `+${args.limit}` : ""}`)
         : "";
-      return new Text(theme.fg("toolTitle", theme.bold("read ")) + theme.fg("accent", args.path) + range, 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("read ")) + theme.fg("accent", str(args?.path)) + range, 0, 0);
     },
     renderResult(result, options, theme, context) {
       if (options.expanded && read.renderResult) return read.renderResult(result, options, theme, context);
@@ -135,7 +190,7 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     },
     renderCall(args, theme, context) {
       if (context.expanded && bash.renderCall) return bash.renderCall(args, theme, context);
-      return new Text(theme.fg("toolTitle", theme.bold("$ ")) + theme.fg("accent", compactText(args.command, 88)), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("$ ")) + theme.fg("accent", compactText(str(args?.command), 88)), 0, 0);
     },
     renderResult(result, options, theme, context) {
       if (options.expanded && bash.renderResult) return bash.renderResult(result as Parameters<NonNullable<typeof bash.renderResult>>[0], options, theme, context);
@@ -156,30 +211,12 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     ...edit,
     renderCall(args, theme, context) {
       if (context.expanded && edit.renderCall) return edit.renderCall(args, theme, context);
-      return new Text(theme.fg("toolTitle", theme.bold("edit ")) + theme.fg("accent", args.path), 0, 0);
+      const path = str(args?.path) || str((args as { file_path?: unknown } | undefined)?.file_path);
+      return compactCard(theme, context, new Text(theme.fg("toolTitle", theme.bold("edit ")) + theme.fg("accent", path), 0, 0));
     },
     renderResult(result, options, theme, context) {
       if (options.expanded && edit.renderResult) return edit.renderResult(result, options, theme, context);
-      if (options.isPartial) return new Text(theme.fg("warning", "editing…"), 0, 0);
-      const details = result.details as { diff?: string } | undefined;
-      const diff = details?.diff ?? "";
-      if (!diff) {
-        const summary = summarizeResult(result);
-        const text = summary.sample;
-        return new Text(theme.fg(text.startsWith("Error") ? "error" : "success", compactText(text || "applied", 96)), 0, 0);
-      }
-      if (diff.length > DIFF_SCAN_CHARS) return new Text(theme.fg("muted", `large diff${expandHint}`), 0, 0);
-      let counts = diffCountCache.get(details!);
-      if (counts?.diff !== diff) {
-        counts = { diff, additions: 0, removals: 0 };
-        for (const line of diff.split("\n")) {
-          if (line.startsWith("+") && !line.startsWith("+++")) counts.additions++;
-          else if (line.startsWith("-") && !line.startsWith("---")) counts.removals++;
-        }
-        diffCountCache.set(details!, counts);
-      }
-      return new Text(theme.fg("success", `+${counts.additions}`) + theme.fg("dim", " / ")
-        + theme.fg("error", `-${counts.removals}`) + theme.fg("dim", expandHint), 0, 0);
+      return intoCard(context, editSummary(result, options.isPartial, theme));
     }
   });
 
@@ -187,13 +224,14 @@ export function installCompactBuiltinTools(pi: ExtensionAPI): void {
     ...write,
     renderCall(args, theme, context) {
       if (context.expanded && write.renderCall) return write.renderCall(args, theme, context);
+      const content = str(args?.content);
       let count = args && typeof args === "object" ? writeCountCache.get(args as object) : undefined;
       if (!count) {
-        count = boundedLineCount(args.content);
+        count = boundedLineCount(content);
         if (args && typeof args === "object") writeCountCache.set(args as object, count);
       }
-      return new Text(theme.fg("toolTitle", theme.bold("write ")) + theme.fg("accent", args.path)
-        + theme.fg("dim", ` · ${count.lines}${count.truncated ? "+" : ""} lines`), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("write ")) + theme.fg("accent", str(args?.path))
+        + theme.fg("dim", ` · ${count.lines}${count.truncated ? "+" : ""} line${count.lines === 1 && !count.truncated ? "" : "s"}`), 0, 0);
     },
     renderResult(result, options, theme, context) {
       if (options.expanded && write.renderResult) return write.renderResult(result, options, theme, context);

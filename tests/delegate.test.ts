@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, writeChildBaseline } from "../src/child-baselines.ts";
-import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation, READ_ONLY_TOOLS, registerDelegate, WORKTREE_TOOLS, type DelegateOptions, type DelegateController } from "../src/delegate.ts";
+import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation, READ_ONLY_TOOLS, registerDelegate, WORKTREE_TOOLS, type DelegateOptions, type DelegateController, type SubagentStopReport } from "../src/delegate.ts";
 import { CHILD_WORKTREE_ENV } from "../src/delegate-worktree.ts";
 import { emit, fakeSpawn, say, settle, taskOf, type FakeChild } from "./fake-rpc.ts";
 
@@ -370,7 +370,7 @@ test("moderator can peek, resume, pause, ask and stop the same retained subagent
   assert.equal(record!.run.state, "idle");
 
   const peek = await control.execute("p", { action: "peek" }, undefined, undefined, quiet);
-  assert.match(peek.content[0]!.text, /auth scout · idle[\s\S]*task: inspect auth/);
+  assert.equal(peek.content[0]!.text, `${record!.key} · auth scout · idle\nprogress: no checklist`, "peek is task progress only");
 
   const resumed = await control.execute("r", { action: "resume", agent: record!.key, message: "continue slowly" }, undefined, undefined, quiet);
   assert.match(resumed.content[0]!.text, /Resumed/);
@@ -623,4 +623,111 @@ test("session discard racing a worktree stop never applies private edits", async
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "parent\n");
     assert.equal(existsSync(fake.calls[0]!.cwd!), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/** jar_delegate + jar_subagent on a host that records hooks and wake-up messages. */
+const moderatorHost = (spawn: unknown) => {
+  const registry = new DelegateRegistry();
+  const tools = new Map<string, Tool>();
+  const events = new Map<string, (event: { messages: unknown[] }) => { messages: unknown[] } | undefined>();
+  const sent: Array<{ message: { customType: string; content: string }; options: { triggerTurn?: boolean; deliverAs?: string } }> = [];
+  registerDelegate({
+    registerTool(definition: Tool) { tools.set(definition.name, definition); },
+    on(name: string, handler: never) { events.set(name, handler); },
+    sendMessage(message: { customType: string; content: string }, options: { triggerTurn?: boolean; deliverAs?: string }) { sent.push({ message, options }); }
+  } as never, roles({}), registry, { spawnProcess: spawn as never });
+  return { registry, delegate: tools.get("jar_delegate")!, control: tools.get("jar_subagent")!, events, sent };
+};
+
+test("stale moderator context is pruned on every LLM call while the fleet is retained", async () => {
+  const fake = fakeSpawn((child) => { say(child, "ready"); settle(child); });
+  const host = moderatorHost(fake.spawn);
+  await host.delegate.execute("d", { tasks: [{ task: "inspect" }] }, undefined, undefined, quiet);
+  const messages = [
+    { customType: "pi-jar.moderator-context", content: "old fleet" },
+    { role: "user", content: "normal" },
+    { customType: "pi-jar.moderator-context", content: "new fleet" }
+  ];
+  // Pi re-sends the full persisted history to the context hook before each LLM call.
+  for (let call = 1; call <= 3; call++) {
+    const pruned = host.events.get("context")!({ messages });
+    assert.deepEqual(pruned?.messages.map((item) => (item as { content: string }).content), ["normal", "new fleet"], `call ${call}`);
+  }
+  await host.registry.records()[0]!.stop();
+});
+
+test("a resumed subagent wakes the moderator when its turn ends, so it never polls peek", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fake = fakeSpawn((child, prompt) => { say(child, prompt.includes("Task:") ? "initial report" : "follow-up report"); settle(child); });
+  const host = moderatorHost(fake.spawn);
+  await host.delegate.execute("d", { tasks: [{ task: "inspect", name: "auth scout" }] }, undefined, undefined, quiet);
+  t.mock.timers.tick(1000);
+  assert.equal(host.sent.length, 0, "the initial turn is returned by jar_delegate itself");
+  const [record] = host.registry.records();
+  const resumed = await host.control.execute("r", { action: "resume", agent: record!.key, message: "dig deeper" }, undefined, undefined, quiet);
+  assert.match(resumed.content[0]!.text, /Resumed auth scout/);
+  await tick();
+  assert.equal(record!.run.state, "idle");
+  t.mock.timers.tick(1000);
+  assert.equal(host.sent.length, 1, "one coalesced wake-up");
+  assert.equal(host.sent[0]!.message.customType, "pi-jar.subagent");
+  assert.deepEqual(host.sent[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
+  assert.match(host.sent[0]!.message.content, /auth scout · idle[\s\S]*last: follow-up report/);
+  await host.control.execute("s", { action: "stop", agent: record!.key }, undefined, undefined, quiet);
+  t.mock.timers.tick(1000);
+  assert.equal(host.sent.length, 1, "stopping reports through the tool result, not a wake-up");
+});
+
+test("stop never hangs when a grandchild keeps the child's stdio open after exit", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fake = fakeSpawn((child) => { say(child, "done"); settle(child); });
+  const registry = new DelegateRegistry();
+  const spawn = (command: string, args: string[], options: object) => {
+    const child = fake.spawn(command, args, options) as unknown as FakeChild;
+    const emitEvent = child.emit.bind(child);
+    // An inherited pipe held by a grandchild: the process exits, 'close' never comes.
+    child.emit = (event: string | symbol, ...rest: unknown[]) => event === "close" ? false : emitEvent(event, ...rest);
+    return child as never;
+  };
+  await register(registry, spawn).execute("d", { tasks: [{ task: "one" }] }, undefined, undefined, quiet);
+  const done: { report?: SubagentStopReport } = {};
+  const stopping = registry.stop(registry.records()[0]!.key).then((value) => { done.report = value; });
+  await tick();
+  assert.equal(fake.children[0]!.exitCode, 0);
+  const early = done.report;
+  assert.equal(early, undefined, "still draining stdio");
+  t.mock.timers.tick(2000);
+  await stopping;
+  assert.equal(done.report?.state, "stopped");
+});
+
+test("Esc cancels a jar_subagent call even when the child ignores abort", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fake = fakeSpawn((child, prompt) => {
+    if (prompt.includes("Task:")) { say(child, "ready"); settle(child); return; }
+    emit(child, { type: "message_update", assistantMessageEvent: { type: "thinking_start" } });
+  });
+  const spawn = (command: string, args: string[], options: object) => {
+    const child = fake.spawn(command, args, options) as unknown as FakeChild;
+    const write = child.stdin.write.bind(child.stdin);
+    child.stdin.write = (line: string) => (JSON.parse(line) as { type?: string }).type === "abort" || write(line);
+    return child as never;
+  };
+  const host = moderatorHost(spawn);
+  await host.delegate.execute("d", { tasks: [{ task: "inspect" }] }, undefined, undefined, quiet);
+  const [record] = host.registry.records();
+  await host.control.execute("r", { action: "resume", agent: record!.key, message: "keep going" }, undefined, undefined, quiet);
+  const abort = new AbortController();
+  const pausing = host.control.execute("p", { action: "pause", agent: record!.key }, abort.signal, undefined, quiet);
+  await tick();
+  abort.abort();
+  const cancelled = await pausing;
+  assert.equal(cancelled.isError, true);
+  assert.match(cancelled.content[0]!.text, /Cancelled/);
+  assert.equal(record!.run.state, "working", "the unresponsive child keeps its state");
+  const stopping = host.registry.stop(record!.key);
+  await tick();
+  t.mock.timers.tick(3000);
+  assert.ok(await stopping, "stop resolves by force-stopping the unresponsive child");
+  assert.deepEqual(fake.children[0]!.killed, ["SIGTERM"]);
 });

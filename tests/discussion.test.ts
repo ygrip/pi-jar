@@ -7,6 +7,7 @@ import {
   disposeDiscussionPaper,
   MAX_DISCUSSION_ENTRIES,
   MAX_DISCUSSION_TEXT,
+  MAX_LIST_CHARS,
   registerDiscussionTool
 } from "../src/discussion.ts";
 
@@ -67,5 +68,30 @@ test("discussion answers require a known question id", async () => {
     const result = await tool!.execute("1", { action: "answer", questionId: "missing", text: "nope" });
     assert.equal(result.isError, true);
     assert.match(result.content[0]!.text, /Unknown discussion question/);
+  } finally { disposeDiscussionPaper(file); }
+});
+
+test("list replies stay bounded, reread only newer entries, and read one thread in full", async () => {
+  const file = createDiscussionPaper();
+  let tool: Tool | undefined;
+  try {
+    registerDiscussionTool({ registerTool(definition: Tool) { tool = definition; } } as never, () => file, () => "worker");
+    for (let i = 0; i < 20; i++) await tool!.execute("q" + i, { action: "ask", text: `question ${i} ` + "x".repeat(MAX_DISCUSSION_TEXT) });
+    const listed = (await tool!.execute("l", { action: "list" })).content[0]!.text;
+    assert.ok(listed.length <= MAX_LIST_CHARS + 200, "the reply budget holds however large the paper is");
+    assert.match(listed, /older entries omitted/);
+    assert.match(listed, /\[d20\] Q/, "the newest entries are kept");
+    assert.doesNotMatch(listed, /x{500}/, "listed entries are clipped");
+
+    assert.match((await tool!.execute("s", { action: "list", since: "d20" })).content[0]!.text, /No entries newer than d20/);
+    await tool!.execute("a", { action: "answer", questionId: "d3", text: "answer for three" });
+    const newer = (await tool!.execute("n", { action: "list", since: "d20" })).content[0]!.text;
+    assert.match(newer, /\[d21\] A · worker → d3: answer for three/);
+    assert.doesNotMatch(newer, /\[d20\]/);
+
+    const thread = (await tool!.execute("t", { action: "list", questionId: "d3" })).content[0]!.text;
+    assert.match(thread, new RegExp(`\\[d3\\] Q · worker: question 2 x{${MAX_DISCUSSION_TEXT - 11}}`), "a thread reads its question in full");
+    assert.match(thread, /\[d21\] A/);
+    assert.doesNotMatch(thread, /\[d4\]/);
   } finally { disposeDiscussionPaper(file); }
 });

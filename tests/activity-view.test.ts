@@ -278,7 +278,8 @@ test("mouse picks rows, scrolls with the wheel (pausing follow), passes drags th
   } finally { shell.manager.dispose(); }
 });
 
-test("live sources repaint the view; the elapsed tick runs only while something runs and everything is released on close", async () => {
+test("live sources repaint the view; the elapsed tick runs only while something runs and everything is released on close", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const realSet = globalThis.setInterval;
   const realClear = globalThis.clearInterval;
   const ticks = new Set<unknown>();
@@ -302,13 +303,16 @@ test("live sources repaint the view; the elapsed tick runs only while something 
     assert.equal(created, 1, "renders reuse the tick");
     let renders = view.renders();
     emit(agents.children[0]!, { type: "tool_execution_start", toolCallId: "r1", toolName: "read", args: { path: "src/a.ts" } });
-    assert.ok(view.renders() > renders, "registry changes repaint");
+    assert.equal(view.renders(), renders, "stream bursts coalesce instead of repainting per event");
+    t.mock.timers.tick(100);
+    assert.equal(view.renders(), renders + 1, "registry changes repaint once per burst");
     assert.match(view.text(), /▸ ● read src\/a\.ts/);
     emit(agents.children[0]!, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Looking at the router" } });
     assert.match(view.text(), /✎ writing…[\s\S]*Looking at the router/, "streaming text shows before the message ends");
     renders = view.renders();
     shell.manager.onChange!();
     assert.equal(chained, 1, "the previous shell listener still runs");
+    t.mock.timers.tick(100);
     assert.ok(view.renders() > renders, "shell changes repaint");
     view.input("\x1b");
     await view.opened;
@@ -316,6 +320,7 @@ test("live sources repaint the view; the elapsed tick runs only while something 
     assert.equal(shell.manager.onChange, previous, "the shell listener is restored");
     renders = view.renders();
     emit(agents.children[0]!, { type: "tool_execution_start", toolCallId: "g1", toolName: "grep", args: { pattern: "x" } });
+    t.mock.timers.tick(100);
     assert.equal(view.renders(), renders, "the registry listener is gone");
     const again = mount({ subagents: agents.registry, shells: shell.manager });
     again.lines();

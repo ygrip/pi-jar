@@ -36,7 +36,7 @@ import { TASK_ENTRY, TodoStore, todoProgress, todoTotals } from "../src/tasks.ts
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
 import { ChangeTracker } from "../src/changes.ts";
-import { CHILD_ENV, DelegateRegistry, registerDelegate, type DelegateRun } from "../src/delegate.ts";
+import { CHILD_ENV, DelegateRegistry, registerDelegate, SUBAGENT_MESSAGE, type DelegateRun } from "../src/delegate.ts";
 import { CHILD_WORKTREE_ENV, workspacePathAllowed } from "../src/delegate-worktree.ts";
 import { createDiscussionPaper, DISCUSSION_FILE_ENV, disposeDiscussionPaper, registerDiscussionTool, SUBAGENT_NAME_ENV } from "../src/discussion.ts";
 import { openActivityView, type ActivityTarget } from "../src/activity-view.ts";
@@ -66,7 +66,7 @@ export default function piJar(pi: ExtensionAPI): void {
     // and handlers are disabled. Remove only parent automation, not task/user context.
     const parentAutomation = new Set([
       "pi-jar.goal-context", "pi-jar.goal-continuation",
-      "pi-jar.plan-context", "pi-jar.plan-reminder", "pi-jar.moderator-context"
+      "pi-jar.plan-context", "pi-jar.plan-reminder", "pi-jar.moderator-context", SUBAGENT_MESSAGE
     ]);
     pi.on("context", (event) => {
       const messages = event.messages.filter((message) => !parentAutomation.has((message as { customType?: string }).customType ?? ""));
@@ -198,8 +198,19 @@ export default function piJar(pi: ExtensionAPI): void {
   };
   /** Footer indicators owned by pi-jar; live subagents and shells get their own rows. */
   const footerChips = () => changeCount ? [withIcon("changes", `${changeCount} file${changeCount === 1 ? "" : "s"} · /diff`)] : [];
+  /**
+   * Subagent streams and shell output change the footer many times a second; every requested frame
+   * re-renders the whole transcript, so background sources repaint it at most this often.
+   */
+  const BACKGROUND_REPAINT_MS = 250;
+  let backgroundRepaint: NodeJS.Timeout | undefined;
+  const repaintFooterSoon = () => {
+    if (backgroundRepaint) return;
+    backgroundRepaint = setTimeout(() => { backgroundRepaint = undefined; footerTui?.requestRender(); }, BACKGROUND_REPAINT_MS);
+    backgroundRepaint.unref?.();
+  };
   const subagents = new DelegateRegistry();
-  subagents.subscribe(() => footerTui?.requestRender());
+  subagents.subscribe(repaintFooterSoon);
   /** Finished work stays visible briefly so a quick run is not a flicker. */
   const ACTIVITY_LINGER_MS = 5000;
   const subagentState = (run: DelegateRun): ActivityState => run.state === "working" ? "running" : run.state === "queued" ? "queued"
@@ -653,7 +664,7 @@ export default function piJar(pi: ExtensionAPI): void {
       discussionFile = createDiscussionPaper();
     }
     shells = new ShellManager(onShellEvent);
-    shells.onChange = () => footerTui?.requestRender();
+    shells.onChange = repaintFooterSoon;
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
     let branch: readonly unknown[] = [];
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }

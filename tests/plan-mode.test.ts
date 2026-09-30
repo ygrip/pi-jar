@@ -203,8 +203,11 @@ test("plan context pruning keeps only newest transient messages", async () => {
     { customType: "pi-jar.plan-context", content: "new context" },
     { customType: "pi-jar.plan-reminder", content: "new reminder" }
   ];
-  const active = await context({ messages }, h.ctx);
-  assert.deepEqual(active.messages.map((item: any) => item.content), ["normal", "new context", "new reminder"]);
+  // Pi re-sends the full persisted history before each LLM call; every call must prune it.
+  for (let call = 1; call <= 2; call++) {
+    const active = await context({ messages }, h.ctx);
+    assert.deepEqual(active?.messages.map((item: { content: string }) => item.content), ["normal", "new context", "new reminder"], `call ${call}`);
+  }
   await h.commands.get("plan")!("stop", h.ctx);
   const inactive = await context({ messages }, h.ctx);
   assert.deepEqual(inactive.messages.map((item: any) => item.content), ["normal"]);

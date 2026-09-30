@@ -34,9 +34,17 @@ export const WORKTREE_TOOLS = ["read", "edit", "write", "grep", "find", "ls", "j
 export type DelegateMode = "scout" | "fork" | "worktree";
 type DelegateExecutionMode = DelegateMode | "direct";
 const MAX_OUTPUT_CHARS = 12_000;
-const TIMEOUT_MS = 20 * 60_000;
+/** A working child that sends no RPC event for this long is treated as hung and killed. */
+const IDLE_TIMEOUT_MS = 10 * 60_000;
+/** After exit, grandchildren (MCP servers, shells) can hold the stdio pipes open; stop waiting for close. */
+const CLOSE_GRACE_MS = 2000;
+/** How long pause waits for the child to settle after abort before reporting that it has not paused yet. */
+const PAUSE_GRACE_MS = 15_000;
 const STATUS_REFRESH_MS = 20_000;
 const LIVE_UPDATE_MS = 1000;
+/** Visible message that wakes the moderator when a resumed subagent's turn ends. */
+export const SUBAGENT_MESSAGE = "pi-jar.subagent";
+const NOTIFY_COALESCE_MS = 250;
 const MAX_EVENT_TEXT = 16_000;
 /** Transcript entries kept per run; tool output and text are clipped so a run stays well under 2 MiB. */
 const MAX_ENTRIES = 200;
@@ -180,6 +188,28 @@ export function delegatePrompt(task: string, write: boolean, mode: DelegateExecu
 /** Text without terminal controls, keeping line breaks; clipped to `limit`. */
 const cleanBlock = (value: string, limit: number): string => value.slice(0, limit * 2)
   .replace(ANSI, "").replace(/\r\n?/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, limit);
+
+/** Whether `promise` settles within `ms`; the timer never keeps the process alive. */
+const settlesWithin = (promise: Promise<unknown>, ms: number): Promise<boolean> => {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise.then(() => true, () => true), timeout]).finally(() => clearTimeout(timer));
+};
+
+/** `promise`, or undefined as soon as `signal` aborts; the work itself continues in the background. */
+const untilAborted = <T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T | undefined> => {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.resolve(undefined);
+  let onAbort = () => {};
+  const aborted = new Promise<undefined>((resolve) => {
+    onAbort = () => resolve(undefined);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([promise, aborted]).finally(() => signal.removeEventListener("abort", onAbort));
+};
 
 const textOf = (message: { content?: unknown }, limit = MAX_EVENT_TEXT): string => {
   if (typeof message.content === "string") return message.content.slice(0, limit);
@@ -335,6 +365,9 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     let askBusy = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let turnTimer: ReturnType<typeof setTimeout> | undefined;
+    let closeTimer: NodeJS.Timeout | undefined;
+    /** Last RPC event while working; the watchdog only fires after this much silence. */
+    let activityAt = Date.now();
     const settleWaiters: Array<() => void> = [];
 
     const send = (command: object): boolean => {
@@ -349,13 +382,29 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       killTimer ??= setTimeout(() => { if (alive) child.kill("SIGKILL"); }, 3000);
       killTimer.unref?.();
     };
-    const armTurnTimer = () => {
+    const armTurnTimer = (delay = IDLE_TIMEOUT_MS) => {
       clearTurnTimer();
       turnTimer = setTimeout(() => {
+        turnTimer = undefined;
+        const quiet = Date.now() - activityAt;
+        if (quiet < IDLE_TIMEOUT_MS) { armTurnTimer(IDLE_TIMEOUT_MS - quiet); return; }
         hardStop();
-        finish("failed", "timed out");
-      }, TIMEOUT_MS);
+        finish("failed", `timed out: no activity for ${duration(IDLE_TIMEOUT_MS)}`);
+      }, delay);
       turnTimer.unref?.();
+    };
+    /** High-frequency stream events repaint at most every LIVE_REPAINT_MS. */
+    const repaint = () => {
+      const now = Date.now();
+      if (now - liveAt >= LIVE_REPAINT_MS) {
+        liveAt = now;
+        if (liveTimer) { clearTimeout(liveTimer); liveTimer = undefined; }
+        update();
+        return;
+      }
+      if (liveTimer) return;
+      liveTimer = setTimeout(() => { liveTimer = undefined; liveAt = Date.now(); if (!finished) update(); }, LIVE_REPAINT_MS - (now - liveAt));
+      liveTimer.unref?.();
     };
     const resolveSettled = () => {
       for (const waiter of settleWaiters.splice(0)) waiter();
@@ -375,7 +424,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       for (const entry of run.transcript) if (entry.kind === "tool" && entry.status === "running") { entry.status = "error"; entry.endedAt = Date.now(); entry.rev++; }
       run.endedAt = Date.now();
       resolveSettled();
-      if (!alive && !firstResolved) { firstResolved = true; resolveFirst(); }
+      if (!firstResolved) { firstResolved = true; resolveFirst(); }
       update();
     };
     const abort = () => { hardStop(); finish("failed", signal?.reason === STOP_REASON ? "stopped" : "aborted"); };
@@ -396,6 +445,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       run.resumes++;
       run.endedAt = undefined;
       run.activity = "resuming";
+      activityAt = Date.now();
       armTurnTimer();
       update();
       return true;
@@ -408,6 +458,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       try { parsed = JSON.parse(raw); } catch { return; }
       if (!parsed || typeof parsed !== "object") return;
       const event = parsed as ChildEvent;
+      activityAt = Date.now();
       switch (event.type) {
         case "response":
           if (event.success !== false) return;
@@ -423,14 +474,9 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
           if (delta?.type === "text_delta" && typeof delta.delta === "string") {
             run.live = (run.live + delta.delta).slice(-MAX_LIVE_CHARS);
             run.activity = "writing";
-            const now = Date.now();
-            if (now - liveAt >= LIVE_REPAINT_MS) { liveAt = now; update(); }
-            else if (!liveTimer) {
-              liveTimer = setTimeout(() => { liveTimer = undefined; liveAt = Date.now(); if (!finished) update(); }, LIVE_REPAINT_MS - (now - liveAt));
-              liveTimer.unref?.();
-            }
-          } else if (delta?.type === "thinking_start" || delta?.type === "thinking_delta") {
-            if (run.activity !== "thinking") run.activity = "thinking";
+            repaint();
+          } else if ((delta?.type === "thinking_start" || delta?.type === "thinking_delta") && run.activity !== "thinking") {
+            run.activity = "thinking";
             update();
           }
           return;
@@ -455,7 +501,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
           if (!call || !event.partialResult) return;
           call.entry.output = cleanBlock(textOf(event.partialResult, MAX_ENTRY_TEXT * 2), MAX_ENTRY_TEXT);
           call.entry.rev++;
-          update();
+          repaint();
           return;
         }
         case "tool_execution_end": {
@@ -534,16 +580,36 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       if (buffer.length > MAX_LINE_CHARS) { buffer = ""; overflow = true; }
     });
     child.stderr?.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-4000); });
+    let closedOnce = false;
     const exited = (code: number | null) => {
+      if (closedOnce) return;
+      closedOnce = true;
       alive = false;
       clearTimeout(killTimer);
+      clearTimeout(closeTimer);
       if (buffer && !overflow) { line(buffer); buffer = ""; }
       if (code === 0 && settled && !run.error) finish("done");
       else finish("failed", run.error ?? (cleanText(stderr, 300) || (settled ? `exited ${code}` : `exited ${code} before finishing`)));
       if (!firstResolved) { firstResolved = true; resolveFirst(); }
       resolveClosed();
     };
-    child.on("error", (error) => { hardStop(); finish("failed", error.message); });
+    // A grandchild that inherited stdout/stderr keeps them open after the child is gone, and 'close'
+    // then never fires; stop waiting after a short drain so stop/shutdown can never hang on it.
+    const drainThenClose = (code: number | null) => {
+      if (closedOnce || closeTimer) return;
+      closeTimer = setTimeout(() => {
+        child.stdout?.destroy?.();
+        child.stderr?.destroy?.();
+        exited(code);
+      }, CLOSE_GRACE_MS);
+      closeTimer.unref?.();
+    };
+    child.on("error", (error) => {
+      hardStop();
+      finish("failed", error.message);
+      // A process that never spawned has no exit event to wait for.
+      if (child.pid === undefined) { alive = false; drainThenClose(null); }
+    });
     // Exit retires control immediately, but finalization waits for close so stdio drains first.
     child.once("exit", (code) => {
       alive = false;
@@ -556,6 +622,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         resolveSettled();
         update();
       }
+      drainThenClose(code);
     });
     child.once("close", exited);
 
@@ -585,7 +652,8 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         return false;
       }
       update();
-      await waiting;
+      // A child that ignores abort must not hang the moderator; it still pauses when it settles.
+      if (!await settlesWithin(waiting, PAUSE_GRACE_MS)) return false;
       return (run.state as DelegateState) === "paused";
     };
     resume = (text) => {
@@ -603,13 +671,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         if (run.state === "working" && !await pause()) return undefined;
         const instruction = "Moderator BTW: answer only this question in one compact paragraph. Preserve your assigned task scope for the next resume. Question: " + question;
         if (!beginPrompt(instruction, wasPaused)) return undefined;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const timeout = new Promise<boolean>((resolve) => {
-          timer = setTimeout(() => resolve(false), 2 * 60_000);
-          timer.unref?.();
-        });
-        const answered = await Promise.race([waitSettled().then(() => true), timeout]);
-        clearTimeout(timer);
+        const answered = await settlesWithin(waitSettled(), 2 * 60_000);
         if (!answered) { void pause(); return undefined; }
         return !finished && !run.error ? run.output || undefined : undefined;
       } finally { askBusy = false; }
@@ -623,13 +685,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         const waiting = waitSettled();
         send({ type: "clear_queue" });
         if (send({ type: "abort" })) {
-          let settledInTime = false;
-          const grace = new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, 3000);
-            timer.unref?.();
-          });
-          await Promise.race([waiting.then(() => { settledInTime = true; }), grace]);
-          if (!settledInTime && !finished) hardStop();
+          if (!await settlesWithin(waiting, 3000) && !finished) hardStop();
         } else hardStop();
       }
       if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
@@ -867,6 +923,8 @@ export interface DelegateController {
   list(): SubagentReport[];
   spawnScout(task: string, signal?: AbortSignal): Promise<SubagentReport>;
   resumeScout(id: string, prompt: string, signal?: AbortSignal): Promise<SubagentReport>;
+  /** Retire an agent the orchestration spawned for itself, releasing its pool slot. */
+  stop(id: string): Promise<void>;
 }
 
 export interface DelegateOptions {
@@ -902,22 +960,24 @@ const controlReport = (report: SubagentStopReport): string => [
   report.last ? `last: ${cleanBlock(report.last, 1200)}` : ""
 ].filter(Boolean).join("\n");
 
+/** Peek is task progress only, read from memory: no git, transcript or report reads. */
 const peekRecord = (record: SubagentRecord): string => {
   const run = record.run;
   const leaves = leafTodos(run.todos);
-  const done = leaves.filter((todo) => todo.status === "completed").length;
-  const changed = (() => { try { return record.changed(); } catch { return run.filesEdited; } })();
-  const remaining = remainingTasks(run);
+  const open = leaves.filter((todo) => todo.status !== "completed");
+  const current = open.find((todo) => todo.status === "in_progress");
+  const next = open.filter((todo) => todo !== current).slice(0, 3).map((todo) => cleanText(todo.title, 80));
+  const more = open.length - (current ? 1 : 0) - next.length;
   return [
-    `${record.key} · ${run.name} · ${run.state} · ${run.role}${run.model ? " · " + run.model : ""} · ${run.mode}`,
-    `task: ${cleanText(run.task, 300)}`,
-    `progress: ${leaves.length ? done + "/" + leaves.length + " tasks" : "no checklist"}${run.activity ? " · " + cleanText(run.activity, 100) : ""}`,
-    `changed: ${changed.length ? fileList(changed, 12) : "none"}`,
-    remaining.length ? `remaining: ${remaining.join("; ")}` : "remaining: none explicitly tracked",
-    run.workspace ? `workspace: ${run.workspace}` : "",
-    run.output ? `last: ${cleanBlock(run.output, 700)}` : ""
+    `${record.key} · ${run.name} · ${run.state}`,
+    `progress: ${leaves.length ? `${leaves.length - open.length}/${leaves.length} tasks` : "no checklist"}`
+      + (current ? ` · now: ${cleanText(current.title, 80)}` : "") + (run.activity ? ` · ${cleanText(run.activity, 60)}` : ""),
+    next.length ? `next: ${next.join("; ")}${more > 0 ? ` (+${more} more)` : ""}` : ""
   ].filter(Boolean).join("\n");
 };
+/** The wake-up after a resumed turn: its progress plus the bounded report the turn produced. */
+const settledRecord = (record: SubagentRecord): string =>
+  peekRecord(record) + (record.run.output ? `\nlast: ${cleanBlock(record.run.output, 1200)}` : "");
 
 /** jar_delegate plus jar_subagent: the parent remains a moderator while retained workers do the work. */
 export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, registry: DelegateRegistry, options: DelegateOptions = {}): void {
@@ -936,25 +996,23 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     return resolved ? [resolved] : [];
   };
 
-  let moderatorContextDirty = true;
-  registry.subscribe(() => { moderatorContextDirty = true; });
   pi.on?.("before_agent_start", (_event, ctx) => {
     controllerContext = ctx;
-    moderatorContextDirty = true;
     const retained = registry.records().filter((record) => isRetained(record.run.state));
     if (!retained.length) return;
     const fleet = retained.map((record) =>
       `- ${record.key} · ${record.run.name} · ${record.run.state} · ${record.run.role}: ${cleanText(record.run.task, 140)}`).join("\n");
     return { message: { customType: "pi-jar.moderator-context", display: false, content: [
       "[PI-JAR MODERATOR MODE]",
-      "You are the coordinator while retained subagents do delegated work. Decompose and route work, inspect with jar_subagent peek, steer only to correct direction, use ask for terse BTW questions, and use jar_discuss for structured cross-agent Q/A.",
+      "You are the coordinator while retained subagents do delegated work. Decompose and route work, steer only to correct direction, use ask for terse BTW questions, and use jar_discuss for structured cross-agent Q/A.",
+      "A resumed agent wakes you with a pi-jar.subagent message when its turn ends: do not poll jar_subagent peek while you wait; end your turn or do other work.",
       "Do not duplicate work already owned by a retained subagent. Stop completed workers to obtain their handoff and reconcile worktree changes into /diff. Synthesize the final answer from their reports and evidence.",
       "Retained fleet:",
       fleet
     ].join("\n") } };
   });
+  // Context rewrites apply to one LLM call only, so the stale copies must be pruned on every call.
   pi.on?.("context", (event) => {
-    if (!moderatorContextDirty) return;
     const active = registry.retained() > 0;
     let latest = -1;
     let prune = false;
@@ -963,10 +1021,39 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       if (!active || latest >= 0) prune = true;
       else latest = index;
     }
-    moderatorContextDirty = false;
     if (!prune) return;
     return { messages: event.messages.filter((raw, index) =>
       (raw as { customType?: string }).customType !== "pi-jar.moderator-context" || (active && index === latest)) };
+  });
+
+  /** Agents resumed by the moderator: their next settled turn wakes it, so it never has to poll peek. */
+  const watched = new Map<string, SubagentRecord>();
+  const settledQueue = new Map<string, SubagentRecord>();
+  let notifyTimer: NodeJS.Timeout | undefined;
+  const flushSettled = () => {
+    notifyTimer = undefined;
+    const records = [...settledQueue.values()].filter((record) => registry.get(record.key) === record);
+    settledQueue.clear();
+    if (!records.length) return;
+    try {
+      pi.sendMessage?.({
+        customType: SUBAGENT_MESSAGE, display: true, details: { keys: records.map((record) => record.key) },
+        content: ["[PI-JAR SUBAGENT] A resumed turn ended. Review, then resume, ask or stop:", ...records.map(settledRecord)].join("\n\n")
+      }, { triggerTurn: true, deliverAs: "followUp" });
+    } catch (error) { console.error("pi-jar: could not deliver a subagent event", error); }
+  };
+  registry.subscribe(() => {
+    if (!watched.size) return;
+    for (const [key, record] of watched) {
+      if (registry.get(key) !== record) { watched.delete(key); continue; }
+      if (isRunning(record.run.state)) continue;
+      watched.delete(key);
+      if (record.run.state !== "stopped") settledQueue.set(key, record);
+    }
+    if (settledQueue.size && !notifyTimer) {
+      notifyTimer = setTimeout(flushSettled, NOTIFY_COALESCE_MS);
+      notifyTimer.unref?.();
+    }
   });
 
   const delegateTool: ToolDefinition<typeof Parameters> = {
@@ -1033,13 +1120,18 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         if (baseline !== undefined && tracker.adopt(absolute, baseline)) options.changed?.();
       };
 
+      /** Last footer state per record: child streams fire many updates, the status changes rarely. */
+      const published = new Map<string, string>();
       const publish = () => {
         if (!ctx.hasUI) return;
         for (const { key, run } of records) {
+          const state = run.state === "done" || run.state === "failed" || run.state === "stopped" ? ""
+            : run.state === "queued" || run.state === "paused" ? "waiting" : run.state === "idle" ? "idle" : "working";
+          if (published.get(key) === state) continue;
+          published.set(key, state);
           try {
-            ctx.ui.setStatus(`${ROLE_PREFIX}${key}`, run.state === "done" || run.state === "failed" || run.state === "stopped" ? undefined : JSON.stringify({
-              name: run.name, label: run.name.slice(0, 12),
-              state: run.state === "queued" || run.state === "paused" ? "waiting" : run.state === "idle" ? "idle" : "working",
+            ctx.ui.setStatus(`${ROLE_PREFIX}${key}`, !state ? undefined : JSON.stringify({
+              name: run.name, label: run.name.slice(0, 12), state,
               task: cleanText(run.task, 60), expiresAt: Date.now() + 24 * 60 * 60_000
             }));
           } catch { /* status is decoration */ }
@@ -1285,6 +1377,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   });
   options.onController?.({
     list: () => registry.records().map(snapshot),
+    async stop(id) { await registry.stop(id); },
     async spawnScout(task, signal) {
       if (!controllerContext) throw new Error("Delegate controller has no active session context");
       if (signal?.aborted) throw new Error("Scout launch aborted");
@@ -1324,10 +1417,10 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   pi.registerTool({
     name: "jar_subagent",
     label: "subagent",
-    description: "Moderator control for retained subagents: peek high-level progress, steer a working agent, ask a brief BTW question, pause without losing context, resume the same agent, or stop it and receive a progress/change/remaining-work handoff. Stopping a worktree agent safely applies reviewable changes to the parent.",
+    description: "Moderator control for retained subagents: peek task progress, steer a working agent, ask a brief BTW question, pause without losing context, resume the same agent, or stop it and receive a progress/change/remaining-work handoff. Stopping a worktree agent safely applies reviewable changes to the parent.",
     promptSnippet: "Use jar_subagent as the moderator control plane. Prefer peek over rereading transcripts; reuse paused/idle agents with resume; stop finished workers to reconcile their work.",
     promptGuidelines: [
-      "Use peek periodically instead of polling constantly. It returns task progress, current activity, changed files, remaining checklist items and last report.",
+      "peek returns only task progress (done/total, the in-progress task, activity, the next few open tasks). Do not poll it: after resume, a pi-jar.subagent message wakes you (or queues for your current run) with that progress plus the turn's report when the agent's turn ends; stop returns changed files and the full handoff.",
       "Use steer to correct direction while an agent is working. Use ask for a short BTW question; it waits for the agent's next compact answer.",
       "Pause when an agent should stop spending tokens but keep its context/workspace. Resume the same agent later instead of spawning a replacement.",
       "Stop when an agent is no longer needed. Stop aborts any active turn, retires the process, reports progress/workspace/changes/remaining work, and reconciles safe worktree changes into /diff."
@@ -1340,8 +1433,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       agent: Type.Optional(Type.String({ description: "Subagent key or unique name. Omit only for peek to show all retained agents." })),
       message: Type.Optional(Type.String({ description: "Direction, BTW question, or resume instruction." }))
     }),
-    async execute(_id, params) {
-      const result = await (async () => {
+    async execute(_id, params, signal) {
+      const work = (async () => {
       if (params.action === "peek") {
         const targets = params.agent ? [registry.resolve(params.agent)].filter((item): item is SubagentRecord => !!item)
           : registry.records().filter((record) => isRetained(record.run.state));
@@ -1356,6 +1449,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         if (!message) return { content: [{ type: "text", text: "steer requires message." }], isError: true };
         return { content: [{ type: "text", text: registry.steer(record.key, message) ? "Steered " + record.run.name + "." : "Subagent is not currently working; use resume instead." }] };
       }
+      // The moderator is handling this agent directly now; its settle no longer needs a wake-up.
+      if (params.action !== "resume") watched.delete(record.key);
       if (params.action === "ask") {
         const message = cleanBlock(params.message ?? "", MAX_STEER_CHARS);
         if (!message) return { content: [{ type: "text", text: "ask requires message." }], isError: true };
@@ -1364,17 +1459,24 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       }
       if (params.action === "pause") {
         const paused = await registry.pause(record.key);
-        return { content: [{ type: "text", text: paused ? "Paused " + record.run.name + "; context and workspace are retained." : "Could not pause " + record.run.name + "." }] };
+        const text = paused ? "Paused " + record.run.name + "; context and workspace are retained."
+          : record.run.state === "working" ? record.run.name + " has not settled yet; it pauses when its current turn ends."
+          : "Could not pause " + record.run.name + ".";
+        return { content: [{ type: "text", text }] };
       }
       if (params.action === "resume") {
         const resumed = registry.resume(record.key, params.message);
-        return { content: [{ type: "text", text: resumed ? "Resumed " + record.run.name + "." : record.run.name + " is not idle or paused." }] };
+        if (resumed) watched.set(record.key, record);
+        return { content: [{ type: "text", text: resumed ? "Resumed " + record.run.name + ". You will be woken when its turn ends; do not poll peek." : record.run.name + " is not idle or paused." }] };
       }
       const report = await registry.stop(record.key);
       if (!report) return { content: [{ type: "text", text: "Subagent is already retired: " + record.run.name }] };
       return { content: [{ type: "text", text: controlReport(report) }], details: report };
       })();
-      return { ...result, content: result.content.map((part) => ({ ...part, type: "text" as const })), details: result.details };
+      // Pi waits on a tool until it resolves, so Esc must never be stuck behind a child that ignores abort.
+      const result = await untilAborted(work, signal)
+        ?? { content: [{ type: "text", text: "Cancelled; the subagent keeps its state. Check it with peek." }], isError: true };
+      return { ...result, content: result.content.map((part) => ({ ...part, type: "text" as const })), details: "details" in result ? result.details : undefined };
     }
   });
 }

@@ -88,6 +88,24 @@ test("goal command starts the loop; edits are blocked until a task is open", asy
   assert.match(injected.message.content, /ACTIVE GOAL[\s\S]*Ship the hello command[\s\S]*\[ \] Register command/);
 });
 
+test("stale goal prompts are pruned on every LLM call of a run, not only the first", async () => {
+  const h = harness();
+  await h.commands.get("goal")!("Ship it", h.ctx);
+  const context = h.events.get("context")!;
+  const messages = [
+    { customType: "pi-jar.goal-context", content: "old context" },
+    { customType: "pi-jar.goal-continuation", content: "old round" },
+    { role: "user", content: "normal" },
+    { customType: "pi-jar.goal-context", content: "new context" },
+    { customType: "pi-jar.goal-continuation", content: "new round" }
+  ];
+  // Pi re-sends the full persisted history to the context hook before each LLM call.
+  for (let call = 1; call <= 3; call++) {
+    const pruned = await context({ messages }, h.ctx);
+    assert.deepEqual(pruned?.messages.map((item: { content: string }) => item.content), ["normal", "new context", "new round"], `call ${call}`);
+  }
+});
+
 test("goal mutation guard blocks worktree finalization, not stopping read-only or unknown agents", async () => {
   const h = harness(3, (agent) => ({ worker: "worktree", reviewer: "fork", scout: "scout" } as Record<string, string>)[agent]);
   await h.commands.get("goal")!("Ship it", h.ctx);

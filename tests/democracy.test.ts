@@ -13,6 +13,7 @@ const ballot = (agent: string, option: string) => ({ agent, option, rationale: "
 
 function fakeController(choices: (string | Error)[], existing: SubagentReport[] = []) {
   const calls: string[] = [];
+  const stopped: string[] = [];
   let index = 0;
   const answer = async (task: string, id: string) => {
     calls.push(id);
@@ -23,8 +24,9 @@ function fakeController(choices: (string | Error)[], existing: SubagentReport[] 
     return report(id, 'JAR_BALLOT ' + JSON.stringify({ round: template.round, option: choice, rationale: "evidence supports " + choice }));
   };
   const controller: DelegateController = { list: () => existing,
-    spawnScout: (task) => answer(task, "new-" + (index + 1)), resumeScout: (id, task) => answer(task, id) };
-  return { controller, calls };
+    spawnScout: (task) => answer(task, "new-" + (index + 1)), resumeScout: (id, task) => answer(task, id),
+    stop: async (id) => { stopped.push(id); } };
+  return { controller, calls, stopped };
 }
 
 test("democracy rejects routine decisions, missing persistence evidence and duplicate options/nominations", () => {
@@ -57,13 +59,33 @@ test("ballots reject malformed, stale, duplicated, errored or unknown choices", 
 });
 
 test("orchestration reuses relevant fresh scouts, spawns remaining voters and records failures without guessing", async () => {
-  const { controller, calls } = fakeController(["a", "a", "b", new Error("provider unavailable")], [report()]);
+  const { controller, calls, stopped } = fakeController(["a", "a", "b", new Error("provider unavailable")], [report()]);
   const result = await conductDemocracy(controller, { ...request, agents: ["s1"] }, 4);
   assert.equal(calls[0], "s1");
   assert.equal(calls.length, 4);
   assert.equal(result.ballots.length, 3);
   assert.equal(result.failures.length, 1);
   assert.equal(result.winner, undefined, "2 of 4 invited is not a majority");
+  assert.deepEqual(stopped.sort(), result.ballots.map((ballot) => ballot.agent).filter((id) => id !== "s1").sort(),
+    "voters spawned for the round are retired so they never hold pool slots; the nominated scout stays");
+});
+
+test("a ballot deadline turns hung voters into recorded failures instead of an endless round", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { controller } = fakeController(["a", "a"]);
+  const answered = controller.spawnScout;
+  let spawned = 0;
+  controller.spawnScout = (task, signal) => ++spawned <= 2 ? answered(task, signal)
+    : new Promise((_resolve, reject) => signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+  const round = conductDemocracy(controller, { ...request, voters: 3 }, 4, undefined, 1000);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(1000);
+  const result = await round;
+  assert.equal(result.ballots.length, 2);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0]!.reason, /deadline/);
+  assert.equal(result.winner, "a", "two of three valid ballots is a strict majority");
 });
 
 test("cap, busy/non-scout nominees and aborted calls reject before spawning", async () => {

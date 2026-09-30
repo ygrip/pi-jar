@@ -281,6 +281,37 @@ test("default Pi tools keep native metadata while collapsed cards stay brief", (
   assert.match(hugeEdit, /large diff/);
 });
 
+test("a collapsed edit draws one padded, state-colored card like read/write, and streaming args never break cards", () => {
+  const definitions: any[] = [];
+  installCompactBuiltinTools({ registerTool(definition: unknown) { definitions.push(definition); } } as never);
+  const tool = (name: string) => definitions.find((item) => item.name === name)!;
+  const colors = { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (color: string, text: string) => `<${color}>${text}` };
+  const edit = tool("edit");
+  assert.equal(edit.renderShell, "self", "the expanded native diff keeps owning its framing");
+  // Pi renders the call, then the result, into one self-rendered container with shared state.
+  const state = {};
+  const frame = (isPartial: boolean, result?: object) => {
+    const context = { state, expanded: false, isPartial, isError: false, argsComplete: true };
+    const call = edit.renderCall({ path: "src/a.ts", edits: [] }, colors, context);
+    const rest = result ? edit.renderResult(result, { expanded: false, isPartial }, colors, context) : undefined;
+    return [...call.render(40), ...(rest?.render(40) ?? [])];
+  };
+  const pending = frame(true);
+  assert.ok(pending.every((line) => line.startsWith("<toolPendingBg>")), "pending card uses Pi's pending background");
+  assert.equal(pending.length, 3, "padding above and below the call line, as read/write get");
+  const done = frame(false, { content: [{ type: "text", text: "ok" }], details: { diff: "@@\n-old\n+new\n+more" } });
+  assert.equal(done.length, 4, "call line and summary share one card; the result adds no rows of its own");
+  assert.ok(done.every((line) => line.startsWith("<toolSuccessBg>")));
+  assert.match(done.join("\n"), /edit src\/a\.ts[\s\S]*\+2 \/ -1/);
+
+  // Mid-stream argument objects miss fields; cards render instead of throwing into Pi's fallback.
+  for (const name of ["read", "bash", "edit", "write"]) {
+    const text = tool(name).renderCall({}, colors, { expanded: false }).render(60).join("\n");
+    assert.doesNotMatch(text, /undefined/, `${name} with partial args`);
+  }
+  assert.match(tool("write").renderCall({ path: "a.ts" }, colors, { expanded: false }).render(60).join("\n"), /write a\.ts · 0 lines/);
+});
+
 test("rounded input fits, shows the ember face and exposes a human session label", () => {
   const paint = (text: string) => `\x1b[36m${text}\x1b[0m`;
   const lines = ["────", "draft", "────"];

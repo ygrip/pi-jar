@@ -275,13 +275,22 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
     const fg: Fg = (color, text) => theme.fg(color as never, text);
     const shells = sources.shells;
     const previous = shells?.onChange;
-    const unsubscribe = sources.subagents.subscribe(() => tui.requestRender());
-    if (shells) shells.onChange = () => { previous?.(); tui.requestRender(); };
+    // Live streams notify far faster than a transcript view needs to repaint; ~10 frames a second reads as live.
+    let repaint: NodeJS.Timeout | undefined;
+    const repaintSoon = () => {
+      if (repaint || closed) return;
+      repaint = setTimeout(() => { repaint = undefined; if (!closed) tui.requestRender(); }, 100);
+      repaint.unref?.();
+    };
+    const unsubscribe = sources.subagents.subscribe(repaintSoon);
+    if (shells) shells.onChange = () => { previous?.(); repaintSoon(); };
     const cleanup = () => {
       if (closed) return;
       closed = true;
       clearInterval(timer);
       timer = undefined;
+      clearTimeout(repaint);
+      repaint = undefined;
       unsubscribe();
       if (shells) shells.onChange = previous;
     };
