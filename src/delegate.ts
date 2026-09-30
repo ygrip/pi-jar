@@ -314,6 +314,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     let finished = false;
     let settled = false;
     let pauseRequested = false;
+    let assistantOpen = false;
     let turnTimer: ReturnType<typeof setTimeout> | undefined;
     const settleWaiters: Array<() => void> = [];
     const messageWaiters: Array<{ after: number; resolve(value: string | undefined): void; timer: ReturnType<typeof setTimeout> }> = [];
@@ -401,6 +402,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         case "message_update": {
           const delta = event.assistantMessageEvent;
           if (delta?.type === "text_delta" && typeof delta.delta === "string") {
+            assistantOpen = true;
             run.live = (run.live + delta.delta).slice(-MAX_LIVE_CHARS);
             run.activity = "writing";
             const now = Date.now();
@@ -409,8 +411,9 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
               liveTimer = setTimeout(() => { liveTimer = undefined; liveAt = Date.now(); if (!finished) update(); }, LIVE_REPAINT_MS - (now - liveAt));
               liveTimer.unref?.();
             }
-          } else if ((delta?.type === "thinking_start" || delta?.type === "thinking_delta") && run.activity !== "thinking") {
-            run.activity = "thinking";
+          } else if (delta?.type === "thinking_start" || delta?.type === "thinking_delta") {
+            assistantOpen = true;
+            if (run.activity !== "thinking") run.activity = "thinking";
             update();
           }
           return;
@@ -460,6 +463,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         }
         case "message_end": {
           if (event.message?.role !== "assistant") return;
+          assistantOpen = false;
           run.turns++;
           run.cost += Number(event.message.usage?.cost?.total) || 0;
           const text = textOf(event.message).trim();
@@ -545,7 +549,13 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       run.activity = "pausing";
       const waiting = waitSettled();
       send({ type: "clear_queue" });
-      if (!send({ type: "abort" })) return false;
+      if (!send({ type: "abort" })) {
+        pauseRequested = false;
+        run.pauses = Math.max(0, run.pauses - 1);
+        run.activity = "thinking";
+        update();
+        return false;
+      }
       update();
       await waiting;
       return run.state === "paused";
@@ -558,7 +568,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     ask = async (text) => {
       const question = cleanBlock(text, MAX_STEER_CHARS);
       if (!question || finished) return undefined;
-      const after = run.turns;
+      const after = run.turns + (assistantOpen ? 1 : 0);
       const answer = new Promise<string | undefined>((resolve) => {
         const timer = setTimeout(() => {
           const index = messageWaiters.findIndex((item) => item.resolve === resolve);
@@ -584,8 +594,8 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       if (run.state === "working") {
         const waiting = waitSettled();
         send({ type: "clear_queue" });
-        send({ type: "abort" });
-        await waiting;
+        if (send({ type: "abort" })) await waiting;
+        else { hardStop(); await closed; return; }
       }
       if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
       const killer = setTimeout(() => { if (child.exitCode === null) hardStop(); }, 3000);
