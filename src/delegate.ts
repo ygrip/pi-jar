@@ -10,6 +10,7 @@ import { CHILD_BASELINE_ENV, readChildBaseline } from "./child-baselines.ts";
 import type { ModelRoleManager } from "./model-roles.ts";
 import { cleanText, ROLE_PREFIX } from "./status.ts";
 import type { Todo } from "./tasks.ts";
+import { DISCUSSION_FILE_ENV, SUBAGENT_KEY_ENV, SUBAGENT_NAME_ENV } from "./discussion.ts";
 import {
   applyDelegateWorktree,
   CHILD_WORKTREE_ENV,
@@ -24,9 +25,9 @@ export const DELEGATE_TOOL = "jar_delegate";
 export const CHILD_ENV = "PI_JAR_CHILD";
 export const MAX_DELEGATES = 4;
 /** Read-only subagents also keep jar_todo so their checklist shows in the activity view. */
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "jar_todo"] as const;
+export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "jar_todo", "jar_discuss"] as const;
 /** Writable worktree children deliberately have no shell: edits stay inside path-guarded file tools. */
-export const WORKTREE_TOOLS = ["read", "edit", "write", "grep", "find", "ls", "jar_todo"] as const;
+export const WORKTREE_TOOLS = ["read", "edit", "write", "grep", "find", "ls", "jar_todo", "jar_discuss"] as const;
 export type DelegateMode = "scout" | "fork" | "worktree";
 type DelegateExecutionMode = DelegateMode | "direct";
 const MAX_OUTPUT_CHARS = 12_000;
@@ -56,7 +57,7 @@ const HINT_KEYS = ["command", "path", "file_path", "pattern", "query", "url"] as
 const DIALOGS = new Set(["select", "confirm", "input", "editor"]);
 const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 
-export type DelegateState = "queued" | "working" | "done" | "failed";
+export type DelegateState = "queued" | "working" | "idle" | "paused" | "done" | "failed";
 export type ToolStatus = "running" | "done" | "error";
 /** One transcript row; `rev` changes whenever the entry does, so views can cache their rendering. */
 export type TranscriptEntry =
@@ -86,6 +87,8 @@ export interface DelegateRun {
   filesEdited: string[];
   /** Worktree changes successfully copied back into the parent workspace. */
   appliedFiles: string[];
+  pauses: number;
+  resumes: number;
   /** Kept only when isolated changes could not safely be applied automatically. */
   workspace?: string;
   /** The subagent's own jar_todo checklist, mirrored from its tool results. */
