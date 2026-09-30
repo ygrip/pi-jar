@@ -480,6 +480,12 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
         case "agent_settled": {
           settled = true;
           clearTurnTimer();
+          for (const call of running.values()) {
+            call.entry.status = "error";
+            call.entry.endedAt = Date.now();
+            call.entry.rev++;
+          }
+          running.clear();
           run.live = "";
           run.activity = undefined;
           run.endedAt = Date.now();
