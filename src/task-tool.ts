@@ -236,8 +236,11 @@ export function registerTaskTool(
       if (!count) return new Text(theme.fg("dim", "No tracked tasks."), 0, 0);
       const known = new Map((details?.progress ?? []).map((value) => [value.id, value]));
       const shown = details?.display ? displayItems : expanded ? items : items.slice(0, 8);
-      let text = theme.fg("dim", `${totals.done}/${totals.total} done${details?.current ? " · now: " + details.current : ""}`);
-      for (const item of shown) text += "\n" + todoRow(item, (color, value) => theme.fg(color, value), (value) => theme.bold(value), known.get(item.id) ?? todoProgress(items, item.id));
+      let text = details?.display ? "" : theme.fg("dim", `${totals.done}/${totals.total} done${details?.current ? " · now: " + details.current : ""}`);
+      for (const item of shown) {
+        const row = todoRow(item, (color, value) => theme.fg(color, value), (value) => theme.bold(value), known.get(item.id) ?? todoProgress(items, item.id));
+        text += (text ? "\n" : "") + row;
+      }
       if (!details?.display && (details?.truncated || shown.length < count)) text += "\n" + theme.fg("dim", `  … +${Math.max(0, count - shown.length)} more · /jar tasks`);
       return new Text(text, 0, 0);
     }
