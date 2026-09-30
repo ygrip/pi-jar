@@ -146,7 +146,7 @@ export function delegateArgs(model: string | undefined, thinking: string | undef
 /** The subagent's prompt: its rules, how to report back, then the task. */
 export function delegatePrompt(task: string, write: boolean, mode: DelegateExecutionMode = write ? "direct" : "scout"): string {
   const rules = mode === "worktree"
-    ? "You inherit the parent conversation but work inside an isolated disposable Git worktree. You may edit only with the provided file tools; shell tools are intentionally unavailable. Stay strictly within the task. Successful non-conflicting changes are copied back to the parent for /diff review."
+    ? "You inherit the parent conversation but work inside an isolated disposable Git worktree. You may edit only with the provided file tools; shell tools are intentionally unavailable. Stay strictly within the task. Your changes remain private across idle/pause/resume and are reconciled into the parent for /diff review only when the moderator stops you."
     : mode === "fork"
       ? "You are a read-only fork of the parent conversation: use the inherited context, investigate, and report without modifying files."
       : write
@@ -784,7 +784,7 @@ const Parameters = Type.Object({
   tasks: Type.Array(Type.Object({
     task: Type.String({ description: "Task instruction. scout sees only this task; fork/worktree also inherit the parent's active conversation branch." }),
     name: Type.Optional(Type.String({ description: "Short label, e.g. \"auth scout\"." })),
-    role: Type.Optional(Type.String({ description: "pi-jar role for the model (default \"task\", falls back to the current model)." })),
+    role: Type.Optional(Type.String({ description: "pi-jar role override. Defaults by mode: scout→scout, fork→reviewer, worktree→worker; then role fallbacks/current model." })),
     mode: Type.Optional(DelegateModeSchema)
   }), { minItems: 1, maxItems: MAX_DELEGATES }),
   mode: Type.Optional(DelegateModeSchema),
