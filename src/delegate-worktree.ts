@@ -169,21 +169,26 @@ export function applyDelegateWorktree(worktree: DelegateWorktree, parentCwd: str
     if (!parentMatchesBaseline(worktree, parentRoot, rel)) {
       throw new Error(`parent changed since delegation started: ${rel}`);
     }
+    const source = resolve(worktree.root, rel);
+    if (!inside(worktree.root, source)) throw new Error("unsafe changed path: " + rel);
+    if (existsSync(source)) {
+      const stat = lstatSync(source);
+      if (stat.isSymbolicLink()) throw new Error("refusing to apply symlink change: " + rel);
+      if (!stat.isFile()) throw new Error("refusing to apply non-file change: " + rel);
+    }
   }
 
   const applied: string[] = [];
   for (const rel of files) {
     const source = resolve(worktree.root, rel);
     const target = resolve(parentRoot, rel);
-    if (!inside(worktree.root, source) || !inside(parentRoot, target)) throw new Error("unsafe changed path: " + rel);
+    if (!inside(parentRoot, target)) throw new Error("unsafe changed path: " + rel);
     tracker?.capture(target);
 
     if (!existsSync(source)) {
       if (existsSync(target)) unlinkSync(target);
     } else {
       const stat = lstatSync(source);
-      if (stat.isSymbolicLink()) throw new Error("refusing to apply symlink change: " + rel);
-      if (!stat.isFile()) throw new Error("refusing to apply non-file change: " + rel);
       mkdirSync(dirname(target), { recursive: true });
       cpSync(source, target, { force: true, dereference: true });
       chmodSync(target, stat.mode & 0o777);
@@ -197,5 +202,10 @@ export function applyDelegateWorktree(worktree: DelegateWorktree, parentCwd: str
 /** Remove a disposable worktree and its dangling snapshot commit reference. */
 export function disposeDelegateWorktree(worktree: DelegateWorktree): void {
   try { gitText(worktree.repoRoot, ["worktree", "remove", "--force", worktree.root]); }
-  finally { rmSync(worktree.tempRoot, { recursive: true, force: true }); }
+  catch {
+    rmSync(worktree.tempRoot, { recursive: true, force: true });
+    try { gitText(worktree.repoRoot, ["worktree", "prune"]); } catch { /* best effort */ }
+    return;
+  }
+  rmSync(worktree.tempRoot, { recursive: true, force: true });
 }
