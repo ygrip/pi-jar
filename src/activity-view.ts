@@ -46,7 +46,8 @@ function collect(sources: ActivitySources): Item[] {
   if (records.length) items.push({ kind: "header", label: withIcon("subagents", "SUBAGENTS") });
   for (const record of records) {
     const { run } = record;
-    const status: Status = run.state === "working" ? "running" : run.state === "queued" ? "pending" : run.state === "done" ? "success" : run.error === "stopped" ? "stopped" : "error";
+    const status: Status = run.state === "working" ? "running" : run.state === "queued" || run.state === "idle" ? "pending"
+      : run.state === "paused" ? "stopped" : run.state === "done" ? "success" : run.error === "stopped" ? "stopped" : "error";
     items.push({ kind: "subagent", id: record.key, status, label: run.name, record });
   }
   const jobs = sources.shells?.summaries() ?? [];
@@ -348,9 +349,12 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
     };
     const stopSelected = () => {
       const item = selected();
-      if (!item || item.kind === "role" || (item.status !== "running" && item.status !== "pending")) return;
+      if (!item || item.kind === "role") return;
+      const subagentLive = item.kind === "subagent" && item.record.run.state !== "done" && item.record.run.state !== "failed";
+      const shellLive = item.kind === "shell" && item.status === "running";
+      if (!subagentLive && !shellLive) return;
       try {
-        if (item.kind === "subagent") sources.subagents.stop(item.id);
+        if (item.kind === "subagent") void sources.subagents.stop(item.id);
         else shells?.kill(item.id);
       } catch (error) { ctx.ui.notify("pi-jar: " + (error instanceof Error ? error.message : String(error)), "error"); }
     };
@@ -445,7 +449,8 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
         // Footer: the two actions, the steering input for subagents, then key hints.
         const actions = optionList(theme, [item?.kind === "shell" ? "Kill the selected shell" : item?.kind === "role" ? "Stop (teammates from other extensions are read-only)" : "Stop the selected subagent",
           "Follow the latest output"], -1, ACTIONS.map((action) => action.key));
-        const stoppable = item?.kind === "subagent" ? item.status === "running" || item.status === "pending" : item?.kind === "shell" && item.status === "running";
+        const stoppable = item?.kind === "subagent" ? item.record.run.state !== "done" && item.record.run.state !== "failed"
+          : item?.kind === "shell" && item.status === "running";
         if (!stoppable) actions[0] = fg("dim", stripTerminalSequences(actions[0]!));
         const footer = [...actions];
         if (subagent) {
