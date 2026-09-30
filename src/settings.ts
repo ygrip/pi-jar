@@ -17,6 +17,8 @@ export interface JarVisualSettings {
   suggestions: boolean;
   /** Automatic implement/audit rounds per user message while a goal is active. */
   goalRounds: number;
+  /** Retained live subagent pool, including idle/paused agents; lowering does not terminate them. */
+  maxSubagents: MaxSubagents;
   /** The jar_advisor second-opinion tool and /advisor. */
   advisor: boolean;
   /** Consult the advisor automatically when the agent repeats a tool call or keeps failing. */
@@ -27,10 +29,15 @@ export interface JarVisualSettings {
 }
 
 export const GOAL_ROUND_CHOICES = [4, 8, 12, 20] as const;
+export const MAX_SUBAGENT_CHOICES = [2, 4, 6, 8, 16] as const;
+export type MaxSubagents = (typeof MAX_SUBAGENT_CHOICES)[number];
+export function isMaxSubagents(value: unknown): value is MaxSubagents {
+  return MAX_SUBAGENT_CHOICES.some((choice) => choice === value);
+}
 
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, advisor: true, advisorGates: true, icons: "unicode", footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 4, advisor: true, advisorGates: true, icons: "unicode", footer: { ...footer } };
 }
 
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
@@ -60,6 +67,7 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     suggestions: typeof value.suggestions === "boolean" ? value.suggestions : fallback.suggestions,
     goalRounds: typeof value.goalRounds === "number" && Number.isInteger(value.goalRounds) && value.goalRounds >= 1 && value.goalRounds <= 50
       ? value.goalRounds : fallback.goalRounds,
+    maxSubagents: isMaxSubagents(value.maxSubagents) ? value.maxSubagents : fallback.maxSubagents,
     advisor: typeof value.advisor === "boolean" ? value.advisor : fallback.advisor,
     advisorGates: typeof value.advisorGates === "boolean" ? value.advisorGates : fallback.advisorGates,
     icons: ICON_SETS.some((set) => set === value.icons) ? value.icons as IconSet : fallback.icons,

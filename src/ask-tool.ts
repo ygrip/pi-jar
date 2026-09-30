@@ -26,13 +26,18 @@ type PickResult = { kind: "answer"; selected: string[] } | { kind: "custom" } | 
 
 const fit = (line: string, width: number) => truncateToWidth(line, Math.max(0, width));
 
-async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index: number, total: number): Promise<PickResult> {
+async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index: number, total: number, signal?: AbortSignal): Promise<PickResult> {
   const options = (question.options ?? []).map((option) => ({
     label: cleanText(option.label, 120),
     description: option.description ? cleanText(option.description, 240) : undefined
   })).filter((option) => !!option.label);
-  if (!ctx.hasUI || ctx.mode !== "tui") return { kind: "cancel" };
-  return ctx.ui.custom<PickResult>((tui, theme, _keys, done) => {
+  if (!ctx.hasUI || ctx.mode !== "tui" || signal?.aborted) return { kind: "cancel" };
+  let abort: (() => void) | undefined;
+  try { return await ctx.ui.custom<PickResult>((tui, theme, _keys, complete) => {
+    const done = (result: PickResult) => { if (abort) signal?.removeEventListener("abort", abort); complete(result); };
+    abort = () => done({ kind: "cancel" });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) queueMicrotask(abort);
     const multi = !!question.multi;
     const allowCustom = question.allowCustom !== false;
     const actions = [
@@ -131,13 +136,13 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
         return lines.map((line) => visibleWidth(line) <= width ? line : fit(line, width));
       }
     };
-  });
+  }); } finally { if (abort) signal?.removeEventListener("abort", abort); }
 }
 
-async function askOne(ctx: ExtensionContext, question: AskQuestion, index: number, total: number): Promise<AskAnswer> {
+export async function askOne(ctx: ExtensionContext, question: AskQuestion, index = 0, total = 1, signal?: AbortSignal): Promise<AskAnswer> {
   const id = cleanText(question.id ?? "q" + String(index + 1), 64) || "q" + String(index + 1);
-  const picked = await pickQuestion(ctx, question, index, total);
-  if (!picked || picked.kind === "cancel") return { id, cancelled: true };
+  const picked = await pickQuestion(ctx, question, index, total, signal);
+  if (signal?.aborted || !picked || picked.kind === "cancel") return { id, cancelled: true };
   if (picked.kind === "custom") {
     const text = await ctx.ui.editor("✎ Your answer · " + cleanText(question.header ?? "Question", 48), "");
     return text?.trim() ? { id, answer: text.trim() } : { id, cancelled: true };

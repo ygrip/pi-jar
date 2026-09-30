@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { FOOTER_FIELDS, type FooterField } from "./footer-settings.ts";
 import { ICON_SETS } from "./icons.ts";
-import { GOAL_ROUND_CHOICES, type JarAccent, type JarVisualSettings } from "./settings.ts";
+import { GOAL_ROUND_CHOICES, MAX_SUBAGENT_CHOICES, type JarAccent, type JarVisualSettings } from "./settings.ts";
 
 const LABELS: Record<FooterField, string> = {
   model: "Model", effort: "Model effort", sessionName: "Session name", cwd: "Working directory",
@@ -35,25 +35,37 @@ export async function openJarSettings(
     let width = 64;
     const accents: JarAccent[] = ["follow", ...availableAccents.filter((name): name is JarAccent =>
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
-    const fields = () => page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 5 : 7;
+    let choosing: "goalRounds" | "maxSubagents" | undefined;
+    const choices = () => choosing === "maxSubagents" ? MAX_SUBAGENT_CHOICES : GOAL_ROUND_CHOICES;
+    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 6 : 7;
+    const finishChoice = () => { selected = choosing === "maxSubagents" ? 3 : 2; choosing = undefined; };
     const piError = (error: unknown) => ctx.ui.notify("Could not change Pi setting: " + (error as Error).message, "error");
-    const pageSize = () => Math.min(fields(), Math.max(4, (process.stdout.rows ?? 24) - 9));
+    const explainPool = () => choosing === "maxSubagents" || (page === "pi" && !choosing && selected === 3);
+    const pageSize = () => Math.min(fields(), Math.max(4, (process.stdout.rows ?? 24) - (explainPool() ? 10 : 9)));
     const firstVisible = () => Math.min(Math.max(0, selected - pageSize() + 1), Math.max(0, fields() - pageSize()));
     const visibleCount = () => Math.min(pageSize(), fields());
     const apply = (index: number) => {
       const state = current();
-      if (page === "footer") {
+      if (choosing) {
+        if (choosing === "maxSubagents") update({ ...state, maxSubagents: MAX_SUBAGENT_CHOICES[index]! });
+        else update({ ...state, goalRounds: GOAL_ROUND_CHOICES[index]! });
+        finishChoice();
+      } else if (page === "footer") {
         const field = FOOTER_FIELDS[index];
         if (field) update({ ...state, footer: { ...state.footer, [field]: !state.footer[field] } });
       } else if (page === "pi") {
         if (index === 0 && pi) { try { pi.setFullscreen(!pi.get().fullscreen); ctx.ui.notify("Pi TUI mode saved; restart Pi to apply", "info"); } catch (error) { piError(error); } }
         else if (index === 1 && pi) { try { pi.setCopyOnSelect(!pi.get().copyOnSelect); } catch (error) { piError(error); } }
         else if (index === 2) {
-          const at = GOAL_ROUND_CHOICES.indexOf(state.goalRounds as never);
-          update({ ...state, goalRounds: GOAL_ROUND_CHOICES[(at + 1) % GOAL_ROUND_CHOICES.length]! });
+          choosing = "goalRounds";
+          selected = Math.max(0, GOAL_ROUND_CHOICES.indexOf(state.goalRounds as never));
         }
-        else if (index === 3) update({ ...state, advisor: !state.advisor });
-        else if (index === 4) update({ ...state, advisorGates: !state.advisorGates });
+        else if (index === 3) {
+          choosing = "maxSubagents";
+          selected = Math.max(0, MAX_SUBAGENT_CHOICES.indexOf(state.maxSubagents));
+        }
+        else if (index === 4) update({ ...state, advisor: !state.advisor });
+        else if (index === 5) update({ ...state, advisorGates: !state.advisorGates });
       } else if (index === 0) {
         const at = Math.max(0, accents.indexOf(state.accent));
         update({ ...state, accent: accents[(at + 1) % accents.length]! });
@@ -77,7 +89,12 @@ export async function openJarSettings(
     return {
       invalidate() {},
       handleInput(data: string) {
-        if (matchesKey(data, Key.escape) || data === "q") { done(); return; }
+        if (matchesKey(data, Key.escape) || data === "q") {
+          if (choosing) { finishChoice(); tui.requestRender(); } else done();
+          return;
+        }
+        if (choosing && (matchesKey(data, Key.tab) || matchesKey(data, Key.right)
+          || matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left))) return;
         if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
           page = PAGES[(PAGES.indexOf(page) + 1) % PAGES.length]!;
           selected = 0;
@@ -97,6 +114,7 @@ export async function openJarSettings(
         if (event.type !== "click" || event.button !== "left") return;
         if (event.y === 0 && event.x >= width - 4) { done(); return { handled: true }; }
         if (event.y === 1) {
+          choosing = undefined;
           if (event.x >= 2 && event.x < Math.min(width - 2, 19)) { page = "appearance"; selected = 0; }
           else if (event.x >= 19 && event.x < Math.min(width - 2, 32)) { page = "footer"; selected = 0; }
           else if (event.x >= 32 && event.x < width - 2) { page = "pi"; selected = 0; }
@@ -121,14 +139,17 @@ export async function openJarSettings(
           + "   " + theme.fg(page === "pi" ? "accent" : "muted", "[ Pi ]"));
         const prefs = pi?.get();
         const divider = theme.fg("dim", "├" + "─".repeat(Math.max(0, width - 2)) + "┤");
-        const allRows = page === "footer"
+        const allRows = choosing
+          ? choices().map((choice, index) => row(index, String(choice), state[choosing!] === choice ? "CURRENT" : "", true))
+          : page === "footer"
           ? FOOTER_FIELDS.map((field, index) => row(index, LABELS[field], state.footer[field] ? "ON" : "OFF", state.footer[field]))
           : page === "pi" ? [
             row(0, "Mouse clicks (Pi fullscreen, restart)", !prefs ? "N/A" : prefs.fullscreen ? "ON" : "OFF", !!prefs?.fullscreen),
             row(1, "Copy on select", !prefs ? "N/A" : prefs.copyOnSelect ? "ON" : "OFF", !!prefs?.copyOnSelect),
             row(2, "Goal auto rounds", String(state.goalRounds), true),
-            row(3, "Advisor (jar_advisor, /advisor)", state.advisor ? "ON" : "OFF", state.advisor),
-            row(4, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates)
+            row(3, "Max subagents (retained live pool)", String(state.maxSubagents), true),
+            row(4, "Advisor (jar_advisor, /advisor)", state.advisor ? "ON" : "OFF", state.advisor),
+            row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates)
           ] : [
             row(0, "Accent", state.accent === "follow" ? "FOLLOW PI" : state.accent.toUpperCase(), true),
             row(1, "Motion", state.animations ? "ON" : "OFF", state.animations),
@@ -141,11 +162,16 @@ export async function openJarSettings(
         const start = firstVisible();
         const rows = allRows.slice(start, start + pageSize());
         return [top, tabs, divider,
-          line(theme.fg("accent", page === "footer" ? " FOOTER VISIBILITY" : page === "pi" ? " PI & WORKFLOWS" : " APPEARANCE & MOTION")),
-          line(theme.fg("dim", page === "footer" ? ` Footer fields ${start + 1}–${start + rows.length}/${fields()}`
+          line(theme.fg("accent", choosing === "maxSubagents" ? " MAX SUBAGENTS · RETAINED LIVE POOL"
+            : choosing === "goalRounds" ? " GOAL AUTO ROUNDS" : page === "footer" ? " FOOTER VISIBILITY" : page === "pi" ? " PI & WORKFLOWS" : " APPEARANCE & MOTION")),
+          line(theme.fg("dim", explainPool() ? " Live pool includes idle/paused subagents"
+            : choosing ? " Select a value; Enter/click to save, Esc to cancel"
+            : page === "footer" ? ` Footer fields ${start + 1}–${start + rows.length}/${fields()}`
             : page === "pi" ? " Fullscreen mode enables clicks and copy-on-select" : " Accent cycles through loaded themes")),
           ...rows,
-          line(theme.fg("dim", " Tab: section · ↑↓: choose · Enter/click: change · Esc")),
+          line(theme.fg("dim", choosing ? " ↑↓: choose · Enter/click: save · Esc: cancel"
+            : " Tab: section · ↑↓: choose · Enter/click: change · Esc")),
+          ...(explainPool() ? [line(theme.fg("dim", " Lowering does not terminate existing subagents"))] : []),
           theme.fg("dim", "╰" + "─".repeat(Math.max(0, width - 2)) + "╯")];
       }
     };

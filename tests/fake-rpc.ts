@@ -25,9 +25,10 @@ export interface FakeChild extends EventEmitter {
   exitCode: number | null;
   killed: string[];
   kill(signal: string): void;
+  exit(code: number, signal?: string, close?: boolean): void;
 }
 
-export interface SpawnCall { command: string; args: string[]; env: NodeJS.ProcessEnv }
+export interface SpawnCall { command: string; args: string[]; env: NodeJS.ProcessEnv; cwd?: string }
 
 /**
  * A fake child Pi: `script` runs when the prompt arrives with the prompt text. Closing stdin (what
@@ -40,17 +41,30 @@ export function fakeChild(script?: (child: FakeChild, prompt: string) => void): 
   child.stderr = new EventEmitter();
   child.exitCode = null;
   child.killed = [];
-  const exit = (code: number, signal?: string) => {
+  const exit = (code: number, signal?: string, close = true) => {
     if (child.exitCode !== null) return;
     child.exitCode = code;
-    queueMicrotask(() => child.emit("close", code, signal ?? null));
+    queueMicrotask(() => {
+      child.emit("exit", code, signal ?? null);
+      if (close) child.emit("close", code, signal ?? null);
+    });
   };
+  child.exit = exit;
   child.kill = (signal: string) => { child.killed.push(signal); exit(143, signal); };
   child.stdin.on("finish", () => exit(0));
   child.stdin.on("command", (command: Record<string, unknown>) => {
+    if (command.type === "clear_queue") {
+      emit(child, { type: "response", id: command.id, command: "clear_queue", success: true, data: { steering: [], followUp: [] } });
+      return;
+    }
+    if (command.type === "abort") {
+      emit(child, { type: "response", id: command.id, command: "abort", success: true });
+      queueMicrotask(() => settle(child));
+      return;
+    }
     if (command.type !== "prompt") return;
-    emit(child, { type: "response", id: command.id, command: "prompt", success: true });
-    queueMicrotask(() => script?.(child, String(command.message)));
+    emit(child, { type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
+    queueMicrotask(() => { if (child.exitCode === null) script?.(child, String(command.message)); });
   });
   return child;
 }
@@ -58,8 +72,8 @@ export function fakeChild(script?: (child: FakeChild, prompt: string) => void): 
 export function fakeSpawn(script: (child: FakeChild, prompt: string, args: string[]) => void) {
   const calls: SpawnCall[] = [];
   const children: FakeChild[] = [];
-  const spawn = (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
-    calls.push({ command, args, env: options.env ?? {} });
+  const spawn = (command: string, args: string[], options: { env?: NodeJS.ProcessEnv; cwd?: string }) => {
+    calls.push({ command, args, env: options.env ?? {}, ...(options.cwd ? { cwd: options.cwd } : {}) });
     const child = fakeChild((running, prompt) => script(running, prompt, args));
     children.push(child);
     return child as never;

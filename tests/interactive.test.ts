@@ -11,6 +11,7 @@ import { promptChoice, promptText, todoView } from "../src/dialogs.ts";
 import { TASK_ENTRY, TodoStore, type TodoEvent } from "../src/tasks.ts";
 import { registerTaskTool } from "../src/task-tool.ts";
 import { WorkingState } from "../src/working.ts";
+import { setIconSet } from "../src/icons.ts";
 
 const theme = { fg: (_color: string, text: string) => text, borderColor: (text: string) => text };
 const plainLines = (lines: readonly string[]) => lines.map(stripTerminalSequences);
@@ -321,6 +322,7 @@ test("rounded input keeps autocomplete rows below the frame and overflow labels 
 });
 
 test("empty composer shows a dim ghost suggestion after the cursor", () => {
+  setIconSet("unicode"); // Do not inherit the developer's persisted icon settings from an earlier extension test.
   const cursor = "\x1b[7m \x1b[0m";
   const dim = (text: string) => `<${text}>`;
   const framed = roundedInput(["────", cursor + " ".repeat(30), "────"], 40, true, theme as never, undefined, composerIcon("idle"), "", { ghost: "Run the full test suite", dim });
@@ -483,6 +485,7 @@ test("ember mascot blinks, gets sleepy when idle and shows transient moods", () 
 });
 
 test("native composer auto-expands, accepts ghost suggestions with Tab and maps clicks below the perched mascot", () => {
+  setIconSet("unicode");
   let current: Function | undefined;
   const suggestions = new SuggestionState();
   const ctx = { hasUI: true, mode: "tui", sessionManager: {}, ui: {

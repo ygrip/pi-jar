@@ -5,6 +5,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { registerAskTool } from "../src/ask-tool.ts";
+import { registerDemocracy } from "../src/democracy.ts";
+import type { DelegateController } from "../src/delegate.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
@@ -34,7 +36,9 @@ import { TASK_ENTRY, TodoStore, todoProgress, todoTotals } from "../src/tasks.ts
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
 import { ChangeTracker } from "../src/changes.ts";
-import { DelegateRegistry, registerDelegate, type DelegateRun } from "../src/delegate.ts";
+import { CHILD_ENV, DelegateRegistry, registerDelegate, type DelegateRun } from "../src/delegate.ts";
+import { CHILD_WORKTREE_ENV, workspacePathAllowed } from "../src/delegate-worktree.ts";
+import { createDiscussionPaper, DISCUSSION_FILE_ENV, disposeDiscussionPaper, registerDiscussionTool, SUBAGENT_NAME_ENV } from "../src/discussion.ts";
 import { openActivityView, type ActivityTarget } from "../src/activity-view.ts";
 import { ICON_SETS, setIconSet, withIcon } from "../src/icons.ts";
 import { collectPrompts, openPromptSearch } from "../src/prompt-search.ts";
@@ -55,6 +59,40 @@ const LARGE_SESSION_ENTRIES = 800;
 /** Entries Pi writes when a fresh session starts; a branch holding only these has no transcript yet. */
 const SESSION_SETUP_ENTRIES = new Set(["thinking_level_change", "model_change", "session_info"]);
 export default function piJar(pi: ExtensionAPI): void {
+  const delegatedChild = process.env[CHILD_ENV] === "1";
+  const delegatedWorktree = delegatedChild ? process.env[CHILD_WORKTREE_ENV] : undefined;
+  if (delegatedChild) {
+    // Forked transcripts retain custom prompt messages even though their automation stores
+    // and handlers are disabled. Remove only parent automation, not task/user context.
+    const parentAutomation = new Set([
+      "pi-jar.goal-context", "pi-jar.goal-continuation",
+      "pi-jar.plan-context", "pi-jar.plan-reminder", "pi-jar.moderator-context"
+    ]);
+    pi.on("context", (event) => {
+      const messages = event.messages.filter((message) => !parentAutomation.has((message as { customType?: string }).customType ?? ""));
+      if (messages.length !== event.messages.length) return { messages };
+    });
+  }
+  if (delegatedWorktree) {
+    const pathTools = new Set(["read", "edit", "write", "grep", "find", "ls"]);
+    const shellTools = new Set(["bash", "powershell", "jar_shell"]);
+    pi.on("tool_call", (event, ctx) => {
+      if (shellTools.has(event.toolName)) {
+        return { block: true, reason: "Sandboxed worktree subagents cannot run shell tools." };
+      }
+      if (!pathTools.has(event.toolName)) return;
+      const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
+      if (!workspacePathAllowed(delegatedWorktree, ctx.cwd, ".")) {
+        return { block: true, reason: "Sandboxed worktree subagent working directory is outside its workspace." };
+      }
+      for (const key of ["path", "file_path", "cwd"]) {
+        const value = input[key];
+        if (typeof value === "string" && value && !workspacePathAllowed(delegatedWorktree, ctx.cwd, value, event.toolName === "read")) {
+          return { block: true, reason: `Sandboxed worktree subagent cannot access outside its workspace: ${value}` };
+        }
+      }
+    });
+  }
   installCompactBuiltinTools(pi);
   let demo = false;
   let visualSettings = defaultVisualSettings();
@@ -94,6 +132,8 @@ export default function piJar(pi: ExtensionAPI): void {
   let workingIndicatorKey = "";
   let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
   let settingsOpen = false;
+  let discussionFile: string | undefined = process.env[DISCUSSION_FILE_ENV];
+  registerDiscussionTool(pi, () => discussionFile, () => process.env[SUBAGENT_NAME_ENV] ?? "moderator");
 
   // A finished list stays visible (all struck through) until the user's next prompt, like Claude.
   let todosAcknowledged = false;
@@ -163,14 +203,15 @@ export default function piJar(pi: ExtensionAPI): void {
   /** Finished work stays visible briefly so a quick run is not a flicker. */
   const ACTIVITY_LINGER_MS = 5000;
   const subagentState = (run: DelegateRun): ActivityState => run.state === "working" ? "running" : run.state === "queued" ? "queued"
-    : run.state === "done" ? "done" : run.error === "stopped" ? "stopped" : "failed";
+    : run.state === "idle" ? "idle" : run.state === "paused" ? "paused" : run.state === "stopped" ? "stopped"
+      : run.state === "done" ? "done" : "failed";
   const shellActivityState = (job: Omit<ShellJob, "lines">): ActivityState => job.status === "running" ? "running"
     : job.status === "killed" ? "stopped" : job.status === "exited" && job.exitCode === 0 ? "done" : "failed";
   const seconds = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; };
   const footerActivity = (now: number): FooterActivity[] => {
     const rows: FooterActivity[] = [];
     for (const { key, run } of subagents.records()) {
-      if (run.endedAt && now - run.endedAt > ACTIVITY_LINGER_MS) continue;
+      if ((run.state === "done" || run.state === "failed" || run.state === "stopped") && run.endedAt && now - run.endedAt > ACTIVITY_LINGER_MS) continue;
       rows.push({ kind: "subagent", id: key, name: run.name, state: subagentState(run),
         detail: run.error ?? run.activity ?? cleanText(run.task, 120),
         stats: [run.tools ? `${run.tools} tools` : "", run.startedAt ? seconds((run.endedAt ?? now) - run.startedAt) : ""].filter(Boolean).join(" · ") });
@@ -227,17 +268,21 @@ export default function piJar(pi: ExtensionAPI): void {
   registerAdvisor(pi, modelRoles, { enabled: () => visualSettings.advisor, gates: () => visualSettings.advisorGates, usage: sideUsage });
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
-  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles));
-  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges });
+  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild });
+  let delegateController: DelegateController | undefined;
+  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges, discussionFile: () => discussionFile,
+    getMaxSubagents: () => visualSettings.maxSubagents, onController: (controller) => { delegateController = controller; } });
+  if (!delegatedChild) registerDemocracy(pi, () => delegateController, () => visualSettings.maxSubagents);
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
-  planMode.register();
+  if (!delegatedChild) planMode.register();
   const goalLoop = new GoalLoop(pi, {
     goals: () => goals, todos: () => todos, roles: modelRoles, planActive: () => planMode.isEnabled(),
     maxRounds: () => visualSettings.goalRounds,
+    subagentMode: (agent) => subagents.resolve(agent)?.run.mode,
     changed: (ctx) => { footerTui?.requestRender(); welcomeTui?.requestRender(); updateTaskWidget(ctx); },
     completed: () => composer.flash("complete", 4000)
   });
-  goalLoop.register();
+  if (!delegatedChild) goalLoop.register();
   planMode.setOnEnter((ctx) => goalLoop.pause(ctx, "plan mode is on"));
   const suggestions = new SuggestionState();
   composer.attachSuggestions(suggestions);
@@ -603,13 +648,22 @@ export default function piJar(pi: ExtensionAPI): void {
     changeCount = 0;
     shells?.dispose();
     subagents.clear();
+    if (!delegatedChild) {
+      disposeDiscussionPaper(discussionFile);
+      discussionFile = createDiscussionPaper();
+    }
     shells = new ShellManager(onShellEvent);
     shells.onChange = () => footerTui?.requestRender();
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
     let branch: readonly unknown[] = [];
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
-    restoreTodos(ctx, branch);
-    restoreGoal(ctx, branch);
+    if (delegatedChild) {
+      todos.restore([]);
+      goals.restore([]);
+    } else {
+      restoreTodos(ctx, branch);
+      restoreGoal(ctx, branch);
+    }
     // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
@@ -641,7 +695,7 @@ export default function piJar(pi: ExtensionAPI): void {
     // A fresh session is not empty: Pi records the startup thinking level/model as entries.
     const resumed = branch.some((entry) => !(typeof entry === "object" && entry !== null && "type" in entry
       && typeof entry.type === "string" && SESSION_SETUP_ENTRIES.has(entry.type)));
-    if (!resumed) showWelcome(ctx);
+    if (!delegatedChild && !resumed) showWelcome(ctx);
   });
   // Any real prompt dismisses the welcome. Slash commands bypass `input`, so `agent_start` covers them.
   const dismissWelcome = (ctx: ExtensionContext) => {
@@ -684,13 +738,19 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("session_tree", (_event, ctx) => {
     let branch: readonly unknown[] = [];
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
-    restoreTodos(ctx, branch);
-    restoreGoal(ctx, branch);
+    if (!delegatedChild) {
+      restoreTodos(ctx, branch);
+      restoreGoal(ctx, branch);
+    }
     updateCost(ctx);
     composer.refreshSession(ctx);
     sampleFooter(ctx);
   });
-  pi.on("session_compact", (_event, ctx) => { restoreTodos(ctx); restoreGoal(ctx); updateCost(ctx); sampleFooter(ctx); });
+  pi.on("session_compact", (_event, ctx) => {
+    if (!delegatedChild) { restoreTodos(ctx); restoreGoal(ctx); }
+    updateCost(ctx);
+    sampleFooter(ctx);
+  });
   pi.on("model_select", (_event, ctx) => sampleFooter(ctx));
   pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); sampleFooter(ctx); });
@@ -703,6 +763,7 @@ export default function piJar(pi: ExtensionAPI): void {
     try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
     quotaCache?.stop();
     quotaCache = undefined;
+    if (!delegatedChild) { disposeDiscussionPaper(discussionFile); discussionFile = undefined; }
     todos = undefined;
     changes = undefined;
     changeCount = 0;

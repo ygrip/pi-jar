@@ -11,7 +11,7 @@ export type TodoStatus = (typeof TODO_STATUSES)[number];
 export interface Todo { id: string; title: string; done: boolean; status: TodoStatus; activeForm?: string; details?: string; parentId?: string }
 /** A parent's own `status` is ignored when it has subtasks. */
 export interface TodoInput { id?: string; title: string; status: TodoStatus; activeForm?: string; details?: string; subtasks?: readonly TodoInput[] }
-export type TodoReplacement = Partial<Omit<TodoInput, "id">>;
+export type TodoUpdate = Partial<Omit<TodoInput, "id">>;
 /** Bounds the whole list: parents plus subtasks. */
 export const MAX_TODOS = 50;
 
@@ -312,12 +312,12 @@ export class TodoStore {
     } else next.push(...inputs);
     return this.write(next);
   }
-  /** Replace only the addressed task. Omitted fields and subtasks are preserved. */
-  replace(id: string, replacement: TodoReplacement): string | undefined {
-    if (!this.items.has(id)) return "replace needs a valid existing task id.";
-    if (!replacement || typeof replacement !== "object" || Array.isArray(replacement)) return "replace needs task fields.";
-    if ("id" in replacement && replacement.id !== id) return "Replacement id must match the addressed task.";
-    if (!Object.keys(replacement).some((key) => ["title", "status", "activeForm", "subtasks"].includes(key))) return "replace needs at least one task field.";
+  /** Update only the addressed task. Omitted fields and subtasks are preserved. */
+  update(id: string, replacement: TodoUpdate): string | undefined {
+    if (!this.items.has(id)) return "update needs a valid existing task id.";
+    if (!replacement || typeof replacement !== "object" || Array.isArray(replacement)) return "update needs task fields.";
+    if ("id" in replacement && replacement.id !== id) return "Update id must match the addressed task.";
+    if (!Object.keys(replacement).some((key) => ["title", "status", "activeForm", "subtasks"].includes(key))) return "update needs at least one task field.";
     const next = this.snapshot();
     const target = next.flatMap((item) => [item, ...(item.subtasks ?? [])]).find((item) => item.id === id)!;
     if (this.items.get(id)?.parentId && replacement.subtasks?.length) return "Subtasks cannot have their own subtasks; nest only one level.";

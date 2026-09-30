@@ -18,6 +18,8 @@ export interface GoalLoopOptions {
   roles: ModelRoleManager;
   planActive: () => boolean;
   maxRounds?: () => number;
+  /** Resolve a retained agent by key/name without coupling goal mode to the delegate registry. */
+  subagentMode?: (agent: string) => string | undefined;
   changed?: (ctx: ExtensionContext) => void;
   completed?: (ctx: ExtensionContext, goal: Goal) => void;
 }
@@ -249,10 +251,15 @@ export class GoalLoop {
       if (open) return;
       const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
       const unsafeCommand = !(typeof input.command === "string" && isSafePlanCommand(input.command));
+      const delegatedWrite = event.toolName === "jar_delegate" && (input.write === true || input.mode === "worktree"
+        || (Array.isArray(input.tasks) && input.tasks.some((task) => !!task && typeof task === "object" && (task as Record<string, unknown>).mode === "worktree")));
+      // Stopping a retained worktree agent is its commit-to-parent boundary, so treat it as potentially mutating.
+      const delegatedFinalize = event.toolName === "jar_subagent" && input.action === "stop"
+        && typeof input.agent === "string" && this.options.subagentMode?.(input.agent) === "worktree";
       const mutating = WRITE_TOOLS.has(event.toolName)
         || (goal.phase === "implement" && event.toolName === "bash" && unsafeCommand)
         || (goal.phase === "implement" && event.toolName === "jar_shell" && input.action === "start" && unsafeCommand)
-        || (event.toolName === "jar_delegate" && input.write === true);
+        || delegatedWrite || delegatedFinalize;
       if (!mutating) return;
       return { block: true, reason: goal.phase === "audit"
         ? "Goal audit: do not edit during the audit. Add jar_todo tasks for the gaps you found instead."

@@ -18,14 +18,14 @@ The showcase is captured from a real pi-jar terminal session: the torch-style `�
 | **Composer** | Rounded input that grows with your draft (up to ~60% of the terminal), click-to-place cursor in fullscreen, dim **next-prompt suggestions** you accept with <kbd>Tab</kbd>, and **Ember** — a tiny flame mascot that blinks, cheers, focuses, dozes and reacts. |
 | **Plan mode** | Read-only exploration; the agent must write a structured plan file and submit it. You review it in a split view (headings on the left, section on the right) and approve, compact-and-approve, refine or stop. |
 | **Goal mode** | Set an outcome; the agent must break it into tracked tasks and keeps working until they are done, then an **auditor** pass verifies the goal before it can be marked complete. |
-| **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `implement`, `advisor`, `task`, `commit`, plus your own) with `@alias` chains, `:effort` suffixes and project overrides; switched automatically as you move between plan, execution, goal rounds and audits, and never over a model you picked yourself. |
+| **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `implement`, `advisor`, `moderator`, `scout`, `worker`, `reviewer`, `task`, `commit`, plus your own) with aliases, effort, per-role fallback models and project overrides. |
 | **Advisor** | A second-opinion model: the agent calls `jar_advisor` for risky decisions or when stuck, `/advisor [focus]` asks on demand, and automatic gates consult it when the agent repeats the same tool call or keeps failing. |
 | **Usage & context** | `/usage` shows session cost and tokens per model (advisor and commit calls included) and plan-limit bars with reset times; `/context` draws a grid of what fills the context window, with a per-file, per-skill and per-tool breakdown. |
 | **Commit** | `/jar commit [note]` drafts a message for the staged changes with the `commit` role, lets you edit it, then commits (never pushes). |
 | **Tasks & questions** | A Claude/omp-style `jar_todo` checklist with subtasks and per-task progress that the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
 | **Change review** | Every file the agent or its editing subagents change is remembered as it was; `/diff` (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) shows changed files (each counted once) next to a colored diff, with accept or revert per file or all at once. |
 | **Background shells** | `jar_shell` runs dev servers, watchers and long tests in the background; the agent is woken when a watch pattern matches or the process exits, so it never polls. Running shells get a footer row; click it (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd>) to tail or kill them. |
-| **Subagents** | `jar_delegate` fans out up to four read-only (or opt-in editing) subagents in parallel on your model roles. Each gets a live footer row; click it to open its checklist and an omp-style collapsible transcript, steer it with a message, or stop it. The parent gets a detailed report (tools, files, tasks, failures) from each. |
+| **Subagents** | The main agent becomes a moderator over a configurable retained pool (2, 4, 6, 8 or 16; default 4). `jar_delegate` spawns `scout`, `fork` or sandboxed `worktree` agents; `jar_subagent` peeks, steers, asks BTW questions, pauses, resumes and stops them. Workers can exchange bounded structured Q/A through `jar_discuss`; worktree changes stay isolated until stop, then safely enter `/diff`. |
 | **Sessions & history** | Recent sessions (with their goal and plan) on the welcome card, one click from resuming; <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> searches earlier prompts; pasted images show as chips under the composer. |
 | **Footer & themes** | Responsive footer (model, effort, session, cwd, context, RAM, cost, quota, goal, roles, branch, live subagents and shells) with unicode, [Nerd Font](https://www.nerdfonts.com) or ascii icons, and seven dark themes. |
 
@@ -175,10 +175,15 @@ Roles map a purpose to a model. They live in `~/.pi/agent/pi-jar-roles.json` (Pi
     "plan": "@slow",
     "advisor": "@slow:xhigh",
     "smol": "anthropic/claude-haiku-4-5-20251001",
-    "review": "openai/gpt-5:medium"
+    "scout": "@smol:minimal",
+    "worker": "anthropic/claude-sonnet-5:medium",
+    "reviewer": "@default:medium"
   },
-  "cycleOrder": ["smol", "default", "slow"],
-  "tags": { "review": { "name": "Reviewer" } }
+  "fallbacks": {
+    "scout": ["openai/gpt-5-mini:low"],
+    "worker": ["@default"]
+  },
+  "cycleOrder": ["smol", "default", "slow"]
 }
 ```
 
@@ -190,13 +195,17 @@ Roles map a purpose to a model. They live in `~/.pi/agent/pi-jar-roles.json` (Pi
   | `plan` | plan mode (restored when you leave it) |
   | `implement` | executing an approved plan and goal implement rounds (falls back to the current model) |
   | `advisor` | `jar_advisor`, `/advisor`, stuck-work gates and the goal audit |
-  | `task` | `jar_delegate` subagents |
+  | `moderator` | optional model assignment for the coordinating main agent |
+  | `scout` | default for fresh read-only delegated discovery; ideal for a cheap model |
+  | `worker` | default for sandboxed worktree implementation |
+  | `reviewer` | default for context-forked read-only review |
+  | `task` | legacy/generic explicit subagent role |
   | `commit` | `/jar commit` messages |
   | `smol` / `slow` | cycling with <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> |
 
   Any other valid name (`a-z`, `0-9`, `-`) is a custom role.
 - **Switching is automatic and scoped.** Entering plan mode applies `plan`; approving applies your chosen role or `implement` for the run; goal rounds alternate `implement` and `advisor`. Each temporary switch restores the previous model afterwards — unless you picked a model or effort yourself in the meantime, which always wins.
-- `/roles` opens a split manager: role list on the left; resolved model, alias chain, effort, scope and usage on the right. Keys: `m` model, `a` alias, `t` effort, `s` move between global/project scope, <kbd>Enter</kbd> activate, `c` clear, `n` new role, `d` delete custom role.
+- `/roles` opens a split manager: role list on the left; resolved model, alias chain, effort, **fallback model**, scope and usage on the right. Keys: `m` primary model, `f` fallback model, `a` alias, `t` effort, `s` move between global/project scope, <kbd>Enter</kbd> activate, `c` clear, `n` new role, `d` delete custom role. The CLI still supports an ordered chain with `/roles fallback ROLE MODEL...`.
 - Older v1 files are read and upgraded in memory; they are rewritten as v2 only when you change a role.
 
 ## Advisor
@@ -208,9 +217,9 @@ The advisor is a second model (the `advisor` role; the current model if unassign
 - **Gates** — when the agent makes the same tool call three times within its last eight calls, the call is blocked and the advisor's review is returned instead; after three failing tool results in a row, the advice is steered into the running turn. At most two automatic consultations per prompt.
 - Settings → Pi toggles the advisor and the gates. Advisor calls are counted in `/usage`. The footer and welcome show it as a working teammate while it thinks.
 
-### Advisor fallback models
+### Role fallback models
 
-Configure an ordered fallback chain (the primary advisor remains configured with `/roles set advisor`):
+Every role can have an ordered fallback chain. The primary remains configured with `/roles set ROLE`:
 
 ```text
 /roles fallback advisor openai/gpt-5:high @smol
@@ -224,7 +233,7 @@ Add `--project` when saving or clearing to override the global chain for this pr
 "fallbacks": { "advisor": ["openai/gpt-5:high", "@smol"] }
 ```
 
-One-shot advisor calls (`jar_advisor`, `/advisor`, and stuck-work gates) try the primary first, then up to eight configured fallbacks on missing models, authentication/provider errors (including rate limits), or empty answers. Cancellation never starts another attempt. Aliases and per-model thinking levels are supported; duplicate model/effort pairs are skipped. Answers identify the successful model, returned attempts are counted in `/usage`, and exhaustion reports every failure. An empty project list disables inherited global fallbacks. No fallback is used unless explicitly configured; context is sent only to the models you choose. The same configuration works for other one-shot roles such as `commit`, but not interactive role activation or goal audit model switches.
+Role activation and delegated model selection try the primary first and then configured fallbacks in order; aliases and per-model effort are supported and duplicate model/effort pairs are skipped. Side-model workflows such as advisor and commit keep their own retry/error reporting while using the same fallback configuration. An empty project fallback list disables inherited global fallbacks. This makes roles such as `scout` practical to pin to a cheap model with a more capable fallback instead of silently escalating every task.
 
 This is a pi-jar enhancement: [pi-advisor](https://github.com/philipbrembeck/pi-advisor/) currently resolves one configured advisor model rather than a fallback chain.
 
@@ -237,17 +246,21 @@ This is a pi-jar enhancement: [pi-advisor](https://github.com/philipbrembeck/pi-
 
 ## Tasks, questions and history
 
-- **`jar_todo`** — a Claude/omp-style task list the agent keeps for any multi-step request. Prefer incremental `append` (new tasks only), `replace` (update one stable `id`), and `remove` (delete one task and its subtasks); IDs are returned for every task. Omitted replacement fields and subtasks stay intact. Legacy `write` (or `todos` without an action) still replaces the entire list, removing omitted tasks. Invalid updates leave the list unchanged. Each task is `pending`, `in_progress` (exactly one at a time) or `completed`, with an `activeForm` ("Running tests") that replaces the working spinner text while it runs. Tasks can have one level of **subtasks**: a parent's status follows its subtasks, its row shows `(done/total)`, and progress counts every subtask (and every task without subtasks). The live checklist above the composer shows `✔` struck-through done tasks, a bold `◼` current task and `☐` pending ones, with subtasks indented; a finished list stays until your next prompt. `/jar tasks` is your view/editor: `a` add, <kbd>Space</kbd>/<kbd>Enter</kbd> check, `e` edit, `d` delete, `f` filter.
+- **`jar_todo`** — a Claude/omp-style task list the agent keeps for multi-step work. A new request starts with `write`: the complete fresh plan, replacing old completed work. `update` changes one stable `id` without disturbing omitted fields/subtasks, and `remove` deletes one task tree. `append` is reserved mainly for new requirements introduced while an existing checklist is already active, such as user steering; if the previous list is fully completed, the agent writes a new list instead of extending the fossil record. IDs are returned for every task. Each task is `pending`, `in_progress` (exactly one leaf at a time) or `completed`, with optional `activeForm`. `start` and `done` deliberately return only the task they changed, while the internal details still carry the checklist state needed by the UI and parent/subagent mirroring. Tasks can have one level of **subtasks**; parent status and progress roll up automatically. The live checklist above the composer shows `✔`, `◼` and `☐`; `/jar tasks` remains the human editor.
   ```json
-  { "action": "append", "todos": [{ "content": "Run tests", "status": "pending", "activeForm": "Running tests" }] }
-  { "action": "replace", "id": "<returned-id>", "status": "in_progress" }
-  { "action": "remove", "id": "<returned-id>" }
+  { "action": "write", "todos": [{ "content": "Implement feature", "status": "in_progress" }, { "content": "Run tests", "status": "pending" }] }
+  { "action": "update", "id": "<returned-id>", "status": "completed" }
+  { "action": "append", "todos": [{ "content": "Handle newly requested edge case", "status": "pending" }] }
   ```
-  Use `parent` with `append` to add subtasks; `start`, `done`, `open`, `edit`, and `list` remain available (`add`/`delete` also remain supported).
+  Use `parent` with `append` to add a genuinely new subtask to active work; `start`, `done`, `open`, `edit`, `list`, `add` and `delete` remain available.
 - **`jar_ask`** — structured questions: numbered options with descriptions, single or multi-select, *Type your own answer* (multi-line, paste-friendly) and *Chat about this* to discuss before choosing.
 - **`/diff`** — review what the agent (and its editing subagents) changed since the first edit to each file: files with `+/−` counts on the left, a numbered, colored diff on the right. `a` accept (keep, stop tracking), `r` then `y` revert (restore the original, or remove a file it created), `A`/`R` for all. The footer shows `± N files · /diff` while anything is unreviewed; each file counts once no matter who edited it. Only `edit`/`write` changes inside the project are tracked; shell-made changes are not.
 - **`jar_shell`** — `start` (with optional `name`, `watch` regex and `notify`), `list`, `output`, `kill`. Output is ANSI-stripped and bounded (2000 lines). When a watch matches or the process ends, a visible message wakes the agent (queued if it is busy). Each running shell gets a footer row; the activity view (`/jar shells`, a click on the row) tails it live (`x` kill, `f` follow). All shells stop when the session ends.
-- **`jar_delegate`** — up to four subagents run in parallel as separate Pi processes (RPC mode) with a fresh context, on a role (default `task`, then `default`, then the current model). They are read-only (`read`, `grep`, `find`, `ls`, plus `jar_todo`) unless `write: true`; subagents cannot delegate further; aborting the turn stops them. Each has a live footer row. When they finish, the parent gets a detailed report per subagent: outcome, duration, tool calls by name, files read and edited, its task checklist, failed calls, then its own Summary / Details / Verification / Open issues.
+- **`jar_delegate`** — spawns **retained session-scoped** subagents up to **Max subagents** in `/jar settings` (2, 4, 6, 8 or 16; default 4). Idle/paused children and live legacy workers count toward the shared limit, not the parent; over-cap batches are rejected before launch. Lowering the limit does not terminate existing children, but blocks new launches until there is room. The parent is given moderator context and should coordinate rather than duplicate their work. `mode: "scout"` is fresh/read-only and defaults to the `scout` role; `fork` is a true Pi session fork, read-only, and defaults to `reviewer`; `worktree` forks context and defaults to `worker`, editing inside a path-guarded disposable Git worktree. A settled retained agent becomes `idle`, keeping its process, model context and workspace for reuse. The old `write: true` direct shared-workspace mode remains one-shot for compatibility.
+- **`jar_subagent`** — moderator control plane: `peek` returns high-level task/checklist progress, current activity, changed files, remaining work, workspace and last report; `steer` redirects a running worker; `ask` injects a terse BTW question and waits for its answer; `pause` aborts the current operation but keeps context/workspace; `resume` wakes that same agent with an optional instruction; `stop` retires it and returns a structured handoff with progress, work directory, changed/applied files and what remains.
+- **Worktree finalization** — worktree edits do **not** touch the parent merely because a worker becomes idle. They remain private across pause/resume cycles. On `jar_subagent stop`, pi-jar verifies parent drift and reviewability, applies safe changes, and adds them to `/diff`; conflicts remain isolated and the workspace path is reported. Resolve parent drift and retry `stop` to reconcile; failed workspaces are retained rather than trimmed out of report history. Process closure is awaited before finalization. All replacements/rollback backups are prepared before parent mutation; failed multi-file application rolls back rather than silently leaving a partial result.
+- **`jar_democracy`** — **exceptional only**, for a persistent **super-complex** issue with several viable options and evidence of at least two distinct failed approaches. The moderator opens 2–8 evidence-backed options, resumes explicitly relevant idle/paused **fresh-context read-only scouts** or spawns fresh scouts within the same pool limit, and collects one private ballot per voter before publishing the tally. A **strict majority of the invited electorate** wins; ties, plurality without majority, and missing/invalid ballots require the user to choose among leading options, with evidence/tradeoffs rather than invented probabilities. TUI uses the structured question picker; RPC returns `needs-user` for the moderator to resolve with `jar_ask`. Voting returns a recommendation and **never implements it** or bypasses safety/approval. Prefer new scouts if past discussions could bias reused agents. Do not use democracy for ordinary complexity or routine decisions.
+- **`jar_discuss`** — a bounded shared discussion paper for virtual agent-to-agent discussion. Questions and answers have stable IDs plus author/target metadata; entries are capped at 1600 characters, the newest 64 are retained, and serialized UTF-8 is capped at 64 KiB (older entries are evicted until it fits). Agents use it for narrow Q/A, not as another transcript.
 - **Activity view** — one split view (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd>, `/jar activity`, or a click on a footer row) for subagents, background shells and other extensions' teammates: list on the left, live details on the right (auto-follows; scroll up to pause, `f` to follow again). For a subagent the details show its task, its own checklist with subtasks, and a transcript like omp's: each tool call and message is one collapsed line that expands on demand (`Tab` into it, `↑↓`, `Enter`, or click) to show arguments and output, while streaming text shows live. `s` opens a steering input: type a message and press `Enter` to redirect the running subagent. `x` stops just that one. Finished runs stay listed for review.
 - **`/jar history`** — separate, read-only timeline of the active branch (paging, search, expandable details). Pi's native transcript is untouched.
 - Pi's built-in read/shell/edit/write tool cards render compactly; the full output or diff stays one click or <kbd>Ctrl</kbd>+<kbd>O</kbd> away.
@@ -258,7 +271,7 @@ This is a pi-jar enhancement: [pi-advisor](https://github.com/philipbrembeck/pi-
 
 - **Appearance** — accent, motion, rounded composer, Ember mascot, next-prompt suggestions, pi-jar UI, icons (`unicode` default, `nerd` for a [Nerd Font](https://www.nerdfonts.com) terminal like omp's nerd preset, `ascii` for plain labels).
 - **Footer** — field visibility. In fullscreen mode the session name (or `sessions` for an unnamed session) opens the session picker and each subagent/shell row opens the activity view. SoL-Pi's savings status is not repeated in the footer (it already notifies).
-- **Pi** — mouse clicks (Pi fullscreen mode), copy on select, goal auto rounds, advisor, advisor gates.
+- **Pi** — mouse clicks (Pi fullscreen mode), copy on select, goal auto rounds, **Max subagents** (explicit choice then Save; default 4), advisor, advisor gates.
 
 pi-jar preferences are saved in `pi-jar-settings.json` in Pi's agent directory; the Pi tab writes Pi's own settings.
 
@@ -287,7 +300,10 @@ pi-jar/
 │   ├── split-view.ts     shared two-pane frame
 │   ├── changes.ts        change tracker and line diff; diff-view.ts is /diff
 │   ├── shells.ts         background shells and jar_shell
-│   ├── delegate.ts       jar_delegate subagents and their live registry
+│   ├── delegate.ts       retained subagents, moderator controls and RPC lifecycle
+│   ├── delegate-worktree.ts isolated Git worktrees, path guard and safe reconciliation
+│   ├── discussion.ts     bounded structured cross-agent Q/A paper
+│   ├── democracy.ts      exceptional scout ballots, strict majority and user tie-break
 │   ├── activity-view.ts  subagent/shell details view
 │   ├── icons.ts          unicode / nerd / ascii glyph sets
 │   ├── attachments.ts    image chips; prompt-search.ts is prompt history

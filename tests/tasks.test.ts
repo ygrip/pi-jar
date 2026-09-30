@@ -88,7 +88,10 @@ test("parent actions cascade to subtasks and exactly one leaf stays in progress"
   const started = await h.run({ action: "start", id: parent!.id });
   assert.equal(h.store.current()?.id, wire!.id, "start on a parent runs its first open subtask");
   assert.equal(h.store.get(release!.id)?.status, "pending");
-  assert.match(started.content[0]!.text, /◼ \[in_progress\] Build feature \(1\/3 done\)[^\n]*\n  ✔ \[completed\] Write parser[^\n]*\n  ◼ \[in_progress\] Wire command/);
+  assert.match(started.content[0]!.text, /^Started task:\n  ◼ \[in_progress\] Wire command/);
+  assert.doesNotMatch(started.content[0]!.text, /Write parser|Build feature/);
+  assert.deepEqual(started.details.items.length > 1, true, "details still carry checklist state for mirrors");
+  assert.deepEqual((started.details as unknown as { display?: { id: string }[] }).display?.map((item) => item.id), [wire!.id]);
 
   await h.run({ action: "done", id: parent!.id });
   assert.deepEqual([parent, parser, wire, docs].map((item) => h.store.get(item!.id)?.status), ["completed", "completed", "completed", "completed"]);
@@ -98,8 +101,10 @@ test("parent actions cascade to subtasks and exactly one leaf stays in progress"
 
   await h.run({ action: "open", id: parent!.id });
   assert.deepEqual([parent, parser, wire, docs].map((item) => h.store.get(item!.id)?.status), ["pending", "pending", "pending", "pending"]);
-  await h.run({ action: "done", id: parser!.id });
+  const done = await h.run({ action: "done", id: parser!.id });
   assert.equal(h.store.get(parent!.id)?.status, "in_progress");
+  assert.match(done.content[0]!.text, /^Completed task:\n  ✔ \[completed\] Write parser/);
+  assert.doesNotMatch(done.content[0]!.text, /Wire command|Build feature/);
 
   const added = await h.run({ action: "add", title: "Changelog", parent: release!.id });
   const changelog = h.store.all().find((item) => item.title === "Changelog")!;
@@ -178,7 +183,7 @@ test("subagents return the full checklist in details; the parent session keeps a
   }
 });
 
-test("incremental append/replace/remove preserve unrelated tracking and replay", async () => {
+test("incremental append/update/remove preserve unrelated tracking and replay", async () => {
   const h = harness();
   await h.run({ todos: plan });
   const original = h.store.all();
@@ -193,10 +198,10 @@ test("incremental append/replace/remove preserve unrelated tracking and replay",
   assert.equal(appended.details.ids?.length, 8);
   for (const item of h.store.all()) assert.ok(appended.content[0]!.text.includes(item.id));
 
-  await h.run({ action: "replace", id: parent.id, title: "Build robust feature", activeForm: "Building robust feature" });
+  await h.run({ action: "update", id: parent.id, title: "Build robust feature", activeForm: "Building robust feature" });
   assert.equal(h.store.get(parent.id)?.title, "Build robust feature");
-  assert.deepEqual(h.store.all().slice(1, original.length), original.slice(1), "omitted subtasks and other tasks survive replacement");
-  await h.run({ action: "replace", id: duplicate.id, todos: [{ content: "Follow-up", status: "completed" }] });
+  assert.deepEqual(h.store.all().slice(1, original.length), original.slice(1), "omitted subtasks and other tasks survive update");
+  await h.run({ action: "update", id: duplicate.id, todos: [{ content: "Follow-up", status: "completed" }] });
   assert.equal(h.store.get(duplicate.id)?.status, "completed");
   assert.equal(h.store.current()?.id, original[2]!.id);
 
@@ -209,18 +214,18 @@ test("incremental append/replace/remove preserve unrelated tracking and replay",
   assert.deepEqual(h.replay(), h.store.all());
 });
 
-test("targeted subtree replacement keeps matched child IDs and other parent groups", async () => {
+test("targeted subtree update keeps matched child IDs and other parent groups", async () => {
   const h = harness();
   await h.run({ todos: plan });
   const [parent, parser, wire, docs, release] = h.store.all();
-  const replaced = await h.run({ action: "replace", id: parent!.id, todos: [{
+  const updated = await h.run({ action: "update", id: parent!.id, todos: [{
     content: "Build v2", status: "pending", subtasks: [
       { content: "Write parser", status: "completed" },
       { id: wire!.id, content: "Wire robust command", status: "in_progress" },
       { content: "New check", status: "pending" }
     ]
   }] });
-  assert.doesNotMatch(replaced.content[0]!.text, /Could not/);
+  assert.doesNotMatch(updated.content[0]!.text, /Could not/);
   assert.equal(h.store.get(parent!.id)?.title, "Build v2");
   assert.equal(h.store.get(parser!.id)?.status, "completed");
   assert.equal(h.store.get(wire!.id)?.title, "Wire robust command");
@@ -241,11 +246,11 @@ test("malformed and ambiguous operations never mutate or persist the task list",
     { action: "append", todos: [{ content: "X", status: "pending", subtasks: {} }] },
     { action: "append", todos: [{ content: "X", status: "in_progress" }] },
     { action: "append", todos: [{ content: "X", status: "pending" }], parent: before[1]!.id },
-    { action: "replace", id, todos: [] },
-    { action: "replace", id, todos: [{ content: "X", status: "pending" }, { content: "Y", status: "pending" }] },
-    { action: "replace", id, todos: [{ id: before[4]!.id, content: "X", status: "pending" }] },
-    { action: "replace", id: "missing", title: "X" },
-    { action: "replace", id, status: "invalid" },
+    { action: "update", id, todos: [] },
+    { action: "update", id, todos: [{ content: "X", status: "pending" }, { content: "Y", status: "pending" }] },
+    { action: "update", id, todos: [{ id: before[4]!.id, content: "X", status: "pending" }] },
+    { action: "update", id: "missing", title: "X" },
+    { action: "update", id, status: "invalid" },
     { action: "remove", id: "missing" },
     { action: "remove", id, todos: [] },
     { action: "list", todos: [] },
@@ -268,7 +273,7 @@ test("incremental checkpoints retain existing details when replay starts at the 
   const original = h.store.add("Keep context", "Important context")!;
   await h.run({ action: "append", title: "New task", details: "New context" });
   assert.equal(h.store.all().find((item) => item.title === "New task")?.details, "New context");
-  await h.run({ action: "replace", id: original.id, title: "Renamed context" });
+  await h.run({ action: "update", id: original.id, title: "Renamed context" });
   assert.equal(h.store.get(original.id)?.details, "Important context");
   assert.deepEqual(h.replay(), h.store.all());
 });
@@ -283,7 +288,7 @@ test("incremental writes roll back atomically on persistence failure and enforce
   fail = true;
   assert.match(store.appendTodos([{ title: "New", status: "pending" }])!, /Could not save/);
   assert.deepEqual(store.all(), before);
-  assert.match(store.replace(first.id, { title: "Renamed" })!, /Could not save/);
+  assert.match(store.update(first.id, { title: "Renamed" })!, /Could not save/);
   assert.deepEqual(store.all(), before);
   assert.equal(store.delete(first.id), false);
   assert.deepEqual(store.all(), before);
@@ -303,10 +308,10 @@ test("all stable IDs are returned beyond the bounded preview and explicit write 
   const last = result.details.ids![11]!;
   assert.ok(result.content[0].text.includes(last.id), "ids outside the prose preview are still agent-visible");
   assert.doesNotMatch(result.content[0].text, /Task 11/, "large writes keep task prose bounded");
-  await h.run({ action: "replace", id: last.id, title: "Last renamed" });
+  await h.run({ action: "update", id: last.id, title: "Last renamed" });
   assert.equal(h.store.get(last.id)?.title, "Last renamed");
   await h.run({ action: "write", todos: [{ id: last.id, content: "Final rename", status: "completed" }] });
-  assert.equal(h.store.all().length, 1, "legacy write still replaces the whole list");
+  assert.equal(h.store.all().length, 1, "write replaces the whole list");
   assert.equal(h.store.all()[0]!.id, last.id);
   await h.run({ todos: [] });
   assert.deepEqual(h.store.all(), []);

@@ -18,7 +18,8 @@ async function subagents() {
     emit(child, { type: "tool_execution_update", toolCallId: "b1", toolName: "bash", partialResult: { content: [{ type: "text", text: "3 passing\nall green" }] } });
     if (taskOf(prompt).includes("docs")) { say(child, "Docs are fine."); settle(child); }
   });
-  registerDelegate({ registerTool(definition: typeof tool) { tool = definition; } } as never, { resolve: () => undefined } as never, registry, { spawnProcess: spawn as never });
+  registerDelegate({ registerTool(definition: typeof tool & { name?: string }) { if (definition?.name === "jar_delegate") tool = definition; } } as never,
+    { resolve: () => undefined } as never, registry, { spawnProcess: spawn as never });
   const controller = new AbortController();
   const pending = tool!.execute("d", { tasks: [{ task: "scan the api", name: "api" }, { task: "check the docs", name: "docs" }] }, controller.signal, undefined, { cwd: "/repo", hasUI: false });
   await tick(); await tick();
@@ -79,10 +80,10 @@ test("the activity view groups work under headers, stays bounded at every width,
       if (width > 24) assert.match(lines[0]!, /ACTIVITY · 3 running/);
     }
     assert.match(view.text(24), /‹ 1\/4 ● api ›/, "narrow terminals get a pager row instead of the list");
-    assert.deepEqual(view.list().filter(Boolean), ["⧉ SUBAGENTS", "▌● api", " ✔ docs", "⚙ SHELLS", " ● s1 dev", "⇄ ROLES", " ● Reviewer"],
-      "running first, finished after; our own subagent's role status is not listed twice");
+    assert.deepEqual(view.list().filter(Boolean), ["⧉ SUBAGENTS", "▌● api", " ○ docs", "⚙ SHELLS", " ● s1 dev", "⇄ ROLES", " ● Reviewer"],
+      "working and idle retained agents stay together; our own subagent's role status is not listed twice");
     const body = view.text();
-    assert.match(body, /api · task/);
+    assert.match(body, /api · scout/);
     assert.match(body, /● working · \ds · 1 tool · 0 turns · \$0\.000/);
     assert.match(body, /▸ TASK  scan the api/, "the task starts collapsed to one line");
     assert.match(body, /▸ ● bash npm test · running/, "tool calls start collapsed");
@@ -173,7 +174,8 @@ test("a subagent's own checklist shows with subtasks and per-task progress", asy
       { id: "w", title: "Write report", status: "pending", done: false }
     ] } } });
   });
-  registerDelegate({ registerTool(definition: typeof tool) { tool = definition; } } as never, { resolve: () => undefined } as never, registry, { spawnProcess: spawn as never });
+  registerDelegate({ registerTool(definition: typeof tool & { name?: string }) { if (definition?.name === "jar_delegate") tool = definition; } } as never,
+    { resolve: () => undefined } as never, registry, { spawnProcess: spawn as never });
   const pending = tool!.execute("d", { tasks: [{ task: "audit", name: "auditor" }] }, undefined, undefined, { cwd: "/repo", hasUI: false });
   await tick(); await tick();
   const view = mount({ subagents: registry });
@@ -206,12 +208,18 @@ test("x stops the selected subagent through the registry and kills the selected 
     const view = mount({ subagents: agents.registry, shells: shell.manager });
     view.lines();
     view.input("x");
-    assert.deepEqual(agents.children.map((child) => child.killed), [["SIGTERM"], []], "only the selected run is stopped");
-    assert.match((await agents.pending).content[0]!.text, /\[1\] api \(task\) — failed: stopped/);
-    assert.deepEqual(view.list().slice(0, 3), ["⧉ SUBAGENTS", "▌■ api", " ✔ docs"], "the selection follows the run as it becomes the newest finished one");
-    assert.match(view.text(), /▸ ✖ bash npm test/, "a call cut short by the stop reads as failed");
+    await tick(); await tick();
+    assert.deepEqual(agents.children.map((child) => child.killed), [[], []], "stop uses RPC abort then retires the selected child cleanly");
+    // The initial batch report can resolve as idle while asynchronous stop retires the child.
+    const stopped = await agents.registry.resolve("api")!.stop();
+    await agents.pending;
+    assert.equal(stopped?.state, "stopped");
+    assert.equal(agents.registry.resolve("api")?.run.state, "stopped");
+    assert.deepEqual(view.list().slice(0, 3), ["⧉ SUBAGENTS", " ○ docs", "▌■ api"], "the selection follows the stopped run after retained agents");
+    assert.match(view.text(), /▸ ✖ bash npm test/, "a call cut short by stop is closed as failed");
     view.input("x");
-    assert.deepEqual(agents.children[0]!.killed, ["SIGTERM"], "finished runs are left alone");
+    await tick();
+    assert.deepEqual(agents.children[0]!.killed, [], "retired runs are left alone");
     view.input("j", "j");
     assert.equal(view.list()[4], "▌● s1 dev");
     view.mouse({ x: 6, y: view.row(/Kill the selected shell/) });
@@ -230,6 +238,20 @@ test("x stops the selected subagent through the registry and kills the selected 
   assert.deepEqual(view.notes, ["pi-jar: no shell s9"], "kill errors are reported");
   view.input("q");
   await view.opened;
+});
+
+test("asynchronous subagent stop failures are reported without rejecting the UI", async () => {
+  const agents = await subagents();
+  try {
+    agents.registry.stop = async () => { throw new Error("could not retire api"); };
+    const view = mount({ subagents: agents.registry });
+    view.lines();
+    view.input("x");
+    await tick();
+    assert.deepEqual(view.notes, ["pi-jar: could not retire api"]);
+    view.input("q");
+    await view.opened;
+  } finally { agents.abort(); }
 });
 
 test("mouse picks rows, scrolls with the wheel (pausing follow), passes drags through and closes on ×", async () => {

@@ -20,7 +20,7 @@ function withAgentDir(run: (directory: string) => Promise<void>) {
   };
 }
 
-function harness() {
+function harness(options: { activateDefault?: () => boolean } = {}) {
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
   const events = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
   const notices: string[] = [];
@@ -39,7 +39,7 @@ function harness() {
     modelRegistry: { find: (_provider: string, id: string) => ({ provider: "test", id }) }
   } as unknown as ExtensionContext & { cwd?: string };
   const manager = new ModelRoleManager(pi);
-  manager.register();
+  manager.register(undefined, options);
   return { commands, events, notices, models, thinking, ctx, manager };
 }
 
@@ -54,6 +54,16 @@ test("roles rejects incomplete assignment, persists valid role and activates aut
   await h.commands.get("roles")!("plan", h.ctx);
   assert.deepEqual(h.models, ["model"]);
   assert.ok(h.notices.some((notice) => notice.includes("Usage:")));
+}));
+
+test("child role startup loads assignments without overriding CLI-selected model or effort", withAgentDir(async (directory) => {
+  writeFileSync(join(directory, "pi-jar-roles.json"), JSON.stringify({ version: 2, roles: { default: "p/base:low", worker: "p/worker:high" } }));
+  const h = harness({ activateDefault: () => false });
+  await h.events.get("session_start")!({}, h.ctx);
+  assert.deepEqual(h.models, []);
+  assert.deepEqual(h.thinking, []);
+  assert.equal(h.manager.activeRole(), undefined);
+  assert.deepEqual(h.manager.get("worker"), { provider: "p", model: "worker", thinking: "high" });
 }));
 
 test("specs normalize models, aliases, effort suffixes and the default wildcard", () => {
@@ -97,7 +107,7 @@ test("project roles override global ones, custom roles list after built-ins, and
     assert.equal(h.manager.scopeOf("default"), "project");
     assert.deepEqual(h.manager.get("review"), { provider: "p", model: "project", thinking: "low" });
     const list = h.manager.list();
-    assert.deepEqual(list.slice(0, 8).map((row) => row.role), ["default", "smol", "slow", "plan", "implement", "advisor", "task", "commit"]);
+    assert.deepEqual(list.slice(0, 12).map((row) => row.role), ["default", "smol", "slow", "plan", "implement", "advisor", "moderator", "scout", "worker", "reviewer", "task", "commit"]);
     assert.equal(list.at(-1)?.role, "review");
     assert.equal(list.at(-1)?.custom, true);
     assert.equal(await h.manager.cycle(h.ctx), "smol");
@@ -163,4 +173,17 @@ test("a model picked by the user during a temporary role is kept on restore", wi
   assert.equal(h.manager.activeRole(), undefined, "a manual pick clears the role label");
   await restore();
   assert.deepEqual(h.models, ["builder"], "no restore over the user's choice");
+}));
+
+
+test("role activation falls back to the next configured model when the primary is unavailable", withAgentDir(async () => {
+  const h = harness();
+  h.manager.update("scout", "p/expensive:low");
+  h.manager.updateFallbacks("scout", ["p/cheap:minimal"]);
+  (h.ctx.modelRegistry as unknown as { find(provider: string, id: string): unknown }).find = (_provider, id) =>
+    id === "expensive" ? undefined : { provider: "p", id };
+  assert.equal(await h.manager.activate("scout", h.ctx), true);
+  assert.deepEqual(h.models, ["cheap"]);
+  assert.deepEqual(h.thinking, ["minimal"]);
+  assert.deepEqual(h.manager.resolveCandidates("scout").map((item) => item.model), ["expensive", "cheap"]);
 }));

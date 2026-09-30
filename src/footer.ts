@@ -33,7 +33,7 @@ export interface FooterView extends JarStatus {
   motionBudget?: number;
 }
 
-export type ActivityState = "queued" | "running" | "done" | "failed" | "stopped";
+export type ActivityState = "queued" | "running" | "idle" | "paused" | "done" | "failed" | "stopped";
 export interface FooterActivity {
   kind: "subagent" | "shell";
   id: string;
@@ -65,7 +65,8 @@ const metric = (key: IconKey, word: string, text: string) => withIcon(key, text.
 
 function activityGlyph(state: ActivityState): { glyph: string; color: Color } {
   if (state === "running") return { glyph: icon("running"), color: "accent" };
-  if (state === "queued") return { glyph: icon("pending"), color: "dim" };
+  if (state === "queued" || state === "idle") return { glyph: icon("pending"), color: "dim" };
+  if (state === "paused") return { glyph: icon("stopped"), color: "muted" };
   if (state === "done") return { glyph: icon("success"), color: "success" };
   if (state === "failed") return { glyph: icon("error"), color: "error" };
   return { glyph: icon("stopped"), color: "dim" };
@@ -197,7 +198,7 @@ function footerLines(view: FooterView, width: number, theme: FooterTheme, hits: 
     const small = [...(show.memory && memory ? [memory] : []), ...(show.quota ? windows : [])];
     if (small.length && contentWidth >= 26) lines.push(truncateToWidth(theme.fg("dim", small.join("  ·  ")), contentWidth));
     // Too narrow for rows: one clickable count of live work.
-    const agents = activity.filter((item) => item.kind === "subagent" && (item.state === "running" || item.state === "queued")).length;
+    const agents = activity.filter((item) => item.kind === "subagent" && ["running", "queued", "idle", "paused"].includes(item.state)).length;
     const shells = activity.filter((item) => item.kind === "shell" && item.state === "running").length;
     const counts = [agents ? withIcon("subagents", `${agents}`) : "", shells ? withIcon("shell", `${shells}`) : ""].filter(Boolean).join("  ");
     if (counts) {

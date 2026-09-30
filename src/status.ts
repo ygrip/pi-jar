@@ -73,7 +73,8 @@ export function collectStatuses(statuses: ReadonlyMap<string, string>, now: numb
     const id = rawKey.slice(ROLE_PREFIX.length);
     if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(id)) continue;
     const role = cachedRole(id, rawValue);
-    if (!role || role.expiresAt == null || role.expiresAt <= now || role.expiresAt > now + ROLE_TTL_MS) {
+    const ttl = id.startsWith("delegate-") ? 24 * 60 * 60_000 : ROLE_TTL_MS;
+    if (!role || role.expiresAt == null || role.expiresAt <= now || role.expiresAt > now + ttl) {
       extras.push(`${id}: unavailable`);
       continue;
     }
