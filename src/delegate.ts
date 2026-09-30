@@ -829,6 +829,12 @@ const peekRecord = (record: SubagentRecord): string => {
 export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, registry: DelegateRegistry, options: DelegateOptions = {}): void {
   if (process.env[CHILD_ENV] || typeof (pi as ExtensionAPI & { registerTool?: unknown }).registerTool !== "function") return;
   let batch = 0;
+  const roleCandidates = (role: string) => {
+    const manager = roles as ModelRoleManager & { resolveCandidates?: (name: string) => ReturnType<ModelRoleManager["resolveCandidates"]> };
+    if (typeof manager.resolveCandidates === "function") return manager.resolveCandidates(role);
+    const resolved = roles.resolve(role);
+    return resolved ? [resolved] : [];
+  };
 
   pi.registerTool({
     name: DELEGATE_TOOL,
@@ -856,7 +862,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       const runs: DelegateRun[] = requested.map((item, index) => {
         const mode: DelegateExecutionMode = item.mode ?? defaultMode;
         const role = cleanText(item.role ?? roleForMode(mode), 32) || roleForMode(mode);
-        const candidates = [...roles.resolveCandidates(role), ...roles.resolveCandidates("default")];
+        const candidates = [...roleCandidates(role), ...roleCandidates("default")];
         const selected = candidates.find((candidate) => available.has(candidate.provider + "/" + candidate.model));
         const model = selected ? `${selected.provider}/${selected.model}` : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
         thinkingByRun.set(index + 1, selected?.thinking);
