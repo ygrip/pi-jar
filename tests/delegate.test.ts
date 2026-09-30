@@ -291,6 +291,7 @@ test("worktree mode forks parent context, isolates edits, and applies successful
     const tracker = new ChangeTracker(() => root);
     const fake = fakeSpawn((child) => {
       const call = fake.calls[0]!;
+      assert.ok(call.cwd);
       assert.notEqual(call.cwd, root, "child runs in a disposable worktree");
       writeFileSync(join(call.cwd, "a.ts"), "from child\n");
       emit(child, { type: "tool_execution_start", toolCallId: "e", toolName: "edit", args: { path: "a.ts" } });
@@ -308,6 +309,7 @@ test("worktree mode forks parent context, isolates edits, and applies successful
     assert.ok(call.env[CHILD_WORKTREE_ENV], "child receives its workspace boundary");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "from child\n");
     assert.equal(tracker.count(), 1, "applied child edits join the parent's /diff tracker");
+    assert.ok(call.cwd);
     assert.equal(existsSync(call.cwd), false, "successful disposable worktree is cleaned up");
     const run = result.details.runs[0]!;
     assert.equal(run.mode, "worktree");
