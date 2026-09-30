@@ -48,8 +48,17 @@ export function fakeChild(script?: (child: FakeChild, prompt: string) => void): 
   child.kill = (signal: string) => { child.killed.push(signal); exit(143, signal); };
   child.stdin.on("finish", () => exit(0));
   child.stdin.on("command", (command: Record<string, unknown>) => {
+    if (command.type === "clear_queue") {
+      emit(child, { type: "response", id: command.id, command: "clear_queue", success: true, data: { steering: [], followUp: [] } });
+      return;
+    }
+    if (command.type === "abort") {
+      emit(child, { type: "response", id: command.id, command: "abort", success: true });
+      queueMicrotask(() => settle(child));
+      return;
+    }
     if (command.type !== "prompt") return;
-    emit(child, { type: "response", id: command.id, command: "prompt", success: true });
+    emit(child, { type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
     queueMicrotask(() => script?.(child, String(command.message)));
   });
   return child;
