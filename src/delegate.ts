@@ -777,7 +777,9 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           }
           try {
             run.appliedFiles = applyDelegateWorktree(worktree, ctx.cwd, files, options.changes?.());
-            if (run.appliedFiles.length) options.changed?.();
+            if (run.appliedFiles.length) {
+              try { options.changed?.(); } catch (error) { console.error("pi-jar: could not refresh parent change UI", error); }
+            }
             disposeDelegateWorktree(worktree);
             run.workspace = undefined;
           } catch (error) {
