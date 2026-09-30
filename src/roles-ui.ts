@@ -4,10 +4,11 @@ import { promptText } from "./dialogs.ts";
 import { isRoleName, normalizeSpec, THINKING, type ModelRoleManager, type RoleRow } from "./model-roles.ts";
 import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
 
-type RoleAction = "model" | "alias" | "thinking" | "scope" | "activate" | "clear" | "new" | "delete";
+type RoleAction = "model" | "fallback" | "alias" | "thinking" | "scope" | "activate" | "clear" | "new" | "delete";
 const ACTIONS: { action: RoleAction; key: string; hint: string; label: string }[] = [
   { action: "activate", key: "\r", hint: "⏎", label: "Activate this role now" },
   { action: "model", key: "m", hint: "m", label: "Assign a model" },
+  { action: "fallback", key: "f", hint: "f", label: "Set fallback model" },
   { action: "alias", key: "a", hint: "a", label: "Alias another role (@role)" },
   { action: "thinking", key: "t", hint: "t", label: "Set thinking effort" },
   { action: "scope", key: "s", hint: "s", label: "Move between global and project" },
@@ -28,6 +29,7 @@ function detail(row: RoleRow, active: string | undefined): [ThemeColor, string][
     [target[0], "Model     " + target[1]],
     ["muted", "Alias     " + (row.resolved && row.resolved.via.length > 1 ? row.resolved.via.join(" → ") : "—")],
     ["muted", "Effort    " + (row.resolved?.thinking ?? "follow current")],
+    ["muted", "Fallback  " + (row.fallbacks.length ? row.fallbacks.join(" → ") : "—")],
     ["muted", "Scope     " + (row.scope ?? "unset") + (row.scope === "project" ? "  (.pi/pi-jar-roles.json)" : row.scope === "global" ? "  (agent dir)" : "")],
     ["dim", ""],
     ["dim", "Specs: provider/model[:effort] · @role[:effort] · *"],
@@ -147,6 +149,15 @@ async function applyAction(ctx: ExtensionContext, roles: ModelRoleManager, row: 
       const labels = models.map((model) => model.provider + "/" + model.id);
       const selected = await ctx.ui.select("Model for " + row.role, labels);
       if (selected) roles.update(row.role, selected + effort(), scope);
+      return;
+    }
+    case "fallback": {
+      const models = ctx.modelRegistry.getAvailable().slice().sort((a, b) => (a.provider + "/" + a.id).localeCompare(b.provider + "/" + b.id));
+      if (!models.length) { ctx.ui.notify("No authenticated models are currently available", "warning"); return; }
+      const choices = ["Clear fallback", ...models.map((model) => model.provider + "/" + model.id)];
+      const selected = await ctx.ui.select("Fallback model for " + row.role, choices);
+      if (!selected) return;
+      roles.updateFallbacks(row.role, selected === "Clear fallback" ? [] : [selected], scope);
       return;
     }
     case "alias": {
