@@ -47,7 +47,7 @@ function collect(sources: ActivitySources): Item[] {
   for (const record of records) {
     const { run } = record;
     const status: Status = run.state === "working" ? "running" : run.state === "queued" || run.state === "idle" ? "pending"
-      : run.state === "paused" ? "stopped" : run.state === "done" ? "success" : run.error === "stopped" ? "stopped" : "error";
+      : run.state === "paused" || run.state === "stopped" ? "stopped" : run.state === "done" ? "success" : "error";
     items.push({ kind: "subagent", id: record.key, status, label: run.name, record });
   }
   const jobs = sources.shells?.summaries() ?? [];
@@ -350,7 +350,7 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
     const stopSelected = () => {
       const item = selected();
       if (!item || item.kind === "role") return;
-      const subagentLive = item.kind === "subagent" && item.record.run.state !== "done" && item.record.run.state !== "failed";
+      const subagentLive = item.kind === "subagent" && !["done", "failed", "stopped"].includes(item.record.run.state);
       const shellLive = item.kind === "shell" && item.status === "running";
       if (!subagentLive && !shellLive) return;
       try {
@@ -449,7 +449,7 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
         // Footer: the two actions, the steering input for subagents, then key hints.
         const actions = optionList(theme, [item?.kind === "shell" ? "Kill the selected shell" : item?.kind === "role" ? "Stop (teammates from other extensions are read-only)" : "Stop the selected subagent",
           "Follow the latest output"], -1, ACTIONS.map((action) => action.key));
-        const stoppable = item?.kind === "subagent" ? item.record.run.state !== "done" && item.record.run.state !== "failed"
+        const stoppable = item?.kind === "subagent" ? !["done", "failed", "stopped"].includes(item.record.run.state)
           : item?.kind === "shell" && item.status === "running";
         if (!stoppable) actions[0] = fg("dim", stripTerminalSequences(actions[0]!));
         const footer = [...actions];
