@@ -863,7 +863,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
 
       const id = ++batch;
       const defaultMode: DelegateExecutionMode = params.mode ?? (params.write === true ? "direct" : "scout");
-      const available = new Set(ctx.modelRegistry.getAvailable().map((model) => model.provider + "/" + model.id));
+      let available = new Set<string>();
+      try { available = new Set(ctx.modelRegistry.getAvailable().map((model) => model.provider + "/" + model.id)); } catch { /* current model remains the fallback */ }
       const thinkingByRun = new Map<number, string | undefined>();
       const runs: DelegateRun[] = requested.map((item, index) => {
         const mode: DelegateExecutionMode = item.mode ?? defaultMode;
