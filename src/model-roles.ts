@@ -304,7 +304,7 @@ export class ModelRoleManager {
 
   /** Activate the next assigned role in the cycle order. */
   async cycle(ctx: ExtensionContext): Promise<string | undefined> {
-    const order = this.cycleOrder().filter((role) => this.resolve(role));
+    const order = this.cycleOrder().filter((role) => this.resolveCandidates(role).length > 0);
     if (!order.length) { ctx.ui.notify("No roles in the cycle order are assigned; configure them with /roles", "info"); return undefined; }
     const next = order[(order.indexOf(this.active ?? "") + 1) % order.length]!;
     return await this.activate(next, ctx) ? next : undefined;
@@ -361,7 +361,7 @@ export class ModelRoleManager {
     this.pi.on("session_start", async (_event, ctx) => {
       this.load(ctx.cwd);
       this.active = undefined;
-      if (this.resolve("default")) await this.activate("default", ctx, true);
+      if (this.resolveCandidates("default").length) await this.activate("default", ctx, true);
     });
 
     this.pi.registerCommand("roles", {
