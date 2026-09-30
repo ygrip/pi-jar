@@ -288,7 +288,7 @@ test("incremental writes roll back atomically on persistence failure and enforce
   fail = true;
   assert.match(store.appendTodos([{ title: "New", status: "pending" }])!, /Could not save/);
   assert.deepEqual(store.all(), before);
-  assert.match(store.replace(first.id, { title: "Renamed" })!, /Could not save/);
+  assert.match(store.update(first.id, { title: "Renamed" })!, /Could not save/);
   assert.deepEqual(store.all(), before);
   assert.equal(store.delete(first.id), false);
   assert.deepEqual(store.all(), before);
@@ -311,7 +311,7 @@ test("all stable IDs are returned beyond the bounded preview and explicit write 
   await h.run({ action: "update", id: last.id, title: "Last renamed" });
   assert.equal(h.store.get(last.id)?.title, "Last renamed");
   await h.run({ action: "write", todos: [{ id: last.id, content: "Final rename", status: "completed" }] });
-  assert.equal(h.store.all().length, 1, "legacy write still replaces the whole list");
+  assert.equal(h.store.all().length, 1, "write replaces the whole list");
   assert.equal(h.store.all()[0]!.id, last.id);
   await h.run({ todos: [] });
   assert.deepEqual(h.store.all(), []);
