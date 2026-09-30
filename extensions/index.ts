@@ -194,7 +194,7 @@ export default function piJar(pi: ExtensionAPI): void {
   const footerActivity = (now: number): FooterActivity[] => {
     const rows: FooterActivity[] = [];
     for (const { key, run } of subagents.records()) {
-      if (run.endedAt && now - run.endedAt > ACTIVITY_LINGER_MS) continue;
+      if ((run.state === "done" || run.state === "failed") && run.endedAt && now - run.endedAt > ACTIVITY_LINGER_MS) continue;
       rows.push({ kind: "subagent", id: key, name: run.name, state: subagentState(run),
         detail: run.error ?? run.activity ?? cleanText(run.task, 120),
         stats: [run.tools ? `${run.tools} tools` : "", run.startedAt ? seconds((run.endedAt ?? now) - run.startedAt) : ""].filter(Boolean).join(" · ") });
