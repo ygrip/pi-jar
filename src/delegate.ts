@@ -262,47 +262,87 @@ export interface DelegateHooks {
   /** A successful edit/write by the child, with the path it gave. */
   edited?(path: string): void;
 }
-export interface DelegateHandle { done: Promise<void>; steer(text: string): boolean }
+export interface DelegateHandle {
+  /** First point where the child is idle after its initial task. */
+  firstSettled: Promise<void>;
+  /** Process lifetime; persistent agents stay alive across many settled turns. */
+  closed: Promise<void>;
+  steer(text: string): boolean;
+  pause(): Promise<boolean>;
+  resume(text?: string): boolean;
+  ask(text: string): Promise<string | undefined>;
+  shutdown(): Promise<void>;
+}
 
 /**
- * Run one child Pi in RPC mode, feeding progress into `run` and calling `update` on every change.
- * RPC keeps stdin open so the user can steer the subagent; it is closed once the child settles.
+ * Run one child Pi in RPC mode. Persistent children remain alive after agent_settled so the
+ * moderator can peek, steer, pause, resume and ask them questions without rebuilding context.
  */
 export function startDelegate(run: DelegateRun, args: string[], prompt: string, cwd: string, signal: AbortSignal | undefined,
-  update: () => void, spawnProcess: Spawn = spawn as Spawn, hooks: DelegateHooks = {}): DelegateHandle {
+  update: () => void, spawnProcess: Spawn = spawn as Spawn, hooks: DelegateHooks = {}, persistent = true): DelegateHandle {
   let steer: (text: string) => boolean = () => false;
-  const done = new Promise<void>((resolveDone) => {
+  let pause: () => Promise<boolean> = async () => false;
+  let resume: (text?: string) => boolean = () => false;
+  let ask: (text: string) => Promise<string | undefined> = async () => undefined;
+  let shutdown: () => Promise<void> = async () => {};
+  let resolveFirst!: () => void;
+  let firstResolved = false;
+  const firstSettled = new Promise<void>((resolve) => { resolveFirst = resolve; });
+
+  const closed = new Promise<void>((resolveClosed) => {
     const invocation = piInvocation(args);
     let child: ChildProcess;
     try {
       child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...hooks.env, [CHILD_ENV]: "1" } });
     } catch (error) {
-      run.state = "failed"; run.error = error instanceof Error ? error.message : String(error); run.endedAt = Date.now(); update(); resolveDone(); return;
+      run.state = "failed"; run.error = error instanceof Error ? error.message : String(error); run.endedAt = Date.now(); update();
+      firstResolved = true; resolveFirst(); resolveClosed(); return;
     }
+
     run.state = "working";
     run.startedAt = Date.now();
+    run.endedAt = undefined;
     run.activity = "starting";
     update();
+
     let buffer = "";
-    // A JSON line past this is dropped whole rather than buffered without bound.
     let overflow = false;
-    // Streamed text repaints at most every LIVE_REPAINT_MS; the trailing timer shows the last tokens.
     let liveAt = 0;
     let liveTimer: ReturnType<typeof setTimeout> | undefined;
     let stderr = "";
     let finished = false;
     let settled = false;
+    let pauseRequested = false;
+    let turnTimer: ReturnType<typeof setTimeout> | undefined;
+    const settleWaiters: Array<() => void> = [];
+    const messageWaiters: Array<{ after: number; resolve(value: string | undefined): void; timer: ReturnType<typeof setTimeout> }> = [];
+
     const send = (command: object): boolean => {
       const stdin = child.stdin;
       if (!stdin || stdin.destroyed || stdin.writableEnded) return false;
       try { stdin.write(JSON.stringify(command) + "\n"); return true; } catch { return false; }
     };
-    // EPIPE after the child exits is expected; anything else is kept for the failure message.
-    child.stdin?.on("error", (error) => { if (!finished) stderr = (stderr + "\n" + error.message).slice(-4000); });
+    const clearTurnTimer = () => { if (turnTimer) clearTimeout(turnTimer); turnTimer = undefined; };
+    const hardStop = () => {
+      child.kill("SIGTERM");
+      setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 3000).unref?.();
+    };
+    const armTurnTimer = () => {
+      clearTurnTimer();
+      turnTimer = setTimeout(() => {
+        hardStop();
+        finish("failed", "timed out");
+      }, TIMEOUT_MS);
+      turnTimer.unref?.();
+    };
+    const resolveSettled = () => {
+      for (const waiter of settleWaiters.splice(0)) waiter();
+    };
+    const waitSettled = () => settled || finished ? Promise.resolve() : new Promise<void>((resolve) => settleWaiters.push(resolve));
     const finish = (state: DelegateState, error?: string) => {
       if (finished) return;
       finished = true;
-      clearTimeout(timer);
+      clearTurnTimer();
       clearTimeout(liveTimer);
       signal?.removeEventListener("abort", abort);
       if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
@@ -312,29 +352,45 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       run.live = "";
       for (const entry of run.transcript) if (entry.kind === "tool" && entry.status === "running") { entry.status = "error"; entry.endedAt = Date.now(); entry.rev++; }
       run.endedAt = Date.now();
+      resolveSettled();
+      if (!firstResolved) { firstResolved = true; resolveFirst(); }
+      for (const waiter of messageWaiters.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(undefined); }
       update();
-      resolveDone();
+      resolveClosed();
     };
-    const stop = () => { child.kill("SIGTERM"); setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 3000).unref?.(); };
-    // Stopping one run from the activity view reads "stopped"; aborting the whole tool call reads "aborted".
-    const abort = () => { stop(); finish("failed", signal?.reason === STOP_REASON ? "stopped" : "aborted"); };
-    const timer = setTimeout(() => { stop(); finish("failed", "timed out"); }, TIMEOUT_MS);
-    timer.unref?.();
+    const abort = () => { hardStop(); finish("failed", signal?.reason === STOP_REASON ? "stopped" : "aborted"); };
+
+    child.stdin?.on("error", (error) => { if (!finished) stderr = (stderr + "\n" + error.message).slice(-4000); });
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener("abort", abort, { once: true });
+    armTurnTimer();
+
+    const beginPrompt = (message: string, pauseAfter = false): boolean => {
+      const clean = cleanBlock(message, MAX_STEER_CHARS);
+      if (finished || !settled || !clean) return false;
+      if (!send({ id: "prompt-" + (run.resumes + 1), type: "prompt", message: clean })) return false;
+      settled = false;
+      pauseRequested = pauseAfter;
+      run.state = "working";
+      run.resumes++;
+      run.endedAt = undefined;
+      run.activity = "resuming";
+      armTurnTimer();
+      update();
+      return true;
+    };
+
     const running = new Map<string, { entry: ToolEntry; path?: string }>();
     const line = (raw: string) => {
-      // Output that arrives after an abort or timeout must not revive a finished run's activity.
       if (finished || !raw.trim()) return;
       let parsed: unknown;
       try { parsed = JSON.parse(raw); } catch { return; }
       if (!parsed || typeof parsed !== "object") return;
-      // Parsed child output: the object check above is all the cast assumes; every field stays unknown until read.
       const event = parsed as ChildEvent;
       switch (event.type) {
         case "response":
           if (event.success !== false) return;
-          if (event.command === "prompt") { stop(); finish("failed", cleanText(String(event.error ?? "prompt rejected"), 300)); return; }
+          if (event.command === "prompt") { hardStop(); finish("failed", cleanText(String(event.error ?? "prompt rejected"), 300)); return; }
           pushEntry(run, { kind: "note", rev: 0, text: `${cleanText(String(event.command ?? "command"), 24)} rejected: ${cleanText(String(event.error ?? ""), 200)}` });
           update();
           return;
@@ -410,19 +466,37 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
           if (event.message.stopReason === "error" && event.message.errorMessage) run.error = cleanText(String(event.message.errorMessage), 200);
           run.live = "";
           run.activity = "thinking";
+          for (let index = messageWaiters.length - 1; index >= 0; index--) {
+            const waiter = messageWaiters[index]!;
+            if (run.turns <= waiter.after) continue;
+            messageWaiters.splice(index, 1);
+            clearTimeout(waiter.timer);
+            waiter.resolve(text || undefined);
+          }
           update();
           return;
         }
-        case "agent_settled":
-          // Nothing more will run on its own: close stdin so Pi shuts down in order.
+        case "agent_settled": {
           settled = true;
-          run.activity = "finishing";
-          if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
+          clearTurnTimer();
+          run.live = "";
+          run.activity = undefined;
+          run.endedAt = Date.now();
+          run.state = pauseRequested ? "paused" : "idle";
+          pauseRequested = false;
+          if (!firstResolved) {
+            firstResolved = true;
+            signal?.removeEventListener("abort", abort);
+            resolveFirst();
+          }
+          resolveSettled();
           update();
+          if (!persistent && child.stdin && !child.stdin.writableEnded) child.stdin.end();
           return;
+        }
       }
     };
-    // Decode as UTF-8 across chunk boundaries, and scan only each new chunk for line ends.
+
     child.stdout?.setEncoding?.("utf8");
     child.stdout?.on("data", (chunk) => {
       const text = String(chunk);
@@ -445,22 +519,114 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       if (code === 0 && settled && !run.error) finish("done");
       else finish("failed", run.error ?? (cleanText(stderr, 300) || (settled ? `exited ${code}` : `exited ${code} before finishing`)));
     });
+
     steer = (text) => {
       const message = cleanBlock(text, MAX_STEER_CHARS);
-      if (finished || settled || !message || !send({ type: "steer", message })) return false;
+      if (finished || !message || run.state !== "working" || !send({ type: "steer", message })) return false;
       pushEntry(run, { kind: "steer", rev: 0, text: message });
       run.steered++;
       update();
       return true;
     };
-    if (!send({ id: "prompt", type: "prompt", message: prompt })) { stop(); finish("failed", "could not send the task to the subagent"); }
+    pause = async () => {
+      if (finished) return false;
+      if (run.state === "paused") return true;
+      if (run.state === "idle") { run.state = "paused"; run.pauses++; update(); return true; }
+      if (run.state !== "working") return false;
+      pauseRequested = true;
+      run.pauses++;
+      run.activity = "pausing";
+      const waiting = waitSettled();
+      send({ type: "clear_queue" });
+      if (!send({ type: "abort" })) return false;
+      update();
+      await waiting;
+      return run.state === "paused";
+    };
+    resume = (text) => {
+      if (run.state !== "paused" && run.state !== "idle") return false;
+      const message = text?.trim() || "Continue the assigned task from where you stopped. Review your current checklist and remaining work first.";
+      return beginPrompt(message);
+    };
+    ask = async (text) => {
+      const question = cleanBlock(text, MAX_STEER_CHARS);
+      if (!question || finished) return undefined;
+      const after = run.turns;
+      const answer = new Promise<string | undefined>((resolve) => {
+        const timer = setTimeout(() => {
+          const index = messageWaiters.findIndex((item) => item.resolve === resolve);
+          if (index >= 0) messageWaiters.splice(index, 1);
+          resolve(undefined);
+        }, 2 * 60_000);
+        timer.unref?.();
+        messageWaiters.push({ after, resolve, timer });
+      });
+      const instruction = "Moderator BTW: answer this question first in one compact paragraph, then continue your assigned task without changing scope. Question: " + question;
+      const wasPaused = run.state === "paused";
+      const sent = run.state === "working" ? steer(instruction)
+        : (run.state === "idle" || run.state === "paused") ? beginPrompt(instruction, wasPaused) : false;
+      if (!sent) {
+        const waiter = messageWaiters.pop();
+        if (waiter) { clearTimeout(waiter.timer); waiter.resolve(undefined); }
+        return undefined;
+      }
+      return answer;
+    };
+    shutdown = async () => {
+      if (finished) { await closed; return; }
+      if (run.state === "working") {
+        const waiting = waitSettled();
+        send({ type: "clear_queue" });
+        send({ type: "abort" });
+        await waiting;
+      }
+      if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
+      const killer = setTimeout(() => { if (child.exitCode === null) hardStop(); }, 3000);
+      killer.unref?.();
+      await closed;
+      clearTimeout(killer);
+    };
+
+    if (!send({ id: "prompt", type: "prompt", message: prompt })) { hardStop(); finish("failed", "could not send the task to the subagent"); }
   });
-  return { done, steer: (text) => steer(text) };
+  return {
+    firstSettled,
+    closed,
+    steer: (text) => steer(text),
+    pause: () => pause(),
+    resume: (text) => resume(text),
+    ask: (text) => ask(text),
+    shutdown: () => shutdown()
+  };
 }
 
-const isActive = (state: DelegateState) => state === "queued" || state === "working";
+const isRunning = (state: DelegateState) => state === "queued" || state === "working";
+const isRetained = (state: DelegateState) => isRunning(state) || state === "idle" || state === "paused";
 
-export interface SubagentRecord { key: string; batch: number; run: DelegateRun; stop(): void; steer(text: string): boolean }
+export interface SubagentStopReport {
+  key: string;
+  name: string;
+  state: DelegateState;
+  task: string;
+  workspace?: string;
+  changed: string[];
+  applied: string[];
+  remaining: string[];
+  last: string;
+  error?: string;
+}
+export interface SubagentRecord {
+  key: string;
+  batch: number;
+  run: DelegateRun;
+  stop(): Promise<SubagentStopReport>;
+  pause(): Promise<boolean>;
+  resume(text?: string): boolean;
+  steer(text: string): boolean;
+  ask(text: string): Promise<string | undefined>;
+  changed(): string[];
+  discard(): void;
+}
 
 /**
  * Live subagents for the activity view. Tool details are saved in the session, so they stay small;
