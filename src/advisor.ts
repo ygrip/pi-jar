@@ -187,7 +187,7 @@ export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, optio
       const focus = args.trim();
       ctx.ui.notify("Consulting the advisor…", "info");
       try {
-        const answer = await consult(ctx, focus ? { question: focus } : {});
+        const answer = await consult(ctx, focus ? { question: focus } : {}, ctx.signal);
         deliver(ctx, `◆ Advisor · ${answer.model}${focus ? " · " + focus : ""}`, answer.text);
       } catch (error) { ctx.ui.notify("Advisor failed: " + (error instanceof Error ? error.message : String(error)), "error"); }
     }

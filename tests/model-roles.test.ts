@@ -110,6 +110,37 @@ test("project roles override global ones, custom roles list after built-ins, and
   }
 }));
 
+test("fallback configuration is normalized and project lists override global lists", withAgentDir(async (directory) => {
+  const h = harness();
+  h.manager.update("slow", "p/backup:low");
+  await h.commands.get("roles")!("fallback advisor @slow p/last:high @slow", h.ctx);
+  assert.deepEqual(h.manager.fallbackSpecs("advisor"), ["@slow", "p/last:high"]);
+  assert.equal(h.manager.resolveSpec("@slow").model, "backup");
+  assert.equal(h.manager.resolveSpec("@slow:high").thinking, "high");
+  assert.deepEqual(JSON.parse(readFileSync(join(directory, "pi-jar-roles.json"), "utf8")).fallbacks.advisor, ["@slow", "p/last:high"]);
+  assert.throws(() => h.manager.updateFallbacks("advisor", ["invalid"]), /Invalid fallback/);
+  assert.throws(() => h.manager.updateFallbacks("advisor", Array(9).fill("p/a")), /At most 8/);
+  assert.throws(() => h.manager.resolveSpec("@missing"), /not assigned/);
+  const project = mkdtempSync(join(tmpdir(), "pi-jar-fallbacks-"));
+  try {
+    mkdirSync(join(project, ".pi"));
+    writeFileSync(join(project, ".pi", "pi-jar-roles.json"), JSON.stringify({ version: 2, roles: {}, fallbacks: { advisor: ["p/project"] } }));
+    h.manager.load(project);
+    assert.deepEqual(h.manager.fallbackSpecs("advisor"), ["p/project"]);
+    await h.commands.get("roles")!("fallback advisor clear --project", h.ctx);
+    assert.deepEqual(h.manager.fallbackSpecs("advisor"), []);
+    h.manager.load(project);
+    assert.deepEqual(h.manager.fallbackSpecs("advisor"), [], "empty list disables inherited fallbacks after reload");
+    h.manager.load();
+    assert.deepEqual(h.manager.fallbackSpecs("advisor"), ["@slow", "p/last:high"]);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+}));
+
+test("fallback parsing drops malformed entries and retains explicit empty lists", () => {
+  assert.deepEqual(parseRoleConfig({ version: 2, roles: {}, fallbacks: { advisor: ["p/m", "bad", null, "p/m"], commit: [], BAD: ["p/m"] } }).fallbacks,
+    { advisor: ["p/m"], commit: [] });
+});
+
 test("temporary activation restores the previous model and effort", withAgentDir(async () => {
   const h = harness();
   h.manager.update("advisor", "p/auditor:xhigh");

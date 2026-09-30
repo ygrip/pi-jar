@@ -21,7 +21,7 @@ export type RoleScope = "global" | "project";
 export interface RoleAssignment { provider: string; model: string; thinking?: ThinkingLevel }
 export interface ResolvedRole extends RoleAssignment { via: string[] }
 export interface RoleTag { name?: string; color?: string }
-export interface RoleConfig { version: 2; roles: Record<string, string>; cycleOrder?: string[]; tags?: Record<string, RoleTag> }
+export interface RoleConfig { version: 2; roles: Record<string, string>; cycleOrder?: string[]; tags?: Record<string, RoleTag>; fallbacks?: Record<string, string[]> }
 export interface RoleRow {
   role: string; label: string; usedBy?: string; custom: boolean;
   spec?: string; scope?: RoleScope; resolved?: ResolvedRole; error?: string;
@@ -66,6 +66,17 @@ export function parseRoleConfig(raw: unknown): RoleConfig {
       }
     }
     if (spec) config.roles[role] = spec;
+  }
+  if (value.fallbacks && typeof value.fallbacks === "object") {
+    const fallbacks: Record<string, string[]> = {};
+    for (const [role, entries] of Object.entries(value.fallbacks)) {
+      if (!isRoleName(role) || !Array.isArray(entries)) continue;
+      fallbacks[role] = [...new Set(entries.flatMap((entry) => {
+        const spec = typeof entry === "string" ? normalizeSpec(entry) : undefined;
+        return spec ? [spec] : [];
+      }))].slice(0, 8);
+    }
+    if (Object.keys(fallbacks).length) config.fallbacks = fallbacks;
   }
   if (Array.isArray(value.cycleOrder)) {
     const order = value.cycleOrder.filter((item): item is string => typeof item === "string" && isRoleName(item));
@@ -285,6 +296,32 @@ export class ModelRoleManager {
     if (scope === "project") this.project = next; else this.global = next;
   }
 
+  /** Project lists replace global lists; an empty project list disables inherited fallbacks. */
+  fallbackSpecs(role: string): string[] {
+    return [...(this.project.fallbacks?.[role] ?? this.global.fallbacks?.[role] ?? [])];
+  }
+
+  resolveSpec(spec: string): ResolvedRole {
+    const result = resolveRole({ ...this.merged(), __fallback__: spec }, "__fallback__");
+    if (!result || "error" in result) throw new Error(result?.error ?? "Invalid fallback model");
+    return result;
+  }
+
+  updateFallbacks(role: string, specs: string[], scope: RoleScope = "global"): void {
+    if (!isRoleName(role)) throw new Error("Invalid role name: " + role);
+    if (specs.length > 8) throw new Error("At most 8 fallback models are allowed");
+    const normalized = specs.map((spec) => {
+      const target = normalizeSpec(spec);
+      if (!target) throw new Error("Invalid fallback target: " + spec);
+      return target;
+    });
+    if (scope === "project" && !this.cwd) throw new Error("Project roles need a working directory");
+    const target = scope === "project" ? this.project : this.global;
+    const next: RoleConfig = { ...target, fallbacks: { ...target.fallbacks, [role]: [...new Set(normalized)] } };
+    writeConfig(scope === "project" ? projectRoleFile(this.cwd!) : join(getAgentDir(), ROLE_FILE), next);
+    if (scope === "project") this.project = next; else this.global = next;
+  }
+
   register(openUi?: (ctx: ExtensionContext) => Promise<void>): void {
     const manual = (_event: unknown, ctx: ExtensionContext) => {
       if (this.applying) return;
@@ -300,13 +337,25 @@ export class ModelRoleManager {
     });
 
     this.pi.registerCommand("roles", {
-      description: "Configure model roles (default/smol/slow/plan/advisor/task/commit or custom): /roles, /roles set ROLE provider/model[:effort]|@role, /roles <role>",
+      description: "Configure model roles: /roles, /roles set ROLE provider/model[:effort]|@role, /roles fallback ROLE MODEL...|clear, /roles <role>",
       handler: async (args, ctx) => {
         const parts = args.trim().split(/\s+/).filter(Boolean);
         const verb = (parts[0] ?? "").toLowerCase();
         if (!verb || verb === "list") {
           if (!verb && ctx.hasUI && ctx.mode === "tui" && openUi) { await openUi(ctx); return; }
-          ctx.ui.notify(this.list().map(describeRole).join("\n"), "info");
+          ctx.ui.notify(this.list().map((row) => describeRole(row) + (this.fallbackSpecs(row.role).length
+            ? "  · fallbacks: " + this.fallbackSpecs(row.role).join(" → ") : "")).join("\n"), "info");
+          return;
+        }
+        if (verb === "fallback") {
+          const role = parts[1] ?? "";
+          const scope: RoleScope = parts.includes("--project") ? "project" : "global";
+          const targets = parts.slice(2).filter((part) => part !== "--project");
+          if (!isRoleName(role)) { ctx.ui.notify("Usage: /roles fallback ROLE [PROVIDER/MODEL[:effort]|@ROLE ...|clear] [--project]", "error"); return; }
+          if (!targets.length) { ctx.ui.notify(role + " fallbacks: " + (this.fallbackSpecs(role).join(" → ") || "none"), "info"); return; }
+          try { this.updateFallbacks(role, targets.length === 1 && targets[0] === "clear" ? [] : targets, scope); }
+          catch (error) { ctx.ui.notify("Could not save fallbacks: " + (error as Error).message, "error"); return; }
+          ctx.ui.notify("Saved " + role + " fallbacks (" + scope + ")", "info");
           return;
         }
         if (verb === "cycle") { await this.cycle(ctx); return; }

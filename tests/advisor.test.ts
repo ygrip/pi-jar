@@ -48,6 +48,32 @@ test("loop keys for huge inputs stay small but still tell calls apart", () => {
   assert.match(stuck.call(callKey("write", { path: "a.ts", content }))!, /same tool call 3 times: write \{"path":"a\.ts"/);
 });
 
+test("advisor consultation uses the configured fallback after a provider error", async () => {
+  const calls: string[] = [];
+  let command: Function | undefined;
+  const pi = { registerTool() {}, registerCommand(_name: string, spec: any) { command = spec.handler; }, on() {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
+  const roles = {
+    resolve: () => ({ provider: "p", model: "primary", via: [] }),
+    fallbackSpecs: () => ["p/backup:high"],
+    resolveSpec: () => ({ provider: "p", model: "backup", thinking: "high", via: [] })
+  };
+  const ctx = { hasUI: false, sessionManager: { getBranch: () => [] }, modelRegistry: {
+    find: (provider: string, id: string) => ({ provider, id }),
+    streamSimple: (model: any) => ({ result: async () => {
+      calls.push(model.id);
+      if (model.id === "primary") throw new Error("429 rate limited");
+      return { content: [{ type: "text", text: "Fallback review" }], stopReason: "stop" };
+    } })
+  } };
+  const advisor = registerAdvisor(pi as never, roles as never, { enabled: () => true, gates: () => true, usage: new SideUsage() });
+  assert.deepEqual(await advisor.consult(ctx as never, { question: "Review?" }), { text: "Fallback review", model: "p/backup" });
+  assert.deepEqual(calls, ["primary", "backup"]);
+  const controller = new AbortController();
+  controller.abort();
+  await command!("Review?", { ...ctx, signal: controller.signal, ui: { notify() {} } });
+  assert.deepEqual(calls, ["primary", "backup"], "cancelled /advisor command starts no model attempts");
+});
+
 test("advisor tool, /advisor and the loop gate consult the advisor role", async () => {
   const tools = new Map<string, any>();
   const commands = new Map<string, Function>();

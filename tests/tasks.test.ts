@@ -3,7 +3,7 @@ import test from "node:test";
 import { TASK_ENTRY, TodoStore, todoProgress, todoTotals, type TodoEvent } from "../src/tasks.ts";
 import { registerTaskTool, todoRow } from "../src/task-tool.ts";
 
-type Result = { content: { text: string }[]; details: { items: { id: string; parentId?: string }[]; total: number; done: number; count: number; truncated?: boolean; current?: string } };
+type Result = { content: { text: string }[]; details: { items: { id: string; parentId?: string }[]; total: number; done: number; count: number; truncated?: boolean; current?: string; ids?: { id: string; title: string; parentId?: string }[] } };
 
 function harness() {
   let tool: { execute(id: string, params: unknown, ...rest: unknown[]): Promise<Result> } | undefined;
@@ -176,6 +176,140 @@ test("subagents return the full checklist in details; the parent session keeps a
     if (previous === undefined) delete process.env.PI_JAR_CHILD;
     else process.env.PI_JAR_CHILD = previous;
   }
+});
+
+test("incremental append/replace/remove preserve unrelated tracking and replay", async () => {
+  const h = harness();
+  await h.run({ todos: plan });
+  const original = h.store.all();
+  const parent = original[0]!;
+  const appended = await h.run({ action: "append", todos: [
+    { content: "Build feature", status: "pending" },
+    { content: "QA", status: "pending", subtasks: [{ content: "Smoke test", status: "pending" }] }
+  ] });
+  assert.deepEqual(h.store.all().slice(0, original.length), original);
+  const duplicate = h.store.all()[original.length]!;
+  assert.notEqual(duplicate.id, parent.id, "appending the same title must create a new task");
+  assert.equal(appended.details.ids?.length, 8);
+  for (const item of h.store.all()) assert.ok(appended.content[0]!.text.includes(item.id));
+
+  await h.run({ action: "replace", id: parent.id, title: "Build robust feature", activeForm: "Building robust feature" });
+  assert.equal(h.store.get(parent.id)?.title, "Build robust feature");
+  assert.deepEqual(h.store.all().slice(1, original.length), original.slice(1), "omitted subtasks and other tasks survive replacement");
+  await h.run({ action: "replace", id: duplicate.id, todos: [{ content: "Follow-up", status: "completed" }] });
+  assert.equal(h.store.get(duplicate.id)?.status, "completed");
+  assert.equal(h.store.current()?.id, original[2]!.id);
+
+  await h.run({ action: "append", parent: parent.id, todos: [{ content: "Review", status: "pending" }] });
+  assert.equal(h.store.all().find((item) => item.title === "Review")?.parentId, parent.id);
+  await h.run({ action: "remove", id: parent.id });
+  assert.equal(h.store.get(parent.id), undefined);
+  assert.ok(h.store.all().every((item) => item.parentId !== parent.id));
+  assert.equal(h.store.get(duplicate.id)?.status, "completed");
+  assert.deepEqual(h.replay(), h.store.all());
+});
+
+test("targeted subtree replacement keeps matched child IDs and other parent groups", async () => {
+  const h = harness();
+  await h.run({ todos: plan });
+  const [parent, parser, wire, docs, release] = h.store.all();
+  const replaced = await h.run({ action: "replace", id: parent!.id, todos: [{
+    content: "Build v2", status: "pending", subtasks: [
+      { content: "Write parser", status: "completed" },
+      { id: wire!.id, content: "Wire robust command", status: "in_progress" },
+      { content: "New check", status: "pending" }
+    ]
+  }] });
+  assert.doesNotMatch(replaced.content[0]!.text, /Could not/);
+  assert.equal(h.store.get(parent!.id)?.title, "Build v2");
+  assert.equal(h.store.get(parser!.id)?.status, "completed");
+  assert.equal(h.store.get(wire!.id)?.title, "Wire robust command");
+  assert.equal(h.store.get(docs!.id), undefined);
+  assert.deepEqual(h.store.get(release!.id), release);
+  assert.deepEqual(h.replay(), h.store.all());
+});
+
+test("malformed and ambiguous operations never mutate or persist the task list", async () => {
+  const h = harness();
+  await h.run({ todos: plan });
+  const before = h.store.all();
+  const eventCount = h.events.length;
+  const id = before[0]!.id;
+  const bad = [
+    { action: "append", todos: null },
+    { action: "append", todos: [null] },
+    { action: "append", todos: [{ content: "X", status: "pending", subtasks: {} }] },
+    { action: "append", todos: [{ content: "X", status: "in_progress" }] },
+    { action: "append", todos: [{ content: "X", status: "pending" }], parent: before[1]!.id },
+    { action: "replace", id, todos: [] },
+    { action: "replace", id, todos: [{ content: "X", status: "pending" }, { content: "Y", status: "pending" }] },
+    { action: "replace", id, todos: [{ id: before[4]!.id, content: "X", status: "pending" }] },
+    { action: "replace", id: "missing", title: "X" },
+    { action: "replace", id, status: "invalid" },
+    { action: "remove", id: "missing" },
+    { action: "remove", id, todos: [] },
+    { action: "list", todos: [] },
+    { action: "unknown", todos: [] },
+    { action: "write", todos: [null] }
+  ];
+  for (const params of bad) {
+    const result = await h.run(params);
+    assert.match(result.content[0]!.text, /Could not/, JSON.stringify(params));
+    assert.deepEqual(h.store.all(), before);
+    assert.equal(h.events.length, eventCount);
+  }
+  assert.match(h.store.write(null as never)!, /array/);
+  assert.match(h.store.appendTodos([null] as never)!, /Every task/);
+  assert.deepEqual(h.store.all(), before);
+});
+
+test("incremental checkpoints retain existing details when replay starts at the newest write", async () => {
+  const h = harness();
+  const original = h.store.add("Keep context", "Important context")!;
+  await h.run({ action: "append", title: "New task", details: "New context" });
+  assert.equal(h.store.all().find((item) => item.title === "New task")?.details, "New context");
+  await h.run({ action: "replace", id: original.id, title: "Renamed context" });
+  assert.equal(h.store.get(original.id)?.details, "Important context");
+  assert.deepEqual(h.replay(), h.store.all());
+});
+
+test("incremental writes roll back atomically on persistence failure and enforce capacity", () => {
+  let fail = false;
+  const store = new TodoStore(() => { if (fail) throw new Error("disk full"); });
+  store.add("Keep", "context");
+  const first = store.all()[0]!;
+  store.setStatus(first.id, "in_progress");
+  const before = store.all();
+  fail = true;
+  assert.match(store.appendTodos([{ title: "New", status: "pending" }])!, /Could not save/);
+  assert.deepEqual(store.all(), before);
+  assert.match(store.replace(first.id, { title: "Renamed" })!, /Could not save/);
+  assert.deepEqual(store.all(), before);
+  assert.equal(store.delete(first.id), false);
+  assert.deepEqual(store.all(), before);
+  fail = false;
+  assert.equal(store.appendTodos(Array.from({ length: 49 }, (_, i) => ({ title: `Task ${i}`, status: "pending" as const }))), undefined);
+  const full = store.all();
+  assert.match(store.appendTodos([{ title: "Overflow", status: "pending" }])!, /At most 50/);
+  assert.deepEqual(store.all(), full);
+  assert.deepEqual(store.get(first.id), before[0], "details and the running status survive snapshot updates");
+});
+
+test("all stable IDs are returned beyond the bounded preview and explicit write IDs survive renames", async () => {
+  const h = harness();
+  const result = await h.run({ action: "append", todos: Array.from({ length: 12 }, (_, i) => ({ content: `Task ${i}`, status: "pending" })) });
+  assert.equal(result.details.items.length, process.env.PI_JAR_CHILD ? 12 : 8);
+  assert.equal(result.details.ids?.length, 12);
+  const last = result.details.ids![11]!;
+  assert.ok(result.content[0].text.includes(last.id), "ids outside the prose preview are still agent-visible");
+  assert.doesNotMatch(result.content[0].text, /Task 11/, "large writes keep task prose bounded");
+  await h.run({ action: "replace", id: last.id, title: "Last renamed" });
+  assert.equal(h.store.get(last.id)?.title, "Last renamed");
+  await h.run({ action: "write", todos: [{ id: last.id, content: "Final rename", status: "completed" }] });
+  assert.equal(h.store.all().length, 1, "legacy write still replaces the whole list");
+  assert.equal(h.store.all()[0]!.id, last.id);
+  await h.run({ todos: [] });
+  assert.deepEqual(h.store.all(), []);
 });
 
 test("checklist rows indent subtasks and show parent progress", () => {

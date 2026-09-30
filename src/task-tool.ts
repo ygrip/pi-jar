@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { Todo, TodoInput, TodoStatus } from "./tasks.ts";
 import { TODO_STATUSES, TodoStore, todoMark, todoProgress, todoTotals } from "./tasks.ts";
 
-const ACTIONS = ["write", "list", "add", "start", "done", "open", "edit", "delete"] as const;
+const ACTIONS = ["write", "list", "append", "remove", "replace", "add", "start", "done", "open", "edit", "delete"] as const;
 const Action = Type.Unsafe<(typeof ACTIONS)[number]>({ type: "string", enum: [...ACTIONS] });
 const Status = Type.Unsafe<(typeof TODO_STATUSES)[number]>({ type: "string", enum: [...TODO_STATUSES] });
 const Content = Type.String({ description: "Imperative task title, e.g. \"Run the tests\"." });
@@ -12,17 +12,20 @@ const ActiveForm = Type.Optional(Type.String({ description: "Present-continuous 
 
 const Parameters = Type.Object({
   todos: Type.Optional(Type.Array(Type.Object({
+    id: Type.Optional(Type.String({ description: "Existing stable task id for legacy write; omitted ids match by title." })),
     content: Content,
     status: Status,
     activeForm: ActiveForm,
-    subtasks: Type.Optional(Type.Array(Type.Object({ content: Content, status: Status, activeForm: ActiveForm }), {
+    subtasks: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.String()), content: Content, status: Status, activeForm: ActiveForm }), {
       description: "Optional steps of this task (one level deep). The task's status then follows its subtasks."
     }))
-  }), { description: "The complete, updated task list. Replaces the current list." })),
+  }), { description: "For append: new tasks only. For replace: exactly one replacement task. With write (or no action): the complete list, replacing it." })),
   action: Type.Optional(Action),
-  id: Type.Optional(Type.String({ description: "Task id for start/done/open/edit/delete. On a parent, start runs its first open subtask; done/open apply to all its subtasks." })),
-  title: Type.Optional(Type.String({ description: "Concise actionable task title for add/edit." })),
-  parent: Type.Optional(Type.String({ description: "For add: id of a top-level task to add the new task under as a subtask." })),
+  id: Type.Optional(Type.String({ description: "Stable task id for replace/remove/start/done/open/edit/delete. On a parent, start runs its first open subtask; done/open apply to all its subtasks." })),
+  title: Type.Optional(Type.String({ description: "Task title for append/add/edit/replace." })),
+  status: Type.Optional(Status),
+  activeForm: ActiveForm,
+  parent: Type.Optional(Type.String({ description: "For append/add: id of a top-level task to add the new task under as a subtask." })),
   details: Type.Optional(Type.String({ description: "Optional short task context for a new task." }))
 });
 
@@ -37,17 +40,20 @@ interface TaskToolDetails {
   count?: number;
   current?: string;
   changed?: string;
+  /** Full stable id index, including items outside the bounded preview. */
+  ids?: { id: string; title: string; parentId?: string }[];
   truncated?: boolean;
   /** Subtask counts of previewed parents when the preview cuts the list. */
   progress?: { id: string; done: number; total: number }[];
 }
 
-type TodoParam = { content: string; status: TodoStatus; activeForm?: string; subtasks?: readonly TodoParam[] };
+type TodoParam = { id?: string; content: string; status: TodoStatus; activeForm?: string; subtasks?: readonly TodoParam[] };
 /** Deeper nesting is passed through so the store rejects it with a clear message. */
 const toInput = (item: TodoParam): TodoInput => ({
+  ...(item.id !== undefined ? { id: item.id } : {}),
   title: item.content, status: item.status,
-  ...(item.activeForm ? { activeForm: item.activeForm } : {}),
-  ...(item.subtasks ? { subtasks: item.subtasks.map(toInput) } : {})
+  ...(item.activeForm !== undefined ? { activeForm: item.activeForm } : {}),
+  ...(item.subtasks !== undefined ? { subtasks: item.subtasks.map(toInput) } : {})
 });
 
 const stats = (items: readonly Todo[]) => {
@@ -79,11 +85,11 @@ export function registerTaskTool(
   pi.registerTool({
     name: "jar_todo",
     label: "tasks",
-    description: "Maintain pi-jar's session task list, shown live to the user. Send `todos` with the complete updated list (each with content, status pending|in_progress|completed, activeForm, and optional one-level `subtasks` of the same shape). Single-task actions (start, done, open, add, edit, delete, list) are also available; add with `parent` creates a subtask.",
-    promptSnippet: "Track multi-step work with jar_todo: write the full list, keep exactly one task in_progress, complete tasks as they finish.",
+    description: "Maintain session tasks incrementally: append adds todos (or title), remove deletes id and its subtasks, replace updates only id using title/status/activeForm or exactly one todos item. Omitted replacement fields/subtasks are preserved. append with parent adds subtasks. Stable IDs are returned for every task. Legacy write (or todos without action) replaces the entire list. add/delete and start/done/open/edit/list remain supported.",
+    promptSnippet: "Track multi-step work with jar_todo: append new tasks, replace/remove by stable id, keep one leaf in_progress, complete tasks as they finish.",
     promptGuidelines: [
       "Use jar_todo proactively, without waiting for the user, for any task with three or more distinct steps, when the user gives several tasks, or right after receiving new instructions. Skip it for single trivial requests and pure questions.",
-      "Prefer jar_todo with `todos` (the full updated list). Each item has `content` (imperative, e.g. \"Run tests\"), `status`, and `activeForm` (present continuous, e.g. \"Running tests\"), which the user sees while it runs.",
+      "Prefer incremental actions: append with todos adds only new tasks; replace with id updates only that task; remove with id deletes only that task tree. Use the returned stable IDs. write with todos is legacy full-list replacement and removes omitted tasks. Each todos item has content, status, and optional activeForm/subtasks.",
       "Break a large task into `subtasks` (same shape, one level deep). A parent's status follows its subtasks: it is completed when all of them are. Progress counts leaf tasks (subtasks and tasks without subtasks).",
       "Keep exactly one leaf task in_progress at a time. Mark a task in_progress before you start it and completed immediately after it is verified; do not batch completions.",
       "Only mark a task completed when it is fully done. If tests fail, work is partial or you are blocked, keep it in_progress and add a task for what must be resolved. Remove tasks that are no longer relevant."
@@ -91,19 +97,46 @@ export function registerTaskTool(
     parameters: Parameters,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const current = store();
-      const action = params.todos ? "write" : params.action ?? "list";
+      const action = params.action ?? (params.todos !== undefined ? "write" : "list");
       if (!current) {
         return { content: [{ type: "text", text: "Task tracking is unavailable before a Pi session starts." }], details: { action, items: [], total: 0, done: 0 } satisfies TaskToolDetails };
       }
       let changedId: string | undefined;
       let error: string | undefined;
-      switch (action) {
+      let inputs: TodoInput[] | undefined;
+      if (params.todos !== undefined) {
+        try {
+          if (!Array.isArray(params.todos)) throw new Error();
+          inputs = params.todos.map(toInput);
+        } catch { error = "todos must be an array of task objects with array subtasks."; }
+        if (!["write", "append", "replace"].includes(action)) error = "todos may only be used with write, append, or replace; no tasks were changed.";
+      }
+      if (!error) switch (action) {
         case "list":
           break;
         case "write":
-          if (!params.todos) { error = "write needs `todos`: the complete updated list."; break; }
-          error = current.write(params.todos.map(toInput));
+          if (!inputs) { error = "write needs `todos`: the complete updated list."; break; }
+          error = current.write(inputs);
           break;
+        case "append": {
+          const before = new Set(current.all().map((item) => item.id));
+          if (inputs && params.title !== undefined) { error = "append accepts either todos or title, not both."; break; }
+          error = current.appendTodos(inputs ?? [{ title: params.title ?? "", status: params.status ?? "pending", activeForm: params.activeForm, details: params.details }], params.parent);
+          if (!error) changedId = current.all().find((item) => !before.has(item.id))?.id;
+          break;
+        }
+        case "replace": {
+          if (!params.id) { error = "replace needs a valid existing task id."; break; }
+          if (inputs && (inputs.length !== 1 || params.title !== undefined || params.status !== undefined || params.activeForm !== undefined)) { error = "replace accepts exactly one todos item OR title/status/activeForm fields."; break; }
+          const replacement = inputs?.[0] ?? {
+            ...(params.title !== undefined ? { title: params.title } : {}),
+            ...(params.status !== undefined ? { status: params.status } : {}),
+            ...(params.activeForm !== undefined ? { activeForm: params.activeForm } : {})
+          };
+          error = current.replace(params.id, replacement);
+          if (!error) changedId = params.id;
+          break;
+        }
         case "add": {
           const parent = params.parent?.trim() || undefined;
           const title = params.title ?? "";
@@ -128,10 +161,12 @@ export function registerTaskTool(
           if (!params.id || !params.title?.trim() || !current.edit(params.id, params.title)) error = "edit needs a valid id and a title.";
           else changedId = params.id;
           break;
+        case "remove":
         case "delete":
-          if (!params.id || !current.delete(params.id)) error = "delete needs a valid id from jar_todo list.";
+          if (!params.id || !current.delete(params.id)) error = `${action} needs a valid id from jar_todo list.`;
           else changedId = params.id;
           break;
+        default: error = "Unknown task action; no tasks were changed.";
       }
       if (action !== "list" && !error) changed(ctx);
       const items = current.all();
@@ -140,11 +175,17 @@ export function registerTaskTool(
       const changedItem = changedId ? items.find((item) => item.id === changedId) : undefined;
       const root = changedItem?.parentId ?? changedItem?.id;
       const group = root ? items.filter((item) => item.id === root || item.parentId === root) : [];
+      const mutationItems = action === "write" || action === "append" ? items : group;
+      const mutationPreview = mutationItems.slice(0, 8);
+      // Keep task prose bounded while still returning every addressable id in canonical order.
+      const idIndex = mutationItems.length > 8
+        ? "\nTask IDs (list order): " + items.map((item, index) => `${index + 1}=${item.id}`).join(", ") + "\nUse list for all task titles."
+        : "";
       const message = error
         ? `Could not ${action} tasks: ${error} (${summary(items)}).`
         : action === "list"
           ? `Tasks (${summary(items)}):\n${lines(items)}`
-          : `Task list updated (${summary(items)}).${group.length ? "\n" + group.map((item) => line(items, item)).join("\n") : ""}\n${REMINDER}`;
+          : `Task list updated (${summary(items)}).${mutationPreview.length ? "\n" + mutationPreview.map((item) => line(items, item)).join("\n") : ""}${idIndex}\n${REMINDER}`;
       // A subagent's parent mirrors the checklist from these details, so children send it whole.
       const preview = process.env.PI_JAR_CHILD ? items : items.slice(0, 8);
       const truncated = preview.length < items.length;
@@ -156,6 +197,7 @@ export function registerTaskTool(
         content: [{ type: "text", text: message }],
         details: {
           action, items: preview, total: state.total, done: state.done, count: items.length,
+          ids: items.map(({ id, title, parentId }) => ({ id, title, ...(parentId ? { parentId } : {}) })),
           ...(state.current ? { current: state.current } : {}),
           ...(truncated ? { truncated: true } : {}),
           ...(progress.length ? { progress } : {}),
@@ -165,7 +207,7 @@ export function registerTaskTool(
     },
     renderCall(args, theme) {
       let text = theme.fg("toolTitle", theme.bold("tasks"));
-      if (args.todos) text += " " + theme.fg("accent", `update · ${args.todos.length} item${args.todos.length === 1 ? "" : "s"}`);
+      if (args.todos) text += " " + theme.fg("accent", `${args.action ?? "write"} · ${args.todos.length} item${args.todos.length === 1 ? "" : "s"}`);
       else {
         text += " " + theme.fg("accent", args.action ?? "list");
         if (args.title) text += " " + theme.fg("muted", args.title);

@@ -10,11 +10,12 @@ export type TodoStatus = (typeof TODO_STATUSES)[number];
  */
 export interface Todo { id: string; title: string; done: boolean; status: TodoStatus; activeForm?: string; details?: string; parentId?: string }
 /** A parent's own `status` is ignored when it has subtasks. */
-export interface TodoInput { title: string; status: TodoStatus; activeForm?: string; subtasks?: readonly TodoInput[] }
+export interface TodoInput { id?: string; title: string; status: TodoStatus; activeForm?: string; details?: string; subtasks?: readonly TodoInput[] }
+export type TodoReplacement = Partial<Omit<TodoInput, "id">>;
 /** Bounds the whole list: parents plus subtasks. */
 export const MAX_TODOS = 50;
 
-interface WrittenTodo { id: string; title: string; status: TodoStatus; activeForm?: string; parentId?: string }
+interface WrittenTodo { id: string; title: string; status: TodoStatus; activeForm?: string; details?: string; parentId?: string }
 export type TodoEvent =
   | { v: 1; op: "add"; id: string; title: string; details?: string; parentId?: string }
   | { v: 1; op: "edit"; id: string; title: string }
@@ -147,7 +148,7 @@ export class TodoStore {
       const next = new Map<string, Todo>();
       for (const raw of event.items as unknown[]) {
         const item = raw as Record<string, unknown>;
-        next.set(item.id as string, make(item.id as string, item.title as string, item.status as TodoStatus, item.activeForm, this.items.get(item.id as string)?.details, item.parentId));
+        next.set(item.id as string, make(item.id as string, item.title as string, item.status as TodoStatus, item.activeForm, item.details ?? this.items.get(item.id as string)?.details, item.parentId));
       }
       this.items = grouped(next);
       this.rollup();
@@ -225,6 +226,8 @@ export class TodoStore {
    * on invalid input.
    */
   write(inputs: readonly TodoInput[]): string | undefined {
+    const malformed = this.inputError(inputs);
+    if (malformed) return malformed;
     const flat = inputs.flatMap((item) => [item, ...(item.subtasks ?? [])]);
     if (flat.length > MAX_TODOS) return `At most ${MAX_TODOS} tasks including subtasks.`;
     if (inputs.some((item) => item.subtasks?.some((sub) => sub.subtasks?.length))) return "Subtasks cannot have their own subtasks; nest only one level.";
@@ -240,18 +243,86 @@ export class TodoStore {
     }
     const entry = (item: TodoInput, id: string, status: TodoStatus, parentId?: string): WrittenTodo => {
       const activeForm = typeof item.activeForm === "string" && item.activeForm.trim() ? item.activeForm : undefined;
-      return { id, title: item.title, status, ...(activeForm ? { activeForm } : {}), ...(parentId ? { parentId } : {}) };
+      const details = item.details ?? this.items.get(id)?.details;
+      return { id, title: item.title, status, ...(activeForm ? { activeForm } : {}), ...(details ? { details } : {}), ...(parentId ? { parentId } : {}) };
+    };
+    const supplied = new Set<string>();
+    for (const item of flat) if (item.id !== undefined) {
+      if (!validId(item.id) || supplied.has(item.id) || !this.items.has(item.id)) return "Explicit ids must be unique existing task ids.";
+      supplied.add(item.id);
+    }
+    const take = (item: TodoInput, parentId: string): string => {
+      if (item.id) return item.id;
+      const ids = free.get(key(parentId, item.title));
+      while (ids?.length) { const id = ids.shift()!; if (!supplied.has(id)) return id; }
+      return randomUUID();
     };
     const items: WrittenTodo[] = [];
     for (const item of inputs) {
-      const id = free.get(key("", item.title))?.shift() ?? randomUUID();
+      const id = take(item, "");
+      if (item.id && this.items.get(item.id)?.parentId) return "A task id cannot move to a different parent.";
       const subtasks = item.subtasks ?? [];
       const done = subtasks.filter((sub) => sub.status === "completed").length;
       const running = subtasks.filter((sub) => sub.status === "in_progress").length;
       items.push(entry(item, id, subtasks.length ? rolled(done, running, subtasks.length) : item.status));
-      for (const sub of subtasks) items.push(entry(sub, free.get(key(id, sub.title))?.shift() ?? randomUUID(), sub.status, id));
+      for (const sub of subtasks) {
+        if (sub.id && this.items.get(sub.id)?.parentId !== id) return "A task id cannot move to a different parent.";
+        items.push(entry(sub, take(sub, id), sub.status, id));
+      }
     }
     return this.commit({ v: 1, op: "write", items }) ? undefined : "Could not save the task list.";
+  }
+  /** Validate before flattening: malformed runtime input must never erase the current list. */
+  private inputError(inputs: readonly TodoInput[]): string | undefined {
+    if (!Array.isArray(inputs)) return "todos must be an array.";
+    for (const item of inputs) {
+      if (!item || typeof item !== "object" || !validTitle(item.title) || !validStatus(item.status)) return "Every task needs a short, non-empty title and a valid status.";
+      if (item.activeForm !== undefined && typeof item.activeForm !== "string") return "activeForm must be a string.";
+      if (item.details !== undefined && typeof item.details !== "string") return "details must be a string.";
+      if (item.subtasks !== undefined) {
+        if (!Array.isArray(item.subtasks)) return "subtasks must be an array.";
+        for (const sub of item.subtasks) {
+          if (!sub || typeof sub !== "object") return "Every subtask must be an object.";
+          if (sub.subtasks !== undefined && (!Array.isArray(sub.subtasks) || sub.subtasks.length)) return "Subtasks cannot have their own subtasks; nest only one level.";
+        }
+        const error = this.inputError(item.subtasks);
+        if (error) return error;
+      }
+    }
+    return undefined;
+  }
+  private snapshot(): TodoInput[] {
+    return this.all().filter((item) => !item.parentId).map((item) => ({
+      id: item.id, title: item.title, status: item.status, activeForm: item.activeForm,
+      subtasks: this.children(item.id).map((sub) => ({ id: sub.id, title: sub.title, status: sub.status, activeForm: sub.activeForm }))
+    }));
+  }
+  /** Atomically append a batch; unaffected ids and leaf statuses are retained. */
+  appendTodos(inputs: readonly TodoInput[], parentId?: string): string | undefined {
+    const error = this.inputError(inputs);
+    if (error) return error;
+    if (!inputs.length) return "append needs at least one task.";
+    if (inputs.some((item) => item.id !== undefined || item.subtasks?.some((sub) => sub.id !== undefined))) return "Appended tasks must not supply existing ids.";
+    const next = this.snapshot();
+    if (parentId !== undefined) {
+      const parent = next.find((item) => item.id === parentId);
+      if (!parent) return "parent must be an existing top-level task id.";
+      if (inputs.some((item) => item.subtasks?.length)) return "Subtasks cannot have their own subtasks; nest only one level.";
+      parent.subtasks = [...(parent.subtasks ?? []), ...inputs];
+    } else next.push(...inputs);
+    return this.write(next);
+  }
+  /** Replace only the addressed task. Omitted fields and subtasks are preserved. */
+  replace(id: string, replacement: TodoReplacement): string | undefined {
+    if (!this.items.has(id)) return "replace needs a valid existing task id.";
+    if (!replacement || typeof replacement !== "object" || Array.isArray(replacement)) return "replace needs task fields.";
+    if ("id" in replacement && replacement.id !== id) return "Replacement id must match the addressed task.";
+    if (!Object.keys(replacement).some((key) => ["title", "status", "activeForm", "subtasks"].includes(key))) return "replace needs at least one task field.";
+    const next = this.snapshot();
+    const target = next.flatMap((item) => [item, ...(item.subtasks ?? [])]).find((item) => item.id === id)!;
+    if (this.items.get(id)?.parentId && replacement.subtasks?.length) return "Subtasks cannot have their own subtasks; nest only one level.";
+    Object.assign(target, replacement, { id });
+    return this.write(next);
   }
   edit(id: string, title: string): boolean { return this.commit({ v: 1, op: "edit", id, title }); }
   /** On a parent, start runs its first open subtask; done/open complete or reopen all subtasks. */

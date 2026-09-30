@@ -208,6 +208,26 @@ The advisor is a second model (the `advisor` role; the current model if unassign
 - **Gates** — when the agent makes the same tool call three times within its last eight calls, the call is blocked and the advisor's review is returned instead; after three failing tool results in a row, the advice is steered into the running turn. At most two automatic consultations per prompt.
 - Settings → Pi toggles the advisor and the gates. Advisor calls are counted in `/usage`. The footer and welcome show it as a working teammate while it thinks.
 
+### Advisor fallback models
+
+Configure an ordered fallback chain (the primary advisor remains configured with `/roles set advisor`):
+
+```text
+/roles fallback advisor openai/gpt-5:high @smol
+/roles fallback advisor
+/roles fallback advisor clear
+```
+
+Add `--project` when saving or clearing to override the global chain for this project. Configuration is stored in `pi-jar-roles.json` alongside `roles`:
+
+```json
+"fallbacks": { "advisor": ["openai/gpt-5:high", "@smol"] }
+```
+
+One-shot advisor calls (`jar_advisor`, `/advisor`, and stuck-work gates) try the primary first, then up to eight configured fallbacks on missing models, authentication/provider errors (including rate limits), or empty answers. Cancellation never starts another attempt. Aliases and per-model thinking levels are supported; duplicate model/effort pairs are skipped. Answers identify the successful model, returned attempts are counted in `/usage`, and exhaustion reports every failure. An empty project list disables inherited global fallbacks. No fallback is used unless explicitly configured; context is sent only to the models you choose. The same configuration works for other one-shot roles such as `commit`, but not interactive role activation or goal audit model switches.
+
+This is a pi-jar enhancement: [pi-advisor](https://github.com/philipbrembeck/pi-advisor/) currently resolves one configured advisor model rather than a fallback chain.
+
 ## Usage and context
 
 `/usage` and `/context` open one tabbed panel (<kbd>Tab</kbd> switches, <kbd>Esc</kbd> closes):
@@ -217,7 +237,13 @@ The advisor is a second model (the `advisor` role; the current model if unassign
 
 ## Tasks, questions and history
 
-- **`jar_todo`** — a Claude/omp-style task list the agent keeps for any multi-step request. It writes the full list at once; each task is `pending`, `in_progress` (exactly one at a time) or `completed`, with an `activeForm` ("Running tests") that replaces the working spinner text while it runs. Tasks can have one level of **subtasks**: a parent's status follows its subtasks, its row shows `(done/total)`, and progress counts every subtask (and every task without subtasks). The live checklist above the composer shows `✔` struck-through done tasks, a bold `◼` current task and `☐` pending ones, with subtasks indented; a finished list stays until your next prompt. `/jar tasks` is your view/editor: `a` add, <kbd>Space</kbd>/<kbd>Enter</kbd> check, `e` edit, `d` delete, `f` filter.
+- **`jar_todo`** — a Claude/omp-style task list the agent keeps for any multi-step request. Prefer incremental `append` (new tasks only), `replace` (update one stable `id`), and `remove` (delete one task and its subtasks); IDs are returned for every task. Omitted replacement fields and subtasks stay intact. Legacy `write` (or `todos` without an action) still replaces the entire list, removing omitted tasks. Invalid updates leave the list unchanged. Each task is `pending`, `in_progress` (exactly one at a time) or `completed`, with an `activeForm` ("Running tests") that replaces the working spinner text while it runs. Tasks can have one level of **subtasks**: a parent's status follows its subtasks, its row shows `(done/total)`, and progress counts every subtask (and every task without subtasks). The live checklist above the composer shows `✔` struck-through done tasks, a bold `◼` current task and `☐` pending ones, with subtasks indented; a finished list stays until your next prompt. `/jar tasks` is your view/editor: `a` add, <kbd>Space</kbd>/<kbd>Enter</kbd> check, `e` edit, `d` delete, `f` filter.
+  ```json
+  { "action": "append", "todos": [{ "content": "Run tests", "status": "pending", "activeForm": "Running tests" }] }
+  { "action": "replace", "id": "<returned-id>", "status": "in_progress" }
+  { "action": "remove", "id": "<returned-id>" }
+  ```
+  Use `parent` with `append` to add subtasks; `start`, `done`, `open`, `edit`, and `list` remain available (`add`/`delete` also remain supported).
 - **`jar_ask`** — structured questions: numbered options with descriptions, single or multi-select, *Type your own answer* (multi-line, paste-friendly) and *Chat about this* to discuss before choosing.
 - **`/diff`** — review what the agent (and its editing subagents) changed since the first edit to each file: files with `+/−` counts on the left, a numbered, colored diff on the right. `a` accept (keep, stop tracking), `r` then `y` revert (restore the original, or remove a file it created), `A`/`R` for all. The footer shows `± N files · /diff` while anything is unreviewed; each file counts once no matter who edited it. Only `edit`/`write` changes inside the project are tracked; shell-made changes are not.
 - **`jar_shell`** — `start` (with optional `name`, `watch` regex and `notify`), `list`, `output`, `kill`. Output is ANSI-stripped and bounded (2000 lines). When a watch matches or the process ends, a visible message wakes the agent (queued if it is busy). Each running shell gets a footer row; the activity view (`/jar shells`, a click on the row) tails it live (`x` kill, `f` follow). All shells stop when the session ends.
