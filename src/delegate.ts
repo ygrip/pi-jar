@@ -976,9 +976,15 @@ const remainingTasks = (run: DelegateRun): string[] => {
   return leaves.filter((todo) => todo.status !== "completed").map((todo) => todo.title).slice(0, 20);
 };
 
+const taskLabel = (task: string): string => {
+  const text = cleanText(task, 4096);
+  return text.length > 160 ? text.slice(0, 159) + "…" : text;
+};
+
 const controlReport = (report: SubagentStopReport): string => [
   `${report.key} · ${report.name} · ${report.state}`,
-  `task: ${report.task}`,
+  // The moderator already holds the full task in its own jar_delegate call; echo only a label.
+  `task: ${taskLabel(report.task)}`,
   `workspace: ${report.workspace ?? "none"}`,
   `changed: ${report.changed.length ? report.changed.join(", ") : "none"}`,
   `applied: ${report.applied.length ? report.applied.join(", ") : "none"}`,

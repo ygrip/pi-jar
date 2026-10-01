@@ -84,7 +84,18 @@ export async function fetchQuota(provider: QuotaProvider, resolveAuth: (provider
         const item = window as Record<string, unknown>;
         return windowValue({ used: item.used_percent, resetsAt: typeof item.reset_at === "number" ? item.reset_at * 1000 : undefined });
       };
-      return parseQuota({ fiveHour: parse(rate.primary_window), week: parse(rate.secondary_window) });
+      // Window slots are not fixed: Plus accounts get a single weekly `primary_window` and a null
+      // secondary. Classify by `limit_window_seconds` (≤ 1 day is the short window), falling back
+      // to position only when the duration is absent.
+      const quota: Quota = {};
+      for (const [window, fallback] of [[rate.primary_window, "fiveHour"], [rate.secondary_window, "week"]] as const) {
+        const value = parse(window);
+        if (!value) continue;
+        const seconds = (window as Record<string, unknown>).limit_window_seconds;
+        const slot = typeof seconds === "number" && seconds > 0 ? (seconds <= 24 * 60 * 60 ? "fiveHour" : "week") : fallback;
+        if (!quota[slot]) quota[slot] = value;
+      }
+      return parseQuota(quota);
     }
     const parse = (window: unknown): QuotaWindow | undefined => {
       if (!window || typeof window !== "object") return undefined;

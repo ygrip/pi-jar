@@ -4,8 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { ChangeTracker, diffHunkOffsets, diffRows, diffRowsWindow, lineDiff, MAX_REVIEW_DIFF_LINES, MAX_TRACKED_BYTES, MAX_TRACKED_TOTAL_BYTES } from "../src/changes.ts";
+import { ChangeTracker, coarseLineDiff, diffHunkOffsets, diffRows, diffRowsWindow, diffSplitHunkOffsets, diffSplitRowCount, diffSplitRowsWindow, lineDiff,
+  MAX_REVIEW_DIFF_LINES, MAX_TRACKED_BYTES, MAX_TRACKED_TOTAL_BYTES } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, readChildBaseline, writeChildBaseline } from "../src/child-baselines.ts";
+import { emphasize, inlineChanges } from "../src/diff-inline.ts";
 import { filterChanges, fullReviewRequired, fullReviewSupported, openDiffView, registerChangeReview, renderDiff, safeLine } from "../src/diff-view.ts";
 
 const plain = (_color: string, text: string) => text;
@@ -27,6 +29,42 @@ test("line diff finds minimal edits and groups them into unified hunks", () => {
   const window = diffRowsWindow(ops, 3, 2, 4);
   assert.deepEqual(window, diffRows(ops).slice(2, 6), "windowed rows match the full unified hunk output");
   assert.deepEqual(diffHunkOffsets(ops), [0, 8], "hunks can be navigated without building a preview row array");
+});
+
+test("split rows align replacements, window like the full layout, and label hidden gaps", () => {
+  const ops = coarseLineDiff(["k0", "k1", "k2", "k3", "k4", "k5", "a", "b", "z"].join("\n"), ["k0", "k1", "k2", "k3", "k4", "k5", "A", "B", "C", "z"].join("\n"));
+  const full = diffSplitRowsWindow(ops, 1);
+  assert.deepEqual(full, [
+    { kind: "hunk", text: "@@ -6,4 +6,5 @@", hidden: 5 },
+    { kind: "pair", left: { line: 6, text: "k5", changed: false }, right: { line: 6, text: "k5", changed: false } },
+    { kind: "pair", left: { line: 7, text: "a", changed: true }, right: { line: 7, text: "A", changed: true } },
+    { kind: "pair", left: { line: 8, text: "b", changed: true }, right: { line: 8, text: "B", changed: true } },
+    { kind: "pair", right: { line: 9, text: "C", changed: true } },
+    { kind: "pair", left: { line: 9, text: "z", changed: false }, right: { line: 10, text: "z", changed: false } }
+  ]);
+  assert.equal(diffSplitRowCount(ops, 1), full.length);
+  for (let start = 0; start < full.length; start++) assert.deepEqual(diffSplitRowsWindow(ops, 1, start, 2), full.slice(start, start + 2));
+  assert.deepEqual(diffSplitHunkOffsets(ops, 1), [0]);
+  // Unified rows carry the aligned partner for intraline emphasis; unpaired additions carry none.
+  assert.deepEqual(diffRowsWindow(ops, 1).filter(row => row.kind !== "context" && row.kind !== "hunk").map(row => [row.text, row.pair]),
+    [["a", "A"], ["b", "B"], ["A", "a"], ["B", "b"], ["C", undefined]]);
+  // Context 0 keeps adjacent changes in one hunk and uses Git's start line for an empty side.
+  assert.deepEqual(diffRows(lineDiff("x\ny\n", "x\nn1\nn2\ny\n")!, 0).filter(row => row.kind === "hunk").map(row => row.text), ["@@ -1,0 +2,2 @@"]);
+  assert.deepEqual(diffRows(ops, Infinity).filter(row => row.kind === "hunk").map(row => row.text), ["@@ -1,9 +1,10 @@"], "whole-file context is one hunk");
+});
+
+test("intraline emphasis marks changed words and survives styling", () => {
+  assert.deepEqual(inlineChanges("const value = compute(5);", "const value = computeFast(5, cache);"),
+    { before: [[14, 21]], after: [[14, 25], [27, 34]] });
+  assert.equal(inlineChanges("abc", "xyz"), undefined, "wholly rewritten lines are not emphasized");
+  assert.equal(inlineChanges("same", "same"), undefined);
+  assert.equal(emphasize("ab\x1b[31mcdef\x1b[39mgh", [[1, 3], [5, 7]]), "a\x1b[7mb\x1b[31mc\x1b[27mde\x1b[7mf\x1b[39mg\x1b[27mh");
+  const change = { path: "/x/a.ts", rel: "a.ts", status: "modified" as const, before: "let total = 1;\n", after: "let total = 2;\n", added: 1, removed: 1 };
+  const rows = renderDiff(change, 60, plain);
+  assert.ok(rows.some(row => row.includes("\x1b[7m2\x1b[27m")) && rows.some(row => row.includes("\x1b[7m1\x1b[27m")));
+  const wrapped = renderDiff({ ...change, after: "let total = " + "9".repeat(80) + ";\n" }, 40, plain, { wrap: true });
+  assert.ok(wrapped.length > renderDiff({ ...change, after: "let total = " + "9".repeat(80) + ";\n" }, 40, plain).length, "wrap shows continuation rows");
+  assert.ok(wrapped.every(row => visibleWidth(row) <= 40));
 });
 
 test("tracker captures once, reports added/modified/deleted, accepts and reverts", () => {

@@ -76,7 +76,11 @@ test("read-only provider fetch accepts only resolved OAuth and valid percentages
     assert.equal(options.headers && (options.headers as Record<string, string>).Authorization, `Bearer ${token}`);
     assert.equal(options.headers && (options.headers as Record<string, string>)["ChatGPT-Account-Id"], "account");
     assert.equal(url, "https://chatgpt.com/backend-api/wham/usage");
-    return { ok: true, json: async () => ({ rate_limit: { primary_window: { used_percent: 16 }, secondary_window: { used_percent: 23 } } }) } as Response;
+    // Plus accounts report one weekly window in the primary slot (real wham/usage shape).
+    const rate_limit = calls === 1
+      ? { primary_window: { used_percent: 16 }, secondary_window: { used_percent: 23 } }
+      : { primary_window: { used_percent: 85, limit_window_seconds: 604800 }, secondary_window: null };
+    return { ok: true, json: async () => ({ rate_limit }) } as Response;
   }) as typeof fetch;
   try {
     const signal = new AbortController().signal;
@@ -84,5 +88,7 @@ test("read-only provider fetch accepts only resolved OAuth and valid percentages
     assert.equal(calls, 0);
     assert.deepEqual(await fetchQuota("openai-codex", async () => ({ auth: { apiKey: token }, source: "OAuth" }), signal), { fiveHour: { used: 16 }, week: { used: 23 } });
     assert.equal(calls, 1);
+    assert.deepEqual(await fetchQuota("openai-codex", async () => ({ auth: { apiKey: token }, source: "OAuth" }), signal), { week: { used: 85 } },
+      "a weekly primary window must not be labelled as the 5h session window");
   } finally { globalThis.fetch = originalFetch; }
 });

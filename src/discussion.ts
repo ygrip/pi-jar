@@ -88,9 +88,10 @@ async function withPaperLock<T>(file: string, run: () => T): Promise<T> {
   throw new Error("discussion paper is busy");
 }
 
-/** Append under the lock; `accept` validates against the same snapshot, so there is one read per write. */
+/** Append under the lock; `accept` validates against the same snapshot, so there is one read per write.
+ *  The written snapshot is returned too, so the caller can piggyback unseen entries without a second read. */
 function append(file: string, actor: string, entry: Omit<DiscussionEntry, "id" | "from" | "at">,
-  accept: (paper: DiscussionPaper) => string | undefined = () => undefined): Promise<DiscussionEntry | string> {
+  accept: (paper: DiscussionPaper) => string | undefined = () => undefined): Promise<{ entry: DiscussionEntry; paper: DiscussionPaper } | string> {
   return withPaperLock(file, () => {
     const paper = readPaper(file);
     const rejected = accept(paper);
@@ -106,7 +107,7 @@ function append(file: string, actor: string, entry: Omit<DiscussionEntry, "id" |
     paper.entries.push(next);
     if (paper.entries.length > MAX_DISCUSSION_ENTRIES) paper.entries.splice(0, paper.entries.length - MAX_DISCUSSION_ENTRIES);
     writePaper(file, paper);
-    return next;
+    return { entry: next, paper };
   });
 }
 
@@ -133,57 +134,94 @@ const render = (entries: readonly DiscussionEntry[], limit: number): string => {
   }
   const omitted = entries.length - lines.length;
   return (omitted ? `(${omitted} older entries omitted; use questionId to read one thread)\n` : "") + lines.join("\n")
-    + `\n(newest: ${entries.at(-1)!.id}; pass since=${entries.at(-1)!.id} to read only newer entries)`;
+    + `\n(latest ${entries.at(-1)!.id})`;
 };
+
+/** Unseen entries piggybacked on an ask/answer reply never exceed this. */
+const MAX_PIGGYBACK_CHARS = 1000;
 
 export function registerDiscussionTool(pi: ExtensionAPI, file: () => string | undefined,
   actor: () => string = () => safeActor(process.env[SUBAGENT_NAME_ENV] ?? process.env[SUBAGENT_KEY_ENV])): void {
+  // Every Pi process (moderator or child) registers its own tool, so this closure is one actor's read
+  // cursor: the highest seq it has been shown on the current paper. A different path, or a paper whose
+  // seq went backwards (recreated), starts over at zero.
+  let cursor = { path: "", seq: 0 };
+  const unseen = (path: string, paper: DiscussionPaper, me: string) => {
+    if (cursor.path !== path || paper.seq < cursor.seq) cursor = { path, seq: 0 };
+    const after = cursor.seq;
+    return paper.entries.filter((entry) => (seqOf(entry.id) ?? 0) > after && entry.from !== me);
+  };
+  const advance = (seq: number) => { cursor.seq = Math.max(cursor.seq, seq); };
+  // The cursor is one max-seq, so it may only move past everything unseen. An ask/answer reply therefore
+  // attaches unseen entries (and advances) only when every unseen non-own entry is relevant to the caller
+  // (a question addressed to it, or an answer to one of its questions) and all of them fit
+  // MAX_PIGGYBACK_CHARS; otherwise it adds a one-line count and leaves them for `list`. The question being
+  // answered (`known`) counts as seen: the caller already has it.
+  const piggyback = (path: string, paper: DiscussionPaper, me: string, known?: string): string => {
+    const fresh = unseen(path, paper, me).filter((entry) => entry.id !== known);
+    if (!fresh.length) { advance(paper.seq); return ""; }
+    const asked = new Set(paper.entries.filter((entry) => entry.kind === "question" && entry.from === me).map((entry) => entry.id));
+    const relevant = fresh.filter((entry) => entry.kind === "question" ? entry.to === me : asked.has(entry.questionId ?? ""));
+    const shown = relevant.map((entry) => entryLine(entry, MAX_LISTED_TEXT)).join("\n");
+    if (relevant.length === fresh.length && shown.length <= MAX_PIGGYBACK_CHARS) { advance(paper.seq); return "\n" + shown; }
+    return `\n(${fresh.length} new ${fresh.length === 1 ? "entry" : "entries"}${relevant.length ? `, ${relevant.length} for you` : ""}; list to read)`;
+  };
   const parameters = Type.Object({
     action: Type.Union([Type.Literal("list"), Type.Literal("ask"), Type.Literal("answer")]),
     text: Type.Optional(Type.String()),
     to: Type.Optional(Type.String()),
     questionId: Type.Optional(Type.String({ description: "answer: the question being answered. list: read only that question and its answers, in full." })),
-    since: Type.Optional(Type.String({ description: "list: only entries newer than this id (e.g. d12), so rereads cost nothing when nothing changed." }))
+    since: Type.Optional(Type.String({ description: "list: entries newer than this id (e.g. d12) instead of only unseen ones; \"d0\" rereads everything." }))
   });
   pi.registerTool?.<typeof parameters, { path?: string; entry?: DiscussionEntry }>({
     name: "jar_discuss",
     label: "discuss",
-    description: `Use the session's bounded shared discussion paper for terse cross-agent questions and answers. Prefer one precise question or answer per call; do not use it as a transcript or scratchpad. list replies are capped at ${MAX_LIST_CHARS} characters.`,
-    promptSnippet: "Use jar_discuss when another subagent needs a concrete question answered without routing a long conversation through the moderator.",
+    description: `Shared bounded Q/A paper between this session's agents; not a transcript. ask/answer reply with the new id only. list returns only entries you have not seen (≤${MAX_LIST_CHARS} chars).`,
+    promptSnippet: "Ask or answer one concrete cross-agent question on the shared discussion paper.",
     promptGuidelines: [
-      "Keep discussion entries short and decision-oriented. Read the paper before answering if the question id is unfamiliar.",
-      "When answering, address only the requested question and cite the question id. Do not continue unrelated task work inside the discussion entry.",
-      "Do not poll list while waiting for an answer: continue your task and check again later with since set to the newest id you saw; use questionId to read one thread."
+      "jar_discuss: one precise question or answer per call; answer only the given questionId. Replies never echo your text.",
+      "Answers to your questions also arrive on your next ask/answer. list shows only unseen entries; questionId reads one thread. Don't poll."
     ],
     parameters,
     async execute(_id, params) {
       const path = file();
       if (!path) return { content: [{ type: "text", text: "No shared discussion paper is active." }], details: {} };
+      const me = safeActor(actor());
       if (params.action === "list") {
-        const entries = discussionEntries(path);
+        const paper = readPaper(path);
         const thread = params.questionId ? cleanText(params.questionId, 24) : undefined;
         if (thread) {
-          const items = entries.filter((entry) => entry.id === thread || entry.questionId === thread);
+          const items = paper.entries.filter((entry) => entry.id === thread || entry.questionId === thread);
           return { content: [{ type: "text", text: render(items, MAX_DISCUSSION_TEXT) }], details: { path } };
         }
         const since = seqOf(params.since);
-        const newer = since === undefined ? entries : entries.filter((entry) => (seqOf(entry.id) ?? 0) > since);
-        if (since !== undefined && !newer.length) return { content: [{ type: "text", text: `No entries newer than ${params.since}.` }], details: { path } };
-        return { content: [{ type: "text", text: render(newer, MAX_LISTED_TEXT) }], details: { path } };
+        const fresh = unseen(path, paper, me);
+        advance(paper.seq);
+        if (since !== undefined) {
+          const newer = paper.entries.filter((entry) => (seqOf(entry.id) ?? 0) > since);
+          const text = newer.length ? render(newer, MAX_LISTED_TEXT) : `No entries newer than ${params.since}.`;
+          return { content: [{ type: "text", text }], details: { path } };
+        }
+        const latest = paper.entries.at(-1)?.id;
+        const text = fresh.length ? render(fresh, MAX_LISTED_TEXT) : `No new entries${latest ? ` (latest ${latest})` : ""}.`;
+        return { content: [{ type: "text", text }], details: { path } };
       }
       const text = cleanText(params.text ?? "", MAX_DISCUSSION_TEXT);
       if (!text) return { content: [{ type: "text", text: "Discussion text is required." }], details: {}, isError: true };
       if (params.action === "ask") {
-        const entry = await append(path, actor(), { kind: "question", text, ...(params.to ? { to: safeActor(params.to) } : {}) });
-        if (typeof entry === "string") return { content: [{ type: "text", text: entry }], details: {}, isError: true };
-        return { content: [{ type: "text", text: `Added ${entry.id}: ${entry.text}` }], details: { path, entry } };
+        const added = await append(path, me, { kind: "question", text, ...(params.to ? { to: safeActor(params.to) } : {}) });
+        if (typeof added === "string") return { content: [{ type: "text", text: added }], details: {}, isError: true };
+        const { entry, paper } = added;
+        const reply = `Added ${entry.id}${entry.to ? ` (→ ${entry.to})` : ""}.` + piggyback(path, paper, me);
+        return { content: [{ type: "text", text: reply }], details: { path, entry } };
       }
       const questionId = cleanText(params.questionId ?? "", 24);
       if (!questionId) return { content: [{ type: "text", text: "questionId is required for an answer." }], details: {}, isError: true };
-      const entry = await append(path, actor(), { kind: "answer", questionId, text }, (paper) =>
+      const added = await append(path, me, { kind: "answer", questionId, text }, (paper) =>
         paper.entries.some((item) => item.kind === "question" && item.id === questionId) ? undefined : "Unknown discussion question: " + questionId);
-      if (typeof entry === "string") return { content: [{ type: "text", text: entry }], details: {}, isError: true };
-      return { content: [{ type: "text", text: `Answered ${questionId}: ${entry.text}` }], details: { path, entry } };
+      if (typeof added === "string") return { content: [{ type: "text", text: added }], details: {}, isError: true };
+      const { entry, paper } = added;
+      return { content: [{ type: "text", text: `Answered ${questionId} as ${entry.id}.` + piggyback(path, paper, me, questionId) }], details: { path, entry } };
     }
   });
 }

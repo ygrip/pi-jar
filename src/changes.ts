@@ -15,7 +15,11 @@ const MAX_DIFF_MIDDLE_LINES = 4_000;
 export type ChangeStatus = "added" | "modified" | "deleted";
 export interface FileChange { path: string; rel: string; status: ChangeStatus; before: string; after: string; added: number; removed: number; diff?: DiffOp[] | null }
 export type DiffOp = { op: " " | "+" | "-"; text: string };
-export type DiffRow = { kind: "hunk" | "context" | "add" | "remove" | "note"; text: string; oldLine?: number; newLine?: number };
+/** `hidden` counts unchanged lines skipped before a hunk; `pair` is the aligned replacement line for intraline diffs. */
+export type DiffRow = { kind: "hunk" | "context" | "add" | "remove" | "note"; text: string; oldLine?: number; newLine?: number; hidden?: number; pair?: string };
+export type SplitSide = { line: number; text: string; changed: boolean };
+/** One aligned Original/Updated row: a replacement run pairs its k-th removed and k-th added line. */
+export type SplitRow = { kind: "hunk"; text: string; hidden: number } | { kind: "pair"; left?: SplitSide; right?: SplitSide };
 
 /** Text content, `null` when the file is missing, or `undefined` when it cannot be tracked. */
 function readText(path: string): string | null | undefined {
@@ -104,7 +108,8 @@ export function diffHunkOffsets(ops: readonly DiffOp[], context = 3): number[] {
     while (to < ops.length) {
       let next = to + 1;
       while (next < ops.length && ops[next]!.op === " ") next++;
-      if (next < ops.length && next - to <= context * 2) { to = next; continue; }
+      // Merge when the unchanged gap fits inside both hunks' context (adjacent changes at context 0).
+      if (next < ops.length && next - to - 1 <= context * 2) { to = next; continue; }
       break;
     }
     const end = Math.min(ops.length, to + context + 1);
@@ -122,14 +127,7 @@ export function diffRowCount(ops: readonly DiffOp[], context = 3): number {
   return hunkCache.get(ops)!.rows;
 }
 
-/** Compute only the requested output window; diff operations stay indexed without a second full row array. */
-export function diffRowsWindow(ops: readonly DiffOp[], context = 3, offset = 0, limit = Number.MAX_SAFE_INTEGER): DiffRow[] {
-  const rows: DiffRow[] = [];
-  const firstRow = Math.max(0, offset);
-  const lastRow = firstRow + Math.max(0, limit);
-  if (hunkCache.get(ops)?.context !== context) diffHunkOffsets(ops, context);
-  const layout = hunkCache.get(ops)!;
-  if (firstRow >= layout.rows || lastRow <= firstRow) return rows;
+const linePositions = (ops: readonly DiffOp[]) => {
   let positions = linePositionCache.get(ops);
   if (!positions) {
     const old = new Uint32Array(ops.length + 1), next = new Uint32Array(ops.length + 1);
@@ -145,6 +143,57 @@ export function diffRowsWindow(ops: readonly DiffOp[], context = 3, offset = 0, 
     positions = { old, next };
     linePositionCache.set(ops, positions);
   }
+  return positions;
+};
+
+/**
+ * Replacement runs (maximal non-context spans) as flat typed arrays, independent of context:
+ * `order[start..start+removes)` lists the run's removed ops and the rest its added ops, so the
+ * k-th removal pairs with the k-th addition. `split` prefixes aligned rows (a run takes max(r, a)).
+ */
+type RunLayout = { start: Uint32Array; removes: Uint32Array; length: Uint32Array; order: Uint32Array; ordinal: Uint32Array; split: Uint32Array };
+const runCache = new WeakMap<readonly DiffOp[], RunLayout>();
+
+const runLayout = (ops: readonly DiffOp[]): RunLayout => {
+  const cached = runCache.get(ops);
+  if (cached) return cached;
+  const n = ops.length;
+  const layout: RunLayout = { start: new Uint32Array(n), removes: new Uint32Array(n), length: new Uint32Array(n),
+    order: new Uint32Array(n), ordinal: new Uint32Array(n), split: new Uint32Array(n + 1) };
+  const { start, removes, length, order, ordinal, split } = layout;
+  for (let at = 0; at < n;) {
+    if (ops[at]!.op === " ") { order[at] = at; split[at + 1] = split[at]! + 1; at++; continue; }
+    let end = at;
+    while (end < n && ops[end]!.op !== " ") end++;
+    let r = 0, a = 0;
+    for (let i = at; i < end; i++) if (ops[i]!.op === "-") { ordinal[i] = r; order[at + r++] = i; }
+    for (let i = at; i < end; i++) if (ops[i]!.op === "+") { ordinal[i] = a; order[at + r + a++] = i; }
+    for (let i = at; i < end; i++) { start[i] = at; removes[i] = r; length[i] = end - at; split[i + 1] = split[at]!; }
+    split[at + 1] = split[at]! + Math.max(r, a);
+    for (let i = at + 1; i < end; i++) split[i + 1] = split[at + 1]!;
+    at = end;
+  }
+  runCache.set(ops, layout);
+  return layout;
+};
+
+/** The aligned counterpart of a changed op (k-th removal ↔ k-th addition in its run), if any. */
+const partner = (ops: readonly DiffOp[], at: number): number | undefined => {
+  const { start, removes, length, order, ordinal } = runLayout(ops);
+  const s = start[at]!, r = removes[at]!, a = length[at]! - r, k = ordinal[at]!;
+  if (ops[at]!.op === "-") return k < a ? order[s + r + k] : undefined;
+  return k < r ? order[s + k] : undefined;
+};
+
+/** Compute only the requested output window; diff operations stay indexed without a second full row array. */
+export function diffRowsWindow(ops: readonly DiffOp[], context = 3, offset = 0, limit = Number.MAX_SAFE_INTEGER): DiffRow[] {
+  const rows: DiffRow[] = [];
+  const firstRow = Math.max(0, offset);
+  const lastRow = firstRow + Math.max(0, limit);
+  if (hunkCache.get(ops)?.context !== context) diffHunkOffsets(ops, context);
+  const layout = hunkCache.get(ops)!;
+  if (firstRow >= layout.rows || lastRow <= firstRow) return rows;
+  const positions = linePositions(ops);
   // Binary-search the first intersecting hunk, then visit only visible operations. In
   // particular, a 100k-line replacement must not slice/filter/allocate 100k rows per frame.
   let lo = 0, hi = layout.hunks.length;
@@ -157,13 +206,99 @@ export function diffRowsWindow(ops: readonly DiffOp[], context = 3, offset = 0, 
   for (let index = lo; index < layout.hunks.length; index++) {
     const { from, end, offset: start } = layout.hunks[index]!;
     if (start >= lastRow) break;
-    if (start >= firstRow) rows.push({ kind: "hunk", text: `@@ -${positions.old[from]!},${positions.old[end]! - positions.old[from]!} +${positions.next[from]!},${positions.next[end]! - positions.next[from]!} @@` });
+    if (start >= firstRow) rows.push({ kind: "hunk", text: hunkHeader(positions, from, end), hidden: from - (layout.hunks[index - 1]?.end ?? 0) });
     const visibleFrom = from + Math.max(0, firstRow - start - 1);
     const visibleEnd = Math.min(end, from + lastRow - start - 1);
     for (let at = visibleFrom; at < visibleEnd; at++) {
       const op = ops[at]!;
+      const pair = op.op === " " ? undefined : partner(ops, at);
       rows.push({ kind: op.op === "+" ? "add" : op.op === "-" ? "remove" : "context", text: op.text,
-        ...(op.op !== "+" ? { oldLine: positions.old[at]! } : {}), ...(op.op !== "-" ? { newLine: positions.next[at]! } : {}) });
+        ...(op.op !== "+" ? { oldLine: positions.old[at]! } : {}), ...(op.op !== "-" ? { newLine: positions.next[at]! } : {}),
+        ...(pair !== undefined ? { pair: ops[pair]!.text } : {}) });
+    }
+  }
+  return rows;
+}
+
+/** Git convention: an empty side (pure insertion/deletion) names the line before the change. */
+const hunkHeader = (positions: { old: Uint32Array; next: Uint32Array }, from: number, end: number) => {
+  const range = (lines: Uint32Array) => {
+    const count = lines[end]! - lines[from]!;
+    return `${count ? lines[from]! : lines[from]! - 1},${count}`;
+  };
+  return `@@ -${range(positions.old)} +${range(positions.next)} @@`;
+};
+
+type SplitHunk = DiffHunk & { split: number };
+const splitCache = new WeakMap<readonly DiffOp[], { context: number; hunks: SplitHunk[]; offsets: number[]; rows: number }>();
+
+const splitLayout = (ops: readonly DiffOp[], context: number) => {
+  const cached = splitCache.get(ops);
+  if (cached?.context === context) return cached;
+  if (hunkCache.get(ops)?.context !== context) diffHunkOffsets(ops, context);
+  const { split } = runLayout(ops);
+  const hunks: SplitHunk[] = [];
+  let rows = 0;
+  // Hunks start and end on context ops, so a replacement run never straddles two hunks.
+  for (const hunk of hunkCache.get(ops)!.hunks) {
+    hunks.push({ ...hunk, split: rows });
+    rows += 1 + split[hunk.end]! - split[hunk.from]!;
+  }
+  const layout = { context, hunks, offsets: hunks.map(hunk => hunk.split), rows };
+  splitCache.set(ops, layout);
+  return layout;
+};
+
+/** Aligned side-by-side row offsets of each hunk header. */
+export function diffSplitHunkOffsets(ops: readonly DiffOp[], context = 3): number[] {
+  return splitLayout(ops, context).offsets.slice();
+}
+
+export function diffSplitRowCount(ops: readonly DiffOp[], context = 3): number {
+  return splitLayout(ops, context).rows;
+}
+
+/** Window of aligned Original/Updated rows; like `diffRowsWindow`, it visits only visible operations. */
+export function diffSplitRowsWindow(ops: readonly DiffOp[], context = 3, offset = 0, limit = Number.MAX_SAFE_INTEGER): SplitRow[] {
+  const rows: SplitRow[] = [];
+  const firstRow = Math.max(0, offset);
+  const lastRow = firstRow + Math.max(0, limit);
+  const layout = splitLayout(ops, context);
+  if (firstRow >= layout.rows || lastRow <= firstRow) return rows;
+  const positions = linePositions(ops);
+  const { split, order, removes, length } = runLayout(ops);
+  const size = (hunk: SplitHunk) => 1 + split[hunk.end]! - split[hunk.from]!;
+  let lo = 0, hi = layout.hunks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (layout.hunks[mid]!.split + size(layout.hunks[mid]!) <= firstRow) lo = mid + 1;
+    else hi = mid;
+  }
+  for (let index = lo; index < layout.hunks.length; index++) {
+    const hunk = layout.hunks[index]!;
+    if (hunk.split >= lastRow) break;
+    if (hunk.split >= firstRow) rows.push({ kind: "hunk", text: hunkHeader(positions, hunk.from, hunk.end), hidden: hunk.from - (layout.hunks[index - 1]?.end ?? 0) });
+    const visibleFrom = Math.max(0, firstRow - hunk.split - 1);
+    const visibleEnd = Math.min(size(hunk) - 1, lastRow - hunk.split - 1);
+    for (let row = visibleFrom; row < visibleEnd; row++) {
+      const target = split[hunk.from]! + row;
+      // First op whose aligned-row interval contains target; only run starts carry run rows.
+      let low = hunk.from, high = hunk.end - 1;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (split[mid + 1]! > target) high = mid; else low = mid + 1;
+      }
+      const op = ops[low]!;
+      if (op.op === " ") {
+        rows.push({ kind: "pair", left: { line: positions.old[low]!, text: op.text, changed: false }, right: { line: positions.next[low]!, text: op.text, changed: false } });
+        continue;
+      }
+      const k = target - split[low]!, r = removes[low]!, a = length[low]! - r;
+      const removed = k < r ? order[low + k]! : undefined;
+      const added = k < a ? order[low + r + k]! : undefined;
+      rows.push({ kind: "pair",
+        ...(removed !== undefined ? { left: { line: positions.old[removed]!, text: ops[removed]!.text, changed: true } } : {}),
+        ...(added !== undefined ? { right: { line: positions.next[added]!, text: ops[added]!.text, changed: true } } : {}) });
     }
   }
   return rows;
