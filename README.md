@@ -319,7 +319,7 @@ pi-jar/
 
 ## Git executable and subprocess safety
 
-pi-jar runs worktree Git plumbing asynchronously with a 30-second per-command deadline and terminates the process group on timeout or cancellation. To bypass a Git proxy/wrapper (for example, git-ai), set `PI_JAR_GIT_PATH` to the real Git executable before starting Pi:
+pi-jar runs worktree Git plumbing asynchronously with a 30-second per-command deadline and terminates the process group on timeout or cancellation. Worktree snapshots and change inspection hash files in bounded batches (at most 1,000 files or 128 MiB per Git call), so startup and finalization cost a handful of Git processes rather than several per repository file. To bypass a Git proxy/wrapper (for example, git-ai), set `PI_JAR_GIT_PATH` to the real Git executable before starting Pi:
 
 ```bash
 PI_JAR_GIT_PATH=/usr/bin/git pi

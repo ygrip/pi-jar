@@ -154,6 +154,31 @@ const writeSnapshot = async (root: string, rel: string, bytes: Buffer, stat: Sta
   }
 };
 
+// Each git call has its own GIT_TIMEOUT_MS deadline, so bound the work per batched call.
+const HASH_BATCH_FILES = 1000;
+const HASH_BATCH_BYTES = 128 * 1024 * 1024;
+
+/** Object ids for regular files, in order, from bounded `hash-object --stdin-paths` chunks. */
+const hashPaths = async (root: string, files: readonly { path: string; size: number }[], write: boolean,
+  signal?: AbortSignal): Promise<string[]> => {
+  const oids: string[] = [];
+  for (let start = 0; start < files.length;) {
+    let end = start;
+    let bytes = 0;
+    // A file larger than the byte budget still gets its own chunk, matching per-file hashing.
+    while (end < files.length && end - start < HASH_BATCH_FILES && (end === start || bytes + files[end]!.size <= HASH_BATCH_BYTES)) {
+      bytes += files[end++]!.size;
+    }
+    const chunk = files.slice(start, end);
+    const output = (await gitText(root, ["hash-object", ...(write ? ["-w"] : []), "--no-filters", "--stdin-paths"],
+      chunk.map(file => file.path).join("\n") + "\n", signal)).split("\n").filter(Boolean);
+    if (output.length !== chunk.length) throw new Error("git hash-object returned incomplete hashes");
+    oids.push(...output);
+    start = end;
+  }
+  return oids;
+};
+
 /**
  * Create a detached disposable worktree and commit a private baseline snapshot containing the
  * parent's tracked modifications plus non-ignored untracked files. The parent index/branch is not
@@ -173,6 +198,10 @@ export async function createDelegateWorktree(cwd: string, signal?: AbortSignal):
     added = true;
     await gitText(root, ["read-tree", "--empty"], undefined, signal);
     const paths = new Set(nulList(await gitText(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], undefined, signal)));
+    // Git process startup (often behind wrappers such as git-ai) dominates setup time, so hash
+    // and stage in bounded batches rather than two git processes per repository file.
+    const entries: { rel: string; mode: string; oid: string }[] = [];
+    const batched: { entry: (typeof entries)[number]; path: string; size: number }[] = [];
     for (const rel of paths) {
       if (!safeFilePath(repoRoot, rel)) throw new Error("unsafe snapshot path: " + rel);
       const source = resolve(repoRoot, rel);
@@ -180,11 +209,22 @@ export async function createDelegateWorktree(cwd: string, signal?: AbortSignal):
       if (!stat) continue;
       if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error("unsupported snapshot file: " + rel);
       const bytes = stat.isSymbolicLink() ? Buffer.from(await readlink(source)) : await readFile(source);
-      const oid = (await gitText(root, ["hash-object", "-w", "--no-filters", "--stdin"], bytes, signal)).trim();
-      const mode = stat.isSymbolicLink() ? "120000" : (stat.mode & 0o111) ? "100755" : "100644";
-      await gitText(root, ["update-index", "--add", "--cacheinfo", mode, oid, rel], undefined, signal);
       signal?.throwIfAborted();
       await writeSnapshot(root, rel, bytes, stat);
+      const entry = { rel, mode: stat.isSymbolicLink() ? "120000" : (stat.mode & 0o111) ? "100755" : "100644", oid: "" };
+      entries.push(entry);
+      // The private copy holds exactly the bytes read above. Hashing it by path would follow a
+      // symlink, and --stdin-paths is line-based, so those entries hash their bytes directly.
+      const path = resolve(root, rel);
+      if (stat.isSymbolicLink() || path.includes("\n")) {
+        entry.oid = (await gitText(root, ["hash-object", "-w", "--no-filters", "--stdin"], bytes, signal)).trim();
+      } else batched.push({ entry, path, size: bytes.length });
+    }
+    const oids = await hashPaths(root, batched, true, signal);
+    batched.forEach((item, index) => { item.entry.oid = oids[index]!; });
+    if (entries.length) {
+      await gitText(root, ["update-index", "-z", "--index-info"],
+        entries.map(entry => `${entry.mode} ${entry.oid}\t${entry.rel}\0`).join(""), signal);
     }
     const tree = (await gitText(root, ["write-tree"], undefined, signal)).trim();
     const baseline = (await gitText(root, ["-c", "user.name=pi-jar", "-c", "user.email=pi-jar@local",
@@ -205,12 +245,37 @@ export async function createDelegateWorktree(cwd: string, signal?: AbortSignal):
 
 /** Files whose final worktree state differs from the snapshot, including new untracked files. */
 export async function worktreeChangedFiles(worktree: DelegateWorktree, signal?: AbortSignal): Promise<string[]> {
-  const baselinePaths = nulList(await gitText(worktree.root, ["ls-tree", "-r", "--name-only", "-z", worktree.baseline], undefined, signal));
+  const baseline = new Map<string, { mode: string; oid: string }>();
+  for (const record of nulList(await gitText(worktree.root, ["ls-tree", "-r", "-z", worktree.baseline], undefined, signal))) {
+    const tab = record.indexOf("\t");
+    const [mode, type, oid] = record.slice(0, tab).split(" ");
+    if (type !== "blob" || !mode || !oid) throw new Error("unsupported baseline entry: " + record.slice(tab + 1));
+    baseline.set(record.slice(tab + 1), { mode, oid });
+  }
   const currentPaths = nulList(await gitText(worktree.root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], undefined, signal));
   const changed: string[] = [];
-  for (const rel of new Set([...baselinePaths, ...currentPaths])) {
-    if (!await parentMatchesBaseline(worktree, worktree.root, rel, signal)) changed.push(rel);
+  // Compare object ids from bounded hash-object batches instead of two git processes per file.
+  const batched: { rel: string; oid: string; path: string; size: number }[] = [];
+  const hashBytes = async (bytes: Buffer) => (await gitText(worktree.root, ["hash-object", "--no-filters", "--stdin"], bytes, signal)).trim();
+  for (const rel of new Set([...baseline.keys(), ...currentPaths])) {
+    const entry = baseline.get(rel);
+    const target = resolve(worktree.root, rel);
+    if (!safeFilePath(worktree.root, rel)) { changed.push(rel); continue; }
+    const stat = statIfPresent(target);
+    if (!entry || !stat) {
+      if (entry || stat) changed.push(rel);
+      continue;
+    }
+    if (entry.mode === "120000") {
+      if (!stat.isSymbolicLink() || await hashBytes(Buffer.from(await readlink(target))) !== entry.oid) changed.push(rel);
+      continue;
+    }
+    if (!stat.isFile() || (entry.mode === "100755") !== ((stat.mode & 0o111) !== 0)) changed.push(rel);
+    else if (target.includes("\n")) { if (await hashBytes(await readFile(target)) !== entry.oid) changed.push(rel); }
+    else batched.push({ rel, oid: entry.oid, path: target, size: stat.size });
   }
+  const oids = await hashPaths(worktree.root, batched, false, signal);
+  batched.forEach((item, index) => { if (oids[index] !== item.oid) changed.push(item.rel); });
   return changed.sort();
 }
 
@@ -223,9 +288,6 @@ const baselineEntry = async (worktree: DelegateWorktree, rel: string, signal?: A
   if (type !== "blob" || !mode || !oid) throw new Error("unsupported baseline entry: " + rel);
   return { mode, content: await gitBuffer(worktree.root, ["cat-file", "blob", oid], signal) };
 };
-
-const parentMatchesBaseline = async (worktree: DelegateWorktree, parentRoot: string, rel: string, signal?: AbortSignal): Promise<boolean> =>
-  matchesBaseline(await baselineEntry(worktree, rel, signal), parentRoot, rel);
 
 const matchesBaseline = (baseline: BaselineEntry, parentRoot: string, rel: string): boolean => {
   const target = resolve(parentRoot, rel);
