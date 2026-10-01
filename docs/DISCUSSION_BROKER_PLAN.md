@@ -1,5 +1,7 @@
 # Discussion Broker Improvement Plan
 
+This is the detailed design for item 6 of the broader [Long-Session Stability and Performance Plan](./LONG_SESSION_PERFORMANCE_PLAN.md).
+
 ## Status
 
 Proposed. This document describes the implementation plan for replacing Pi Jar's file-backed `jar_discuss` coordination with a parent-owned message broker. It intentionally does not implement the broker yet.
