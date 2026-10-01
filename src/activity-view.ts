@@ -16,6 +16,8 @@ export interface ActivitySources {
   subagents: DelegateRegistry;
   shells?: ShellManager;
   roles?: () => ActivityRole[];
+  /** Live-update coalescing in ms (default 100); the host widens it as the transcript under the overlay grows. */
+  repaintMs?: () => number;
 }
 
 /** Doubles as the icon key for the row glyph. */
@@ -46,7 +48,7 @@ function collect(sources: ActivitySources): Item[] {
   if (records.length) items.push({ kind: "header", label: withIcon("subagents", "SUBAGENTS") });
   for (const record of records) {
     const { run } = record;
-    const status: Status = run.state === "working" ? "running" : run.state === "queued" || run.state === "idle" ? "pending"
+    const status: Status = run.state === "working" ? "running" : run.state === "queued" || run.state === "idle" || run.state === "hibernated" ? "pending"
       : run.state === "paused" || run.state === "stopped" ? "stopped" : run.state === "done" ? "success" : "error";
     items.push({ kind: "subagent", id: record.key, status, label: run.name, record });
   }
@@ -275,11 +277,12 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
     const fg: Fg = (color, text) => theme.fg(color as never, text);
     const shells = sources.shells;
     const previous = shells?.onChange;
-    // Live streams notify far faster than a transcript view needs to repaint; ~10 frames a second reads as live.
+    // Live streams notify far faster than a transcript view needs to repaint; ~10 frames a second reads
+    // as live. Each frame also re-renders the transcript beneath the overlay, so long sessions go slower.
     let repaint: NodeJS.Timeout | undefined;
     const repaintSoon = () => {
       if (repaint || closed) return;
-      repaint = setTimeout(() => { repaint = undefined; if (!closed) tui.requestRender(); }, 100);
+      repaint = setTimeout(() => { repaint = undefined; if (!closed) tui.requestRender(); }, sources.repaintMs?.() ?? 100);
       repaint.unref?.();
     };
     const unsubscribe = sources.subagents.subscribe(repaintSoon);
@@ -359,9 +362,10 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
     const stopSelected = () => {
       const item = selected();
       if (!item || item.kind === "role") return;
-      const subagentLive = item.kind === "subagent" && !["done", "failed", "stopped"].includes(item.record.run.state);
+      // An unresolved recovery workspace stays stoppable: stop retries its reconciliation.
+      const subagentStoppable = item.kind === "subagent" && (!["done", "failed", "stopped"].includes(item.record.run.state) || !!item.record.run.workspace);
       const shellLive = item.kind === "shell" && item.status === "running";
-      if (!subagentLive && !shellLive) return;
+      if (!subagentStoppable && !shellLive) return;
       try {
         if (item.kind === "subagent") void sources.subagents.stop(item.id).catch((error: unknown) => {
 ctx.ui.notify("pi-jar: " + (error instanceof Error ? error.message : String(error)), "error");
@@ -460,7 +464,7 @@ ctx.ui.notify("pi-jar: " + (error instanceof Error ? error.message : String(erro
         // Footer: the two actions, the steering input for subagents, then key hints.
         const actions = optionList(theme, [item?.kind === "shell" ? "Kill the selected shell" : item?.kind === "role" ? "Stop (teammates from other extensions are read-only)" : "Stop the selected subagent",
           "Follow the latest output"], -1, ACTIONS.map((action) => action.key));
-        const stoppable = item?.kind === "subagent" ? !["done", "failed", "stopped"].includes(item.record.run.state)
+        const stoppable = item?.kind === "subagent" ? !["done", "failed", "stopped"].includes(item.record.run.state) || !!item.record.run.workspace
           : item?.kind === "shell" && item.status === "running";
         if (!stoppable) actions[0] = fg("dim", stripTerminalSequences(actions[0]!));
         const footer = [...actions];

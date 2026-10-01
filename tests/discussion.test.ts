@@ -1,179 +1,275 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { createConnection } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { MAX_DISCUSSION_BYTES, MAX_DISCUSSION_MESSAGES, MAX_DISCUSSION_TEXT, MAX_LIST_CHARS } from "../src/discussion-hub.ts";
 import {
-  createDiscussionPaper,
-  discussionEntries,
-  disposeDiscussionPaper,
-  MAX_DISCUSSION_ENTRIES,
-  MAX_DISCUSSION_TEXT,
-  MAX_LIST_CHARS,
-  registerDiscussionTool
+  DISCUSSION_ENDPOINT_ENV,
+  DISCUSSION_ENV_KEYS,
+  DISCUSSION_NOTICE,
+  DISCUSSION_TOKEN_ENV,
+  DiscussionBroker,
+  discussionClientFromEnv,
+  registerDiscussionTool,
+  SUBAGENT_KEY_ENV,
+  SUBAGENT_NAME_ENV,
+  type DiscussionTransport
 } from "../src/discussion.ts";
 
 interface Tool {
   name: string;
-  execute(id: string, params: Record<string, unknown>): Promise<{ content: Array<{ text: string }>; details?: unknown; isError?: boolean }>;
+  execute(id: string, params: Record<string, unknown>): Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+}
+type Notice = { message: { customType: string; display: boolean; content: string } } | undefined;
+
+/** One Pi process's jar_discuss tool and turn-boundary hook, over the given transport. */
+function agent(transport: () => DiscussionTransport | undefined) {
+  let tool: Tool | undefined;
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+  const sent: unknown[] = [];
+  registerDiscussionTool({
+    registerTool(definition: Tool) { tool = definition; },
+    on(event: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(event, handler); },
+    sendMessage(message: unknown) { sent.push(message); }
+  } as never, transport);
+  return {
+    run: (params: Record<string, unknown>) => tool!.execute("call", params),
+    say: async (params: Record<string, unknown>) => (await tool!.execute("call", params)).content[0]!.text,
+    boundary: async () => await handlers.get("before_agent_start")!({ type: "before_agent_start", prompt: "next" }, {}) as Notice,
+    sent
+  };
 }
 
-const register = (file: () => string | undefined, actor: string): Tool => {
-  let tool: Tool | undefined;
-  registerDiscussionTool({ registerTool(definition: Tool) { tool = definition; } } as never, file, () => actor);
-  return tool!;
+const child = (broker: DiscussionBroker, key: string, name: string) => discussionClientFromEnv(broker.childEnv(key, name))!;
+/** A subagent as delegate spawns it: registered with the broker before its first turn. */
+const member = (broker: DiscussionBroker, key: string, name: string) => {
+  const client = child(broker, key, name);
+  return agent(() => client);
 };
-const say = async (tool: Tool, params: Record<string, unknown>) => (await tool.execute("x", params)).content[0]!.text;
+const withBroker = async (run: (broker: DiscussionBroker) => Promise<void>) => {
+  const broker = new DiscussionBroker();
+  await broker.start();
+  try { await run(broker); } finally { await broker.close(); }
+};
+/** Raw bytes on their own connection; resolves with whatever came back before the connection closed. */
+const raw = (endpoint: string, data: string, hangUp = false) => new Promise<string>((resolve) => {
+  let reply = "";
+  const socket = createConnection(endpoint, () => {
+    socket.write(data);
+    if (hangUp) socket.end();
+  });
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk: string) => { reply += chunk; });
+  socket.on("error", () => { /* the reply, if any, is what the test checks */ });
+  socket.on("close", () => resolve(reply));
+});
+const count = (length: number, first = 1) => Array.from({ length }, (_, index) => index + first);
 
-test("discussion paper keeps structured bounded questions and answers", async () => {
-  const file = createDiscussionPaper();
-  try {
-    const tool = register(() => file, "scout-a");
-    assert.equal(tool.name, "jar_discuss");
-    await tool.execute("1", { action: "ask", text: "Where is auth?", to: "worker-b" });
-    await tool.execute("2", { action: "answer", questionId: "d1", text: "middleware.ts" });
-    const listed = await say(tool, { action: "list", since: "d0" });
-    assert.match(listed, /\[d1\] Q · scout-a → worker-b: Where is auth\?/);
-    assert.match(listed, /\[d2\] A · scout-a → d1: middleware\.ts/);
-    assert.deepEqual(discussionEntries(file).map((entry) => entry.kind), ["question", "answer"]);
+test("concurrent asks and answers from several children get unique ordered ids, one request each", () => withBroker(async (broker) => {
+  const clients = [1, 2, 3].map((n) => child(broker, `delegate-1-${n}`, `agent ${n}`));
+  const asked = await Promise.all(clients.flatMap((client, c) => count(10).map((i) => client.ask(`question ${c}.${i}`, "moderator"))));
+  assert.deepEqual(asked.map((result) => result.id).sort((a, b) => a - b), count(30));
+  const answered = await Promise.all(asked.map((question, index) => clients[(Math.floor(index / 10) + 1) % 3]!.answer(question.id, "answer")));
+  assert.deepEqual(answered.map((result) => result.id).sort((a, b) => a - b), count(30, 31));
+  assert.deepEqual([broker.stats().requests, broker.stats().errors], [60, 0], "nothing was retried or rejected");
 
-    for (let i = 0; i < MAX_DISCUSSION_ENTRIES + 8; i++) {
-      await tool.execute("x" + i, { action: "ask", text: "x".repeat(MAX_DISCUSSION_TEXT + 200) });
-    }
-    const entries = discussionEntries(file);
-    assert.ok(entries.length > 0 && entries.length <= MAX_DISCUSSION_ENTRIES);
-    assert.ok(entries.every((entry) => entry.text.length <= MAX_DISCUSSION_TEXT));
-    assert.ok(Buffer.byteLength(readFileSync(file)) <= 64 * 1024);
-  } finally {
-    disposeDiscussionPaper(file);
-    assert.equal(existsSync(file), false);
+  const listed: number[] = [];
+  for (let page = await broker.local().list(); page.messages.length; page = await broker.local().list()) listed.push(...page.messages.map((message) => message.id));
+  assert.deepEqual(listed, count(30), "the moderator reads its questions in parent-assigned order");
+}));
+
+test("the token is a child's only identity; bad tokens, targets and replies are rejected", () => withBroker(async (broker) => {
+  const env = broker.childEnv("delegate-1-1", "scout");
+  const endpoint = env[DISCUSSION_ENDPOINT_ENV]!;
+  const token = env[DISCUSSION_TOKEN_ENV]!;
+  const send = async (request: Record<string, unknown>) => JSON.parse(await raw(endpoint, JSON.stringify(request) + "\n"));
+
+  assert.deepEqual(await send({ token, op: "ask", text: "who am I?", from: "moderator", key: "delegate-9-9" }),
+    { ok: true, result: { id: 1, clipped: false, delivered: [], unread: 0 } });
+  assert.equal((await broker.local().list()).messages[0]!.from, "scout", "request fields cannot choose the sender");
+  for (const forged of [{ op: "list" }, { token: "forged", op: "list" }, { token: 7, op: "list" }]) {
+    assert.deepEqual(await send(forged), { ok: false, error: "Unauthorized discussion request." });
   }
+  assert.match((await send({ token, op: "ask", text: "hi", to: "nobody" })).error, /^Unknown discussion target/);
+  assert.match((await send({ token, op: "answer", questionId: 42, text: "hi" })).error, /^Unknown discussion question d42\./);
+  assert.match((await send({ token, op: "answer", questionId: "d1", text: "" })).error, /^Discussion text is required/);
+
+  broker.retire("delegate-1-1");
+  assert.deepEqual(await send({ token, op: "list" }), { ok: false, error: "Unauthorized discussion request." }, "retirement revokes the token");
+  assert.equal(JSON.stringify([broker.stats(), await broker.local().pending()]).includes(token), false, "the token never surfaces");
+}));
+
+test("malformed, oversized and abandoned requests cannot crash the parent", () => withBroker(async (broker) => {
+  const env = broker.childEnv("delegate-1-1", "scout");
+  const endpoint = env[DISCUSSION_ENDPOINT_ENV]!;
+  const token = env[DISCUSSION_TOKEN_ENV]!;
+  assert.match(await raw(endpoint, "not json\n"), /Malformed discussion request/);
+  assert.match(await raw(endpoint, "[1,2]\n"), /Malformed discussion request/);
+  // One byte past the 16 KiB request bound, with no newline in sight.
+  assert.match(await raw(endpoint, "x".repeat(16 * 1024 + 1)), /Discussion request too large/);
+  assert.equal(await raw(endpoint, '{"token":', true), "", "a half request is dropped when its peer hangs up");
+  assert.match(await raw(endpoint, JSON.stringify({ token, op: "explode" }) + "\n"), /Unknown discussion operation/);
+  assert.match(await raw(endpoint, JSON.stringify({ token, op: "thread", questionId: { id: 1 } }) + "\n"), /questionId must be a discussion id/);
+
+  assert.equal((await discussionClientFromEnv(env)!.ask("still serving")).id, 1);
+  const stats = broker.stats();
+  assert.equal(stats.listening, true);
+  assert.equal(stats.errors, 5);
+}));
+
+test("the socket is the broker's only file; close removes it, revokes tokens and clears state", async () => {
+  const exitListeners = process.listenerCount("exit");
+  const idle = new DiscussionBroker();
+  assert.deepEqual(idle.childEnv("delegate-1-1", "scout"), { [SUBAGENT_KEY_ENV]: "delegate-1-1", [SUBAGENT_NAME_ENV]: "scout" },
+    "no endpoint or token before the broker listens");
+  await idle.close();
+
+  const broker = new DiscussionBroker();
+  await Promise.all([broker.start(), broker.start()]);
+  const env = broker.childEnv("delegate-1-1", "scout");
+  assert.deepEqual(Object.keys(env).sort(), [...DISCUSSION_ENV_KEYS].sort(), "the scrub list covers everything a child inherits");
+  assert.deepEqual(broker.childEnv("delegate-1-1", "scout"), env, "idempotent per key");
+  assert.equal(broker.childEnv("moderator", "impostor")[DISCUSSION_TOKEN_ENV], undefined, "the moderator identity is never handed out");
+  const endpoint = env[DISCUSSION_ENDPOINT_ENV]!;
+  const client = discussionClientFromEnv(env)!;
+  await client.ask("question", "moderator");
+  await broker.local().answer(1, "answer");
+  await client.list();
+  if (process.platform !== "win32") {
+    assert.equal(statSync(dirname(endpoint)).mode & 0o777, 0o700, "only the owner can reach the socket");
+    assert.deepEqual(readdirSync(dirname(endpoint)), ["broker.sock"], "no paper, lock or snapshot file is ever written");
+  }
+
+  await broker.close();
+  assert.equal(existsSync(endpoint), false);
+  if (process.platform !== "win32") assert.equal(existsSync(dirname(endpoint)), false);
+  assert.equal(process.listenerCount("exit"), exitListeners, "no exit hook outlives the broker");
+  assert.deepEqual(broker.stats(), {
+    transport: "broker", listening: false, agents: 0, messages: 0, maxMessages: MAX_DISCUSSION_MESSAGES, bytes: 0, maxBytes: MAX_DISCUSSION_BYTES,
+    unanswered: 0, unread: 0, requests: 0, errors: 0
+  });
+  await assert.rejects(client.list(), /^Error: Discussion broker unavailable/);
+
+  await broker.start();
+  const fresh = broker.childEnv("delegate-1-1", "scout");
+  assert.notEqual(fresh[DISCUSSION_ENDPOINT_ENV], endpoint);
+  assert.notEqual(fresh[DISCUSSION_TOKEN_ENV], env[DISCUSSION_TOKEN_ENV], "a restarted broker issues new tokens");
+  await assert.rejects(client.list(), /Discussion broker unavailable/, "an old endpoint stays dead after restart");
+  await broker.close();
 });
 
-test("ask and answer replies name the new id without echoing the text", async () => {
-  const file = createDiscussionPaper();
-  try {
-    const tool = register(() => file, "scout-a");
-    assert.equal(await say(tool, { action: "ask", text: "Where is auth handled?", to: "worker-b" }), "Added d1 (→ worker-b).");
-    assert.equal(await say(tool, { action: "ask", text: "Anyone own the cache?" }), "Added d2.");
-    assert.equal(await say(tool, { action: "answer", questionId: "d1", text: "middleware.ts line 40" }), "Answered d1 as d3.");
-  } finally { disposeDiscussionPaper(file); }
+test("without a reachable broker jar_discuss says so and never falls back to a file", async () => {
+  assert.equal(discussionClientFromEnv({}), undefined);
+  assert.equal(discussionClientFromEnv({ [DISCUSSION_ENDPOINT_ENV]: "/tmp/x.sock" }), undefined, "an endpoint without a token is no transport");
+  const orphan = agent(() => undefined);
+  const result = await orphan.run({ action: "ask", text: "anyone?" });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0]!.text, /^Discussion broker unavailable/);
+
+  const missing = join(tmpdir(), "pi-jar-no-such-broker", "broker.sock");
+  const stranded = agent(() => discussionClientFromEnv({ [DISCUSSION_ENDPOINT_ENV]: missing, [DISCUSSION_TOKEN_ENV]: "token" }));
+  const failed = await stranded.run({ action: "list" });
+  assert.equal(failed.isError, true);
+  assert.match(failed.content[0]!.text, /^Discussion broker unavailable \(\w+\)\.$/);
+  assert.equal(await stranded.boundary(), undefined, "an unreachable broker never fails or delays a turn with an error");
+  assert.equal(existsSync(dirname(missing)), false);
 });
 
-test("default list shows only unseen entries by others; since d0 rereads everything", async () => {
-  const file = createDiscussionPaper();
-  try {
-    const scout = register(() => file, "scout");
-    const worker = register(() => file, "worker");
-    await scout.execute("1", { action: "ask", text: "scout question" });
-    await worker.execute("2", { action: "ask", text: "worker question" });
+test("ask and answer replies name the new id without echoing text; the caller's mail rides along", () => withBroker(async (broker) => {
+  const scout = member(broker, "delegate-1-1", "scout");
+  const worker = member(broker, "delegate-1-2", "worker");
+  const moderator = agent(() => broker.local());
+  assert.equal(await scout.say({ action: "ask", text: "Where is auth handled?", to: "worker" }), "Added d1 (→ worker).");
+  assert.equal(await scout.say({ action: "ask", text: "Anyone own the cache?" }), "Added d2.");
+  assert.equal(await worker.say({ action: "answer", questionId: "d1", text: "middleware.ts line 40" }),
+    "Answered d1 as d3.\n[d2] Q · scout: Anyone own the cache?");
+  assert.equal(await scout.say({ action: "ask", text: "Which tests cover it?", to: "worker" }),
+    "Added d4 (→ worker).\n[d3] A · worker → d1: middleware.ts line 40");
+  assert.equal(await moderator.say({ action: "answer", questionId: "2", text: "the moderator does" }), "Answered d2 as d5.", "plain numbers are ids too");
+  assert.equal(await scout.say({ action: "ask", text: "z".repeat(MAX_DISCUSSION_TEXT + 10) }),
+    `Added d6 (clipped to ${MAX_DISCUSSION_TEXT} chars).\n[d5] A · moderator → d2: the moderator does`);
 
-    const first = await say(scout, { action: "list" });
-    assert.match(first, /\[d2\] Q · worker: worker question/);
-    assert.doesNotMatch(first, /scout question/, "own entries are not listed back");
-    assert.equal(await say(scout, { action: "list" }), "No new entries (latest d2).");
+  const missing = await worker.run({ action: "answer", text: "orphan" });
+  assert.deepEqual([missing.isError, missing.content[0]!.text], [true, "questionId is required (e.g. d12)."]);
+  const unknown = await worker.run({ action: "answer", questionId: "d99", text: "nope" });
+  assert.deepEqual([unknown.isError, unknown.content[0]!.text], [true, "Unknown discussion question d99."]);
+  const empty = await worker.run({ action: "ask", text: "   " });
+  assert.deepEqual([empty.isError, empty.content[0]!.text], [true, "Discussion text is required."]);
+}));
 
-    await worker.execute("3", { action: "answer", questionId: "d1", text: "worker answer" });
-    const next = await say(scout, { action: "list" });
-    assert.match(next, /\[d3\] A · worker → d1: worker answer/);
-    assert.doesNotMatch(next, /\[d2\]/);
+test("list returns only the caller's unread mail in bounded pages; thread reads one question in full", () => withBroker(async (broker) => {
+  const worker = member(broker, "delegate-1-1", "worker");
+  const reader = member(broker, "delegate-1-2", "reader");
+  for (let i = 0; i < 20; i++) await worker.run({ action: "ask", text: `question ${i} ` + "x".repeat(MAX_DISCUSSION_TEXT) });
+  const first = await reader.say({ action: "list" });
+  assert.ok(first.length <= MAX_LIST_CHARS + 100, "the reply budget holds however much is unread");
+  assert.match(first, /^\[d1\] Q · worker: question 0 x+…$/m, "oldest first, clipped");
+  assert.doesNotMatch(first, /x{401}/);
+  assert.match(first, /\(\d+ more unread; list again\)$/);
+  let last = first;
+  while (/list again/.test(last)) last = await reader.say({ action: "list" });
+  assert.match(last, /\[d20\] Q · worker: question 19/, "paging reaches the newest message");
+  assert.equal(await reader.say({ action: "list" }), "No unread messages (latest d20).");
+  assert.match(await reader.say({ action: "list", since: "d19" }), /^\[d20\] Q · worker: question 19 x+…$/);
+  assert.equal(await reader.say({ action: "list", since: "d20" }), "No messages for you newer than d20.");
+  const invalid = await reader.run({ action: "list", since: "yesterday" });
+  assert.deepEqual([invalid.isError, invalid.content[0]!.text], [true, "since must be a discussion id like d12."]);
 
-    const all = await say(scout, { action: "list", since: "d0" });
-    for (const id of ["d1", "d2", "d3"]) assert.match(all, new RegExp(`\\[${id}\\]`));
-    assert.equal(await say(scout, { action: "list" }), "No new entries (latest d3).");
-  } finally { disposeDiscussionPaper(file); }
-});
+  await reader.run({ action: "ask", text: "How does question 2 relate?", to: "worker" });
+  await worker.run({ action: "answer", questionId: "d21", text: "answer " + "y".repeat(MAX_DISCUSSION_TEXT) });
+  const thread = await reader.say({ action: "thread", questionId: "d21" });
+  assert.match(thread, /^\[d21\] Q · reader → worker: How does question 2 relate\?\n\[d22\] A · worker → d21: answer y{1593}$/, "a thread shows answers in full");
+  assert.equal(await reader.say({ action: "list" }), "No unread messages (latest d22).", "reading the thread read its answer");
+  assert.equal(await reader.say({ action: "list", questionId: "d21" }), thread, "list with questionId still reads one thread");
+  assert.equal(await reader.say({ action: "thread", questionId: "d22", since: "d22" }), "No answers newer than d22.");
+}));
 
-test("answers to my questions are piggybacked on my next ask or answer and not listed again", async () => {
-  const file = createDiscussionPaper();
-  try {
-    const scout = register(() => file, "scout");
-    const worker = register(() => file, "worker");
-    await scout.execute("1", { action: "ask", text: "Where is auth?", to: "worker" });
-    assert.equal(await say(worker, { action: "answer", questionId: "d1", text: "middleware.ts" }), "Answered d1 as d2.");
-    assert.equal(await say(worker, { action: "list" }), "No new entries (latest d2).", "answering does not re-list the question");
+test("pending gives compact summaries without message bodies", () => withBroker(async (broker) => {
+  const scout = member(broker, "delegate-1-1", "scout");
+  const moderator = agent(() => broker.local());
+  await scout.run({ action: "ask", text: "private detail alpha", to: "moderator" });
+  await moderator.run({ action: "ask", text: "private detail beta", to: "scout" });
+  const mine = await scout.say({ action: "pending" });
+  assert.match(mine, /^Unread for you: 1 \(list to read\)\.\nWaiting on you: d2\.\nYour unanswered questions: d1\.\nRetained: 2\/128 messages, [\d.]+\/128 KiB\.$/);
+  const fleet = await moderator.say({ action: "pending" });
+  assert.match(fleet, /^Unread for you: 0\.\nWaiting on you: d1\.\nYour unanswered questions: d2\.\nUnread by agent: scout 1\.\n/);
+  assert.match(fleet, /\nUnanswered: 2 \(d1 scout → moderator · d2 moderator → scout\)\.\n/);
+  assert.doesNotMatch(mine + fleet, /private/);
+}));
 
-    assert.equal(await say(scout, { action: "ask", text: "Which tests cover it?", to: "worker" }),
-      "Added d3 (→ worker).\n[d2] A · worker → d1: middleware.ts");
-    assert.equal(await say(scout, { action: "list" }), "No new entries (latest d3).");
-    assert.equal(await say(worker, { action: "answer", questionId: "d1", text: "also session.ts" }),
-      "Answered d1 as d4.\n[d3] Q · scout → worker: Which tests cover it?", "questions addressed to me are piggybacked too");
-  } finally { disposeDiscussionPaper(file); }
-});
+test("an unread notice joins only natural turn boundaries with new unread mail and never wakes anyone", () => withBroker(async (broker) => {
+  const moderator = agent(() => broker.local());
+  const scout = member(broker, "delegate-1-1", "scout");
+  assert.equal(await moderator.boundary(), undefined, "no notice without unread mail");
+  await scout.run({ action: "ask", text: "ping", to: "moderator" });
+  assert.deepEqual(await moderator.boundary(), { message: { customType: DISCUSSION_NOTICE, display: false,
+    content: "You have 1 unread discussion message. Use jar_discuss list when relevant." } });
+  assert.equal(await moderator.boundary(), undefined, "ignored mail is not re-announced every turn");
+  await scout.run({ action: "ask", text: "ping again", to: "moderator" });
+  assert.match((await moderator.boundary())!.message.content, /^You have 2 unread discussion messages\./);
+  await moderator.run({ action: "list" });
+  assert.equal(await moderator.boundary(), undefined);
+  await moderator.run({ action: "ask", text: "pong", to: "scout" });
+  assert.match((await scout.boundary())!.message.content, /^You have 1 unread discussion message\./, "children get it over IPC");
+  assert.deepEqual([moderator.sent, scout.sent], [[], []], "discussion never sends a message, so it can never trigger a turn");
+}));
 
-test("piggyback falls back to a count when unrelated entries are unseen and leaves them for list", async () => {
-  const file = createDiscussionPaper();
-  try {
-    const scout = register(() => file, "scout");
-    const worker = register(() => file, "worker");
-    await scout.execute("1", { action: "ask", text: "Where is auth?" });
-    await worker.execute("2", { action: "answer", questionId: "d1", text: "middleware.ts" });
-    await worker.execute("3", { action: "ask", text: "Unrelated broadcast" });
-    assert.equal(await say(scout, { action: "ask", text: "Next question" }), "Added d4.\n(2 new entries, 1 for you; list to read)");
-    const listed = await say(scout, { action: "list" });
-    assert.match(listed, /\[d2\] A · worker → d1: middleware\.ts/);
-    assert.match(listed, /\[d3\] Q · worker: Unrelated broadcast/);
-  } finally { disposeDiscussionPaper(file); }
-});
+test("change notifications fire on state changes only, and a failing listener never fails a request", (t) => withBroker(async (broker) => {
+  let changes = 0;
+  broker.onChange = () => { changes++; };
+  const scout = child(broker, "delegate-1-1", "scout");
+  assert.equal(changes, 1, "registration");
+  await broker.local().list();
+  assert.equal(changes, 1, "an empty read changes nothing");
+  await scout.ask("hello", "moderator");
+  assert.deepEqual([changes, broker.unreadFor("moderator"), broker.unreadFor("delegate-9-9")], [2, 1, 0]);
+  await broker.local().list();
+  assert.deepEqual([changes, broker.unreadFor("moderator")], [3, 0]);
 
-test("the read cursor resets when the paper path changes", async () => {
-  const first = createDiscussionPaper();
-  const second = createDiscussionPaper();
-  try {
-    let path = first;
-    const scout = register(() => path, "scout");
-    await register(() => first, "worker").execute("1", { action: "ask", text: "first paper question" });
-    await register(() => second, "worker").execute("2", { action: "ask", text: "second paper question" });
-    assert.match(await say(scout, { action: "list" }), /\[d1\] Q · worker: first paper question/);
-    assert.equal(await say(scout, { action: "list" }), "No new entries (latest d1).");
-    path = second;
-    assert.match(await say(scout, { action: "list" }), /\[d1\] Q · worker: second paper question/);
-  } finally { disposeDiscussionPaper(first); disposeDiscussionPaper(second); }
-});
-
-test("discussion UTF-8 cap holds after every multibyte append and preserves newest entries", async () => {
-  const file = createDiscussionPaper();
-  try {
-    const tool = register(() => file, "worker");
-    for (let i = 0; i < MAX_DISCUSSION_ENTRIES + 8; i++) {
-      await tool.execute("x" + i, { action: "ask", text: "界".repeat(MAX_DISCUSSION_TEXT) });
-      assert.ok(Buffer.byteLength(readFileSync(file)) <= 64 * 1024, "paper exceeds actual UTF-8 byte cap at append " + i);
-    }
-    const entries = discussionEntries(file);
-    assert.ok(entries.length > 0 && entries.length < 32, "even 32 multibyte entries exceed the byte cap");
-    assert.equal(entries.at(-1)?.id, "d" + (MAX_DISCUSSION_ENTRIES + 8));
-    assert.ok(entries.every((entry) => entry.text === "界".repeat(MAX_DISCUSSION_TEXT)));
-  } finally { disposeDiscussionPaper(file); }
-});
-
-test("discussion answers require a known question id", async () => {
-  const file = createDiscussionPaper();
-  try {
-    const result = await register(() => file, "reviewer").execute("1", { action: "answer", questionId: "missing", text: "nope" });
-    assert.equal(result.isError, true);
-    assert.match(result.content[0]!.text, /Unknown discussion question/);
-  } finally { disposeDiscussionPaper(file); }
-});
-
-test("list replies stay bounded, reread only newer entries, and read one thread in full", async () => {
-  const file = createDiscussionPaper();
-  try {
-    const worker = register(() => file, "worker");
-    const reader = register(() => file, "reader");
-    for (let i = 0; i < 20; i++) await worker.execute("q" + i, { action: "ask", text: `question ${i} ` + "x".repeat(MAX_DISCUSSION_TEXT) });
-    const listed = await say(reader, { action: "list" });
-    assert.ok(listed.length <= MAX_LIST_CHARS + 200, "the reply budget holds however large the paper is");
-    assert.match(listed, /older entries omitted/);
-    assert.match(listed, /\[d20\] Q/, "the newest entries are kept");
-    assert.doesNotMatch(listed, /x{500}/, "listed entries are clipped");
-
-    assert.match(await say(reader, { action: "list", since: "d20" }), /No entries newer than d20/);
-    await worker.execute("a", { action: "answer", questionId: "d3", text: "answer for three" });
-    const thread = await say(reader, { action: "list", questionId: "d3" });
-    assert.match(thread, new RegExp(`\\[d3\\] Q · worker: question 2 x{${MAX_DISCUSSION_TEXT - 11}}`), "a thread reads its question in full");
-    assert.match(thread, /\[d21\] A/);
-    assert.doesNotMatch(thread, /\[d4\]/);
-
-    const newer = await say(reader, { action: "list" });
-    assert.match(newer, /\[d21\] A · worker → d3: answer for three/, "a thread read does not move the cursor");
-    assert.doesNotMatch(newer, /\[d20\]/);
-  } finally { disposeDiscussionPaper(file); }
-});
+  const logged = t.mock.method(console, "error", () => {});
+  broker.onChange = () => { throw new Error("repaint bug"); };
+  assert.equal((await scout.ask("still fine")).id, 2);
+  assert.equal(logged.mock.callCount(), 1);
+}));

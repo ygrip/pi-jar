@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { signalProcessTree } from "./async-process.ts";
 import { CHILD_TOOLS_ENV, RECURSIVE_TOOLS, WEB_TOOLS } from "./subagent-tools.ts";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -14,7 +14,7 @@ import { CHILD_BASELINE_ENV, readChildBaseline } from "./child-baselines.ts";
 import type { ModelRoleManager } from "./model-roles.ts";
 import { cleanText, ROLE_PREFIX } from "./status.ts";
 import type { Todo } from "./tasks.ts";
-import { DISCUSSION_FILE_ENV, SUBAGENT_KEY_ENV, SUBAGENT_NAME_ENV } from "./discussion.ts";
+import { DISCUSSION_ENV_KEYS, SUBAGENT_KEY_ENV, SUBAGENT_NAME_ENV } from "./discussion.ts";
 import {
   applyDelegateWorktree,
   CHILD_WORKTREE_ENV,
@@ -47,6 +47,10 @@ const IDLE_TIMEOUT_MS = 10 * 60_000;
 const CLOSE_GRACE_MS = 2000;
 /** How long pause waits for the child to settle after abort before reporting that it has not paused yet. */
 const PAUSE_GRACE_MS = 15_000;
+/** A settled retained child closes its Pi process after this much quiet; resume/ask relaunch it on the same session. */
+export const HIBERNATE_AFTER_MS = 30_000;
+/** How long hibernation waits for the child to report its session file before it stays awake instead. */
+const STATE_QUERY_MS = 5000;
 const STATUS_REFRESH_MS = 20_000;
 const LIVE_UPDATE_MS = 1000;
 /** Visible message that wakes the moderator when a resumed subagent's turn ends. */
@@ -69,6 +73,10 @@ const MAX_STEER_CHARS = 4000;
 export const MAX_RESUME_CHARS = 40_000;
 /** Finished subagents the registry keeps for the activity view after their tool call returns. */
 const MAX_FINISHED = 8;
+/** Unresolved worktree recovery workspaces, counting active worktree agents that may still become one. */
+export const RECOVERY_LIMIT = 4;
+/** A recovery record keeps this much of its last report; its transcript is released. */
+const MAX_RECOVERY_OUTPUT = 1200;
 /** Abort reason for stopping one subagent from the activity view (vs. aborting the whole tool call). */
 const STOP_REASON = "stopped";
 /** Tool arguments that best describe a call in the transcript, most telling first. */
@@ -77,7 +85,7 @@ const HINT_KEYS = ["command", "path", "file_path", "pattern", "query", "url"] as
 const DIALOGS = new Set(["select", "confirm", "input", "editor"]);
 const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 
-export type DelegateState = "queued" | "working" | "idle" | "paused" | "stopped" | "done" | "failed";
+export type DelegateState = "queued" | "working" | "idle" | "paused" | "hibernated" | "stopped" | "done" | "failed";
 export type ToolStatus = "running" | "done" | "error";
 /** One transcript row; `rev` changes whenever the entry does, so views can cache their rendering. */
 export type TranscriptEntry =
@@ -145,26 +153,33 @@ export function extensionFlags(argv = process.argv, cwd = process.cwd()): string
   return flags;
 }
 
-export interface DelegateForkOptions {
-  source: string;
+export interface DelegateSessionOptions {
+  /** This child's own private session directory; removed when its record is permanently discarded. */
   sessionDir: string;
+  /** fork/worktree: the parent session this child forks, so it inherits the conversation. */
+  source?: string;
+  /** This child's own session file, continued after hibernation instead of creating or forking one. */
+  resume?: string;
   tools?: readonly string[];
 }
 
-/** CLI arguments for one subagent: fresh ephemeral session or a real Pi session fork. */
+/** CLI arguments for one subagent: an ephemeral one-shot, a private resumable session, or a real Pi session fork. */
 export function delegateArgs(model: string | undefined, thinking: string | undefined, write: boolean, argv = process.argv,
-  fork?: DelegateForkOptions, toolOverride?: readonly string[]): string[] {
-  const session = fork ? ["--fork", fork.source, "--session-dir", fork.sessionDir] : ["--no-session"];
+  session?: DelegateSessionOptions, toolOverride?: readonly string[]): string[] {
+  const sessionArgs = !session ? ["--no-session"]
+    : session.resume ? ["--session", session.resume, "--session-dir", session.sessionDir]
+    : session.source ? ["--fork", session.source, "--session-dir", session.sessionDir]
+    : ["--session-dir", session.sessionDir];
   const extensions = extensionFlags(argv);
-  // Worktree cwd/session forks do not inherit project extension discovery from the parent.
-  if (fork) {
+  // Worktree cwd/session forks (resumed ones too) do not inherit project extension discovery from the parent.
+  if (session?.source) {
     const ownExtension = fileURLToPath(new URL("../extensions/index.ts", import.meta.url));
     if (!extensions.includes(ownExtension)) extensions.push("--extension", ownExtension);
   }
-  const args = ["--mode", "rpc", ...session, ...extensions];
+  const args = ["--mode", "rpc", ...sessionArgs, ...extensions];
   if (model) args.push("--model", model);
   if (thinking) args.push("--thinking", thinking);
-  const tools = fork?.tools ?? toolOverride ?? (!write ? READ_ONLY_TOOLS : undefined);
+  const tools = session?.tools ?? toolOverride ?? (!write ? READ_ONLY_TOOLS : undefined);
   if (tools) args.push("--tools", tools.join(","));
   return args;
 }
@@ -172,7 +187,7 @@ export function delegateArgs(model: string | undefined, thinking: string | undef
 /** The subagent's prompt: its rules, how to report back, then the task. */
 export function delegatePrompt(task: string, write: boolean, mode: DelegateExecutionMode = write ? "direct" : "scout"): string {
   const rules = mode === "worktree"
-    ? "You inherit the parent conversation but work inside an isolated disposable Git worktree. You may edit only with the provided file tools; shell tools are intentionally unavailable. Stay strictly within the task. Your changes remain private across idle/pause/resume and are reconciled into the parent for /diff review only when the moderator stops you."
+    ? "You inherit the parent conversation but work inside an isolated disposable Git worktree. You may edit only with the provided file tools; shell tools are intentionally unavailable. Stay strictly within the task. Your changes remain private across idle, pause, hibernation and resume, and are reconciled into the parent for /diff review only when the moderator stops you."
     : mode === "fork"
       ? "You are a read-only fork of the parent conversation: use the inherited context, investigate, and report without modifying files."
       : write
@@ -181,7 +196,7 @@ export function delegatePrompt(task: string, write: boolean, mode: DelegateExecu
   return [
     `You are a focused subagent working for another agent. ${rules}`,
     "Track multi-step work with jar_todo (when available) so your progress is visible. The moderator may steer, pause or resume you; preserve scope across those controls.",
-    "Use jar_discuss when available for short cross-agent questions and answers. Keep discussion entries narrow; do not turn the shared paper into a transcript.",
+    "Use jar_discuss when available for short cross-agent questions and answers. Keep discussion messages narrow; it is for coordination, not a transcript.",
     "Finish with a self-contained report in these sections:",
     "## Summary — the outcome in one to three sentences.",
     "## Details — findings or changes, with file paths (and line numbers where useful).",
@@ -293,7 +308,7 @@ interface ChildEvent {
   id?: unknown;
   command?: unknown;
   success?: unknown;
-  data?: { disposition?: unknown };
+  data?: { disposition?: unknown; sessionFile?: unknown };
   error?: unknown;
   method?: unknown;
   toolCallId?: unknown;
@@ -307,284 +322,383 @@ interface ChildEvent {
 }
 
 export interface DelegateHooks {
-  /** Extra environment for the child (the baseline directory for /diff). */
-  env?: Record<string, string>;
+  /** Extra environment for each child process: read again when a hibernated child relaunches. */
+  env?: () => Record<string, string>;
   /** A successful edit/write by the child, with the path it gave. */
   edited?(path: string): void;
+  /** CLI arguments continuing this child's own session file, or undefined to refuse it. Without it the child never hibernates. */
+  resumeArgs?(sessionFile: string): string[] | undefined;
+  /** Settled quiet time before a resumable child's process closes; absent or non-finite never hibernates. */
+  hibernateAfterMs?: number;
 }
 export interface DelegateHandle {
   /** First point where the child is idle after its initial task. */
   firstSettled: Promise<void>;
-  /** Process lifetime; persistent agents stay alive across many settled turns. */
+  /** The agent's permanent end. Hibernation closes only the process; resume and ask relaunch it. */
   closed: Promise<void>;
   steer(text: string): boolean;
   pause(): Promise<boolean>;
   resume(text?: string): boolean;
   ask(text: string): Promise<string | undefined>;
   shutdown(): Promise<void>;
+  /** Whether a child process is running right now; false while hibernated. */
   alive(): boolean;
+  pid(): number | undefined;
+}
+
+/** One Pi process of a subagent; a hibernating agent runs a series of them on one session file. */
+interface RpcProcess {
+  child: ChildProcess;
+  /** Until exit: control commands can still reach the child. */
+  alive: boolean;
+  /** Closing on purpose to hibernate, so its exit is not the agent's end. */
+  hibernating: boolean;
+  stderr: string;
+  killTimer?: NodeJS.Timeout;
+  /** Final teardown once stdio closed or stopped draining; idempotent. */
+  exited(code: number | null): void;
+  /** Resolves after `exited`. */
+  ended: Promise<void>;
 }
 
 /**
- * Run one child Pi in RPC mode. Persistent children remain alive after agent_settled so the
- * moderator can peek, steer, pause, resume and ask them questions without rebuilding context.
+ * Run one subagent over Pi RPC. Persistent children stay retained after agent_settled so the moderator
+ * can peek, steer, pause, resume and ask them without rebuilding context. A resumable child that stays
+ * settled hibernates: its process closes cleanly, and resume/ask relaunch Pi on the same session file.
  */
 export function startDelegate(run: DelegateRun, args: string[], prompt: string, cwd: string, signal: AbortSignal | undefined,
   update: () => void, spawnProcess: Spawn = spawn as Spawn, hooks: DelegateHooks = {}, persistent = true): DelegateHandle {
-  let steer: (text: string) => boolean = () => false;
-  let pause: () => Promise<boolean> = async () => false;
-  let resume: (text?: string) => boolean = () => false;
-  let ask: (text: string) => Promise<string | undefined> = async () => undefined;
-  let shutdown: () => Promise<void> = async () => {};
-  let alive = false;
   let resolveFirst!: () => void;
   let firstResolved = false;
   const firstSettled = new Promise<void>((resolve) => { resolveFirst = resolve; });
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
 
-  const closed = new Promise<void>((resolveClosed) => {
-    const invocation = piInvocation(args);
-    let child: ChildProcess;
-    try {
-      const env = { ...process.env };
-      for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, CHILD_TOOLS_ENV, DISCUSSION_FILE_ENV, SUBAGENT_KEY_ENV, SUBAGENT_NAME_ENV]) delete env[key];
-      child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"], env: { ...env, ...hooks.env, [CHILD_ENV]: "1" } });
-    } catch (error) {
-      run.state = "failed"; run.error = error instanceof Error ? error.message : String(error); run.endedAt = Date.now(); update();
-      firstResolved = true; resolveFirst(); resolveClosed(); return;
+  /** The running process: none before the first spawn, after the end, or while hibernated. */
+  let current: RpcProcess | undefined;
+  let finished = false;
+  let settled = false;
+  let pauseRequested = false;
+  let closing = false;
+  let shutdownPromise: Promise<void> | undefined;
+  let askBusy = false;
+  let liveAt = 0;
+  let liveTimer: NodeJS.Timeout | undefined;
+  let turnTimer: NodeJS.Timeout | undefined;
+  let hibernateTimer: NodeJS.Timeout | undefined;
+  /** Last RPC event while working; the watchdog only fires after this much silence. */
+  let activityAt = Date.now();
+  /** How to continue this child's session after hibernation, learned from Pi before its process closed. */
+  let relaunchArgs: string[] | undefined;
+  /** A hibernated agent's settled state: a BTW answer returns a paused agent to paused. */
+  let rest: "idle" | "paused" = "idle";
+  /** A prompt accepted while the hibernating process was still exiting; its relaunch sends it. */
+  let wake: { message: string; id: string } | undefined;
+  let querySequence = 0;
+  const queries = new Map<string, (file: string | undefined) => void>();
+  const settleWaiters: Array<() => void> = [];
+  const running = new Map<string, { entry: ToolEntry; path?: string }>();
+
+  const send = (command: object): boolean => {
+    const stdin = current?.alive ? current.child.stdin : undefined;
+    if (!stdin || stdin.destroyed || stdin.writableEnded) return false;
+    // Node queues writes until drain. Bound that queue if a hung RPC child stops reading;
+    // accepted commands remain complete JSONL records, never partial/manual framing.
+    if (stdin.writableLength > 256 * 1024) return false;
+    try { stdin.write(JSON.stringify(command) + "\n"); return true; } catch { return false; }
+  };
+  const clearTurnTimer = () => { clearTimeout(turnTimer); turnTimer = undefined; };
+  const hardStop = () => {
+    const proc = current;
+    if (!proc?.alive) return;
+    signalProcessTree(proc.child, "SIGTERM");
+    proc.killTimer ??= setTimeout(() => {
+      // Kill the group even if its leader exited: descendants can ignore SIGTERM and keep pipes.
+      signalProcessTree(proc.child, "SIGKILL");
+      proc.child.stdout?.destroy?.();
+      proc.child.stderr?.destroy?.();
+      proc.exited(proc.child.exitCode);
+    }, 3000);
+    proc.killTimer.unref?.();
+  };
+  const armTurnTimer = (delay = IDLE_TIMEOUT_MS) => {
+    clearTurnTimer();
+    turnTimer = setTimeout(() => {
+      turnTimer = undefined;
+      const quiet = Date.now() - activityAt;
+      if (quiet < IDLE_TIMEOUT_MS) { armTurnTimer(IDLE_TIMEOUT_MS - quiet); return; }
+      hardStop();
+      finish("failed", `timed out: no activity for ${duration(IDLE_TIMEOUT_MS)}`);
+    }, delay);
+    turnTimer.unref?.();
+  };
+  /** High-frequency stream events repaint at most every LIVE_REPAINT_MS. */
+  const repaint = () => {
+    const now = Date.now();
+    if (now - liveAt >= LIVE_REPAINT_MS) {
+      liveAt = now;
+      if (liveTimer) { clearTimeout(liveTimer); liveTimer = undefined; }
+      update();
+      return;
     }
-
-    alive = true;
-    run.state = "working";
-    run.startedAt = Date.now();
-    run.endedAt = undefined;
-    run.activity = "starting";
+    if (liveTimer) return;
+    liveTimer = setTimeout(() => { liveTimer = undefined; liveAt = Date.now(); if (!finished) update(); }, LIVE_REPAINT_MS - (now - liveAt));
+    liveTimer.unref?.();
+  };
+  const resolveSettled = () => {
+    for (const waiter of settleWaiters.splice(0)) waiter();
+  };
+  const waitSettled = () => settled || finished ? Promise.resolve() : new Promise<void>((resolve) => settleWaiters.push(resolve));
+  const finish = (state: DelegateState, error?: string) => {
+    if (finished) return;
+    finished = true;
+    clearTurnTimer();
+    clearTimeout(liveTimer);
+    clearTimeout(hibernateTimer);
+    wake = undefined;
+    for (const answer of [...queries.values()]) answer(undefined);
+    signal?.removeEventListener("abort", abort);
+    const stdin = current?.child.stdin;
+    if (stdin && !stdin.writableEnded) stdin.end();
+    run.state = state;
+    if (error) run.error = error;
+    run.activity = undefined;
+    run.live = "";
+    for (const entry of run.transcript) if (entry.kind === "tool" && entry.status === "running") { entry.status = "error"; entry.endedAt = Date.now(); entry.rev++; }
+    running.clear();
+    run.endedAt = Date.now();
+    resolveSettled();
+    if (!firstResolved) { firstResolved = true; resolveFirst(); }
     update();
+    // With no process left (spawn failure, or ended while hibernated) nothing else reports the end.
+    if (!current) resolveClosed();
+  };
+  const abort = () => { hardStop(); finish("failed", signal?.reason === STOP_REASON ? "stopped" : "aborted"); };
 
-    let buffer = "";
-    let overflow = false;
-    let liveAt = 0;
-    let liveTimer: ReturnType<typeof setTimeout> | undefined;
-    let stderr = "";
-    let finished = false;
-    let settled = false;
-    let pauseRequested = false;
-    let closing = false;
-    let shutdownPromise: Promise<void> | undefined;
-    let askBusy = false;
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-    let turnTimer: ReturnType<typeof setTimeout> | undefined;
-    let closeTimer: NodeJS.Timeout | undefined;
-    /** Last RPC event while working; the watchdog only fires after this much silence. */
-    let activityAt = Date.now();
-    const settleWaiters: Array<() => void> = [];
-
-    const send = (command: object): boolean => {
-      const stdin = child.stdin;
-      if (!alive || !stdin || stdin.destroyed || stdin.writableEnded) return false;
-      // Node queues writes until drain. Bound that queue if a hung RPC child stops reading;
-      // accepted commands remain complete JSONL records, never partial/manual framing.
-      if (stdin.writableLength > 256 * 1024) return false;
-      try { stdin.write(JSON.stringify(command) + "\n"); return true; } catch { return false; }
-    };
-    const clearTurnTimer = () => { if (turnTimer) clearTimeout(turnTimer); turnTimer = undefined; };
-    const hardStop = () => {
-      if (!alive) return;
-      signalProcessTree(child, "SIGTERM");
-      killTimer ??= setTimeout(() => {
-        // Kill the group even if its leader exited: descendants can ignore SIGTERM and keep pipes.
-        signalProcessTree(child, "SIGKILL");
-        child.stdout?.destroy?.();
-        child.stderr?.destroy?.();
-        exited(child.exitCode);
-      }, 3000);
-      killTimer.unref?.();
-    };
-    const armTurnTimer = (delay = IDLE_TIMEOUT_MS) => {
-      clearTurnTimer();
-      turnTimer = setTimeout(() => {
-        turnTimer = undefined;
-        const quiet = Date.now() - activityAt;
-        if (quiet < IDLE_TIMEOUT_MS) { armTurnTimer(IDLE_TIMEOUT_MS - quiet); return; }
-        hardStop();
-        finish("failed", `timed out: no activity for ${duration(IDLE_TIMEOUT_MS)}`);
-      }, delay);
-      turnTimer.unref?.();
-    };
-    /** High-frequency stream events repaint at most every LIVE_REPAINT_MS. */
-    const repaint = () => {
-      const now = Date.now();
-      if (now - liveAt >= LIVE_REPAINT_MS) {
-        liveAt = now;
-        if (liveTimer) { clearTimeout(liveTimer); liveTimer = undefined; }
+  /** Settled, persistent and running: the process could close without losing the agent. */
+  const sleepable = () => persistent && !finished && !closing && settled && !!current?.alive && !current.hibernating
+    && (run.state === "idle" || run.state === "paused");
+  const armHibernate = () => {
+    clearTimeout(hibernateTimer);
+    hibernateTimer = undefined;
+    const delay = hooks.hibernateAfterMs;
+    if (!hooks.resumeArgs || delay === undefined || !Number.isFinite(delay) || !sleepable()) return;
+    hibernateTimer = setTimeout(() => { hibernateTimer = undefined; void hibernate(); }, Math.max(0, delay));
+    hibernateTimer.unref?.();
+  };
+  /** The session file Pi reports for this child; undefined when it cannot say in time. */
+  const querySessionFile = () => new Promise<string | undefined>((resolve) => {
+    const id = `state-${++querySequence}`;
+    let timer: NodeJS.Timeout | undefined;
+    const answer = (file: string | undefined) => { clearTimeout(timer); queries.delete(id); resolve(file); };
+    queries.set(id, answer);
+    timer = setTimeout(() => answer(undefined), STATE_QUERY_MS);
+    timer.unref?.();
+    if (!send({ id, type: "get_state" })) answer(undefined);
+  });
+  /** Close a settled child's process but keep the agent: its session file is all a relaunch needs. */
+  const hibernate = async () => {
+    if (!sleepable() || askBusy) return;
+    const proc = current!;
+    const file = await querySessionFile();
+    // A session Pi has not written yet (no assistant message) has nothing to continue, so the child
+    // stays up. Anything that touched the agent meanwhile (resume, ask, stop) also wins over sleeping.
+    const continued = file && existsSync(file) ? hooks.resumeArgs?.(file) : undefined;
+    if (!continued || !sleepable() || askBusy || current !== proc) return;
+    relaunchArgs = continued;
+    proc.hibernating = true;
+    run.activity = "hibernating";
+    update();
+    // EOF is Pi's orderly shutdown: it disposes the runtime, and session entries are already on disk.
+    const stdin = proc.child.stdin;
+    if (stdin && !stdin.writableEnded) stdin.end();
+    // A child that ignores EOF must not linger: the same escalation as shutdown.
+    const killer = setTimeout(() => { if (current === proc) hardStop(); }, 3000);
+    killer.unref?.();
+    await proc.ended;
+    clearTimeout(killer);
+  };
+  const settleTurn = () => {
+    if (settled || finished) return;
+    settled = true;
+    clearTurnTimer();
+    for (const call of running.values()) {
+      call.entry.status = "error";
+      call.entry.endedAt = Date.now();
+      call.entry.rev++;
+    }
+    running.clear();
+    run.live = "";
+    run.activity = undefined;
+    run.endedAt = Date.now();
+    run.state = run.error ? "failed" : pauseRequested ? "paused" : "idle";
+    pauseRequested = false;
+    if (!firstResolved && !run.error) { firstResolved = true; resolveFirst(); }
+    resolveSettled();
+    update();
+    if (run.error) { hardStop(); finish("failed", run.error); return; }
+    const stdin = current?.child.stdin;
+    if (!persistent) { if (stdin && !stdin.writableEnded) stdin.end(); }
+    else armHibernate();
+  };
+  const line = (raw: string) => {
+    if (finished || !raw.trim()) return;
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { return; }
+    if (!parsed || typeof parsed !== "object") return;
+    const event = parsed as ChildEvent;
+    activityAt = Date.now();
+    switch (event.type) {
+      case "response": {
+        const query = typeof event.id === "string" ? queries.get(event.id) : undefined;
+        if (query) { query(event.success !== false && typeof event.data?.sessionFile === "string" ? event.data.sessionFile : undefined); return; }
+        // A handled prompt starts no run, so Pi deliberately sends no agent_settled event.
+        if (event.success !== false) {
+          if (event.command === "prompt" && event.data?.disposition === "handled") settleTurn();
+          return;
+        }
+        if (event.command === "prompt") { hardStop(); finish("failed", cleanText(String(event.error ?? "prompt rejected"), 300)); return; }
+        pushEntry(run, { kind: "note", rev: 0, text: `${cleanText(String(event.command ?? "command"), 24)} rejected: ${cleanText(String(event.error ?? ""), 200)}` });
         update();
         return;
       }
-      if (liveTimer) return;
-      liveTimer = setTimeout(() => { liveTimer = undefined; liveAt = Date.now(); if (!finished) update(); }, LIVE_REPAINT_MS - (now - liveAt));
-      liveTimer.unref?.();
-    };
-    const resolveSettled = () => {
-      for (const waiter of settleWaiters.splice(0)) waiter();
-    };
-    const waitSettled = () => settled || finished ? Promise.resolve() : new Promise<void>((resolve) => settleWaiters.push(resolve));
-    const finish = (state: DelegateState, error?: string) => {
-      if (finished) return;
-      finished = true;
-      clearTurnTimer();
-      clearTimeout(liveTimer);
-      signal?.removeEventListener("abort", abort);
-      if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
-      run.state = state;
-      if (error) run.error = error;
-      run.activity = undefined;
-      run.live = "";
-      for (const entry of run.transcript) if (entry.kind === "tool" && entry.status === "running") { entry.status = "error"; entry.endedAt = Date.now(); entry.rev++; }
-      run.endedAt = Date.now();
-      resolveSettled();
-      if (!firstResolved) { firstResolved = true; resolveFirst(); }
-      update();
-    };
-    const abort = () => { hardStop(); finish("failed", signal?.reason === STOP_REASON ? "stopped" : "aborted"); };
-
-    child.stdin?.on("error", (error) => { if (!finished) stderr = (stderr + "\n" + error.message).slice(-4000); });
-    signal?.addEventListener("abort", abort, { once: true });
-    armTurnTimer();
-
-    const beginPrompt = (message: string, pauseAfter = false): boolean => {
-      const clean = cleanBlock(message, MAX_RESUME_CHARS);
-      if (finished || closing || !alive || !settled || !clean) return false;
-      if (!send({ id: "prompt-" + (run.resumes + 1), type: "prompt", message: clean })) return false;
-      settled = false;
-      run.error = undefined;
-      run.output = "";
-      pauseRequested = pauseAfter;
-      run.state = "working";
-      run.resumes++;
-      run.endedAt = undefined;
-      run.activity = "resuming";
-      activityAt = Date.now();
-      armTurnTimer();
-      update();
-      return true;
-    };
-
-    const running = new Map<string, { entry: ToolEntry; path?: string }>();
-    const settleTurn = () => {
-      if (settled || finished) return;
-      settled = true;
-      clearTurnTimer();
-      for (const call of running.values()) {
-        call.entry.status = "error";
-        call.entry.endedAt = Date.now();
-        call.entry.rev++;
-      }
-      running.clear();
-      run.live = "";
-      run.activity = undefined;
-      run.endedAt = Date.now();
-      run.state = run.error ? "failed" : pauseRequested ? "paused" : "idle";
-      pauseRequested = false;
-      if (!firstResolved && !run.error) { firstResolved = true; resolveFirst(); }
-      resolveSettled();
-      update();
-      if (run.error) { hardStop(); finish("failed", run.error); }
-      else if (!persistent && child.stdin && !child.stdin.writableEnded) child.stdin.end();
-    };
-    const line = (raw: string) => {
-      if (finished || !raw.trim()) return;
-      let parsed: unknown;
-      try { parsed = JSON.parse(raw); } catch { return; }
-      if (!parsed || typeof parsed !== "object") return;
-      const event = parsed as ChildEvent;
-      activityAt = Date.now();
-      switch (event.type) {
-        case "response":
-          // A handled prompt starts no run, so Pi deliberately sends no agent_settled event.
-          if (event.success !== false) {
-            if (event.command === "prompt" && event.data?.disposition === "handled") settleTurn();
-            return;
-          }
-          if (event.command === "prompt") { hardStop(); finish("failed", cleanText(String(event.error ?? "prompt rejected"), 300)); return; }
-          pushEntry(run, { kind: "note", rev: 0, text: `${cleanText(String(event.command ?? "command"), 24)} rejected: ${cleanText(String(event.error ?? ""), 200)}` });
-          update();
-          return;
-        case "extension_ui_request":
-          if (DIALOGS.has(String(event.method))) send({ type: "extension_ui_response", id: event.id, cancelled: true });
-          return;
-        case "message_update": {
-          const delta = event.assistantMessageEvent;
-          if (delta?.type === "text_delta" && typeof delta.delta === "string") {
-            run.live = (run.live + delta.delta).slice(-MAX_LIVE_CHARS);
-            run.activity = "writing";
-            repaint();
-          } else if ((delta?.type === "thinking_start" || delta?.type === "thinking_delta") && run.activity !== "thinking") {
-            run.activity = "thinking";
-            update();
-          }
-          return;
-        }
-        case "tool_execution_start": {
-          const name = cleanText(String(event.toolName ?? "tool"), 24) || "tool";
-          const hint = cleanText(toolHint(event.args), 200);
-          const id = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : `call-${run.tools}`;
-          const entry: ToolEntry = { kind: "tool", rev: 0, id, name, hint, args: argsText(event.args), status: "running", output: "", startedAt: Date.now() };
-          const path = toolPath(event.args);
-          run.tools++;
-          run.toolCounts[name] = (run.toolCounts[name] ?? 0) + 1;
-          if (name === "read" && path) addFile(run.filesRead, path);
-          running.set(id, { entry, ...(path ? { path } : {}) });
-          pushEntry(run, entry);
-          run.activity = cleanText(hint ? `${name} ${hint}` : name, 60);
-          update();
-          return;
-        }
-        case "tool_execution_update": {
-          const call = typeof event.toolCallId === "string" ? running.get(event.toolCallId) : undefined;
-          if (!call || !event.partialResult) return;
-          call.entry.output = cleanBlock(textOf(event.partialResult, MAX_ENTRY_TEXT * 2), MAX_ENTRY_TEXT);
-          call.entry.rev++;
+      case "extension_ui_request":
+        if (DIALOGS.has(String(event.method))) send({ type: "extension_ui_response", id: event.id, cancelled: true });
+        return;
+      case "message_update": {
+        const delta = event.assistantMessageEvent;
+        if (delta?.type === "text_delta" && typeof delta.delta === "string") {
+          run.live = (run.live + delta.delta).slice(-MAX_LIVE_CHARS);
+          run.activity = "writing";
           repaint();
-          return;
-        }
-        case "tool_execution_end": {
-          const call = typeof event.toolCallId === "string" ? running.get(event.toolCallId) : undefined;
-          if (call) running.delete(event.toolCallId as string);
-          const failed = event.isError === true;
-          const name = call?.entry.name ?? cleanText(String(event.toolName ?? ""), 24);
-          if (call) {
-            call.entry.status = failed ? "error" : "done";
-            call.entry.output = event.result ? cleanBlock(textOf(event.result, MAX_ENTRY_TEXT * 2), MAX_ENTRY_TEXT) : call.entry.output;
-            call.entry.endedAt = Date.now();
-            call.entry.rev++;
-          }
-          if (name === "jar_todo" && !failed) { const todos = childTodos(event.result?.details); if (todos) run.todos = todos; }
-          if ((name === "edit" || name === "write") && !failed && call?.path) {
-            addFile(run.filesEdited, call.path);
-            try { hooks.edited?.(call.path); } catch (error) { console.error("pi-jar: could not track a subagent edit", error); }
-          }
+        } else if ((delta?.type === "thinking_start" || delta?.type === "thinking_delta") && run.activity !== "thinking") {
           run.activity = "thinking";
           update();
-          return;
         }
-        case "message_end": {
-          if (event.message?.role !== "assistant") return;
-          run.turns++;
-          run.cost += Number(event.message.usage?.cost?.total) || 0;
-          const text = textOf(event.message).trim();
-          if (text) { run.output = text.slice(0, MAX_OUTPUT_CHARS); pushEntry(run, { kind: "text", rev: 0, text: cleanBlock(text, MAX_ENTRY_TEXT) }); }
-          if (event.message.stopReason === "error") run.error = cleanText(String(event.message.errorMessage ?? "assistant turn failed"), 200);
-          if (event.message.stopReason === "aborted" && !pauseRequested && !closing) run.error = "assistant turn aborted";
-          run.live = "";
-          run.activity = "thinking";
-          update();
-          return;
-        }
-        case "agent_settled":
-          settleTurn();
-          return;
+        return;
       }
-    };
+      case "tool_execution_start": {
+        const name = cleanText(String(event.toolName ?? "tool"), 24) || "tool";
+        const hint = cleanText(toolHint(event.args), 200);
+        const id = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : `call-${run.tools}`;
+        const entry: ToolEntry = { kind: "tool", rev: 0, id, name, hint, args: argsText(event.args), status: "running", output: "", startedAt: Date.now() };
+        const path = toolPath(event.args);
+        run.tools++;
+        run.toolCounts[name] = (run.toolCounts[name] ?? 0) + 1;
+        if (name === "read" && path) addFile(run.filesRead, path);
+        running.set(id, { entry, ...(path ? { path } : {}) });
+        pushEntry(run, entry);
+        run.activity = cleanText(hint ? `${name} ${hint}` : name, 60);
+        update();
+        return;
+      }
+      case "tool_execution_update": {
+        const call = typeof event.toolCallId === "string" ? running.get(event.toolCallId) : undefined;
+        if (!call || !event.partialResult) return;
+        call.entry.output = cleanBlock(textOf(event.partialResult, MAX_ENTRY_TEXT * 2), MAX_ENTRY_TEXT);
+        call.entry.rev++;
+        repaint();
+        return;
+      }
+      case "tool_execution_end": {
+        const call = typeof event.toolCallId === "string" ? running.get(event.toolCallId) : undefined;
+        if (call) running.delete(event.toolCallId as string);
+        const failed = event.isError === true;
+        const name = call?.entry.name ?? cleanText(String(event.toolName ?? ""), 24);
+        if (call) {
+          call.entry.status = failed ? "error" : "done";
+          call.entry.output = event.result ? cleanBlock(textOf(event.result, MAX_ENTRY_TEXT * 2), MAX_ENTRY_TEXT) : call.entry.output;
+          call.entry.endedAt = Date.now();
+          call.entry.rev++;
+        }
+        if (name === "jar_todo" && !failed) { const todos = childTodos(event.result?.details); if (todos) run.todos = todos; }
+        if ((name === "edit" || name === "write") && !failed && call?.path) {
+          addFile(run.filesEdited, call.path);
+          try { hooks.edited?.(call.path); } catch (error) { console.error("pi-jar: could not track a subagent edit", error); }
+        }
+        run.activity = "thinking";
+        update();
+        return;
+      }
+      case "message_end": {
+        if (event.message?.role !== "assistant") return;
+        run.turns++;
+        run.cost += Number(event.message.usage?.cost?.total) || 0;
+        const text = textOf(event.message).trim();
+        if (text) { run.output = text.slice(0, MAX_OUTPUT_CHARS); pushEntry(run, { kind: "text", rev: 0, text: cleanBlock(text, MAX_ENTRY_TEXT) }); }
+        if (event.message.stopReason === "error") run.error = cleanText(String(event.message.errorMessage ?? "assistant turn failed"), 200);
+        if (event.message.stopReason === "aborted" && !pauseRequested && !closing) run.error = "assistant turn aborted";
+        run.live = "";
+        run.activity = "thinking";
+        update();
+        return;
+      }
+      case "agent_settled":
+        settleTurn();
+        return;
+    }
+  };
+  /** The hibernating process is gone: the agent rests, or relaunches for a prompt accepted meanwhile. */
+  const slept = () => {
+    const pending = wake;
+    wake = undefined;
+    if (pending) { relaunch(pending.message, pending.id); return; }
+    rest = run.state === "paused" ? "paused" : "idle";
+    run.state = "hibernated";
+    run.activity = undefined;
+    update();
+  };
 
+  /** Spawn one Pi RPC process for this agent and wire its stream; false when spawning failed and the agent ended. */
+  const launch = (launchArgs: string[]): boolean => {
+    const invocation = piInvocation(launchArgs);
+    let child: ChildProcess;
+    try {
+      const env = { ...process.env };
+      for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, CHILD_TOOLS_ENV, ...DISCUSSION_ENV_KEYS]) delete env[key];
+      child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"], env: { ...env, ...hooks.env?.(), [CHILD_ENV]: "1" } });
+    } catch (error) {
+      finish("failed", error instanceof Error ? error.message : String(error));
+      return false;
+    }
+    let buffer = "";
+    let overflow = false;
+    let closedOnce = false;
+    let closeTimer: NodeJS.Timeout | undefined;
+    let ended!: () => void;
+    const exited = (code: number | null) => {
+      if (closedOnce) return;
+      closedOnce = true;
+      proc.alive = false;
+      if (proc.killTimer) signalProcessTree(child, "SIGKILL");
+      clearTimeout(proc.killTimer);
+      clearTimeout(closeTimer);
+      if (buffer && !overflow) { line(buffer); buffer = ""; }
+      for (const answer of [...queries.values()]) answer(undefined);
+      if (current === proc) current = undefined;
+      if (proc.hibernating && !finished && !closing) slept();
+      else {
+        if ((closing || (code === 0 && settled)) && !run.error) finish("done");
+        else finish("failed", run.error ?? (cleanText(proc.stderr, 300) || (settled ? `exited ${code}` : `exited ${code} before finishing`)));
+        resolveClosed();
+      }
+      ended();
+    };
+    const proc: RpcProcess = { child, alive: true, hibernating: false, stderr: "", exited, ended: new Promise<void>((resolve) => { ended = resolve; }) };
+    current = proc;
+    // A grandchild that inherited stdout/stderr keeps them open after the child is gone, and 'close'
+    // then never fires; stop waiting after a short drain so stop/shutdown can never hang on it.
+    const drainThenClose = (code: number | null) => {
+      if (closedOnce || closeTimer) return;
+      closeTimer = setTimeout(() => {
+        signalProcessTree(child, "SIGKILL");
+        child.stdout?.destroy?.();
+        child.stderr?.destroy?.();
+        exited(code);
+      }, CLOSE_GRACE_MS);
+      closeTimer.unref?.();
+    };
+    child.stdin?.on("error", (error) => { if (!finished) proc.stderr = (proc.stderr + "\n" + error.message).slice(-4000); });
     child.stdout?.setEncoding?.("utf8");
     child.stdout?.on("data", (chunk) => {
       const text = String(chunk);
@@ -600,142 +714,176 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       buffer += text.slice(start);
       if (buffer.length > MAX_LINE_CHARS) { buffer = ""; overflow = true; }
     });
-    child.stderr?.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-4000); });
-    let closedOnce = false;
-    const exited = (code: number | null) => {
-      if (closedOnce) return;
-      closedOnce = true;
-      alive = false;
-      if (killTimer) signalProcessTree(child, "SIGKILL");
-      clearTimeout(killTimer);
-      clearTimeout(closeTimer);
-      if (buffer && !overflow) { line(buffer); buffer = ""; }
-      if ((closing || (code === 0 && settled)) && !run.error) finish("done");
-      else finish("failed", run.error ?? (cleanText(stderr, 300) || (settled ? `exited ${code}` : `exited ${code} before finishing`)));
-      if (!firstResolved) { firstResolved = true; resolveFirst(); }
-      resolveClosed();
-    };
-    // A grandchild that inherited stdout/stderr keeps them open after the child is gone, and 'close'
-    // then never fires; stop waiting after a short drain so stop/shutdown can never hang on it.
-    const drainThenClose = (code: number | null) => {
-      if (closedOnce || closeTimer) return;
-      closeTimer = setTimeout(() => {
-        signalProcessTree(child, "SIGKILL");
-        child.stdout?.destroy?.();
-        child.stderr?.destroy?.();
-        exited(code);
-      }, CLOSE_GRACE_MS);
-      closeTimer.unref?.();
-    };
+    child.stderr?.on("data", (chunk) => { proc.stderr = (proc.stderr + String(chunk)).slice(-4000); });
     child.on("error", (error) => {
       hardStop();
       finish("failed", error.message);
       // A process that never spawned has no exit event to wait for.
-      if (child.pid === undefined) { alive = false; drainThenClose(null); }
+      if (child.pid === undefined) { proc.alive = false; drainThenClose(null); }
     });
     // Exit retires control immediately, but finalization waits for close so stdio drains first.
     child.once("exit", (code) => {
-      alive = false;
-      clearTurnTimer();
-      if (!finished) {
-        run.state = (closing || (code === 0 && settled)) && !run.error ? "done" : "failed";
-        if (run.state === "failed") run.error ??= `exited ${code}`;
-        run.activity = undefined;
-        resolveSettled();
-        update();
+      proc.alive = false;
+      // A process exiting to hibernate leaves the agent's settled state alone.
+      if (!proc.hibernating || finished || closing) {
+        clearTurnTimer();
+        if (!finished) {
+          run.state = (closing || (code === 0 && settled)) && !run.error ? "done" : "failed";
+          if (run.state === "failed") run.error ??= `exited ${code}`;
+          run.activity = undefined;
+          resolveSettled();
+          update();
+        }
       }
       drainThenClose(code);
     });
     child.once("close", exited);
+    return true;
+  };
+  /** Continue the hibernated session in a fresh process with the prompt beginPrompt accepted. */
+  const relaunch = (message: string, id: string): boolean => {
+    if (finished || closing) return false;
+    if (!relaunchArgs) { finish("failed", "the hibernated session cannot be resumed"); return false; }
+    if (!launch(relaunchArgs)) return false;
+    if (signal?.aborted) { abort(); return false; }
+    if (send({ id, type: "prompt", message })) return true;
+    hardStop();
+    finish("failed", "could not send the prompt to the resumed subagent");
+    return false;
+  };
 
-    steer = (text) => {
-      const message = cleanBlock(text, MAX_STEER_CHARS);
-      if (finished || closing || !message || run.state !== "working" || !send({ type: "steer", message })) return false;
-      pushEntry(run, { kind: "steer", rev: 0, text: message });
-      run.steered++;
-      update();
+  const beginPrompt = (message: string, pauseAfter = false): boolean => {
+    const clean = cleanBlock(message, MAX_RESUME_CHARS);
+    if (finished || closing || !settled || !clean) return false;
+    const id = "prompt-" + (run.resumes + 1);
+    const proc = current;
+    // Hibernated, or still exiting to hibernate: the prompt relaunches Pi on the same session file.
+    const asleep = !proc || proc.hibernating;
+    if (asleep ? !relaunchArgs : !send({ id, type: "prompt", message: clean })) return false;
+    settled = false;
+    run.error = undefined;
+    run.output = "";
+    pauseRequested = pauseAfter;
+    run.state = "working";
+    run.resumes++;
+    run.endedAt = undefined;
+    run.activity = "resuming";
+    activityAt = Date.now();
+    clearTimeout(hibernateTimer);
+    armTurnTimer();
+    update();
+    if (!asleep) return true;
+    if (proc) { wake = { message: clean, id }; return true; }
+    return relaunch(clean, id);
+  };
+  const steer = (text: string): boolean => {
+    const message = cleanBlock(text, MAX_STEER_CHARS);
+    if (finished || closing || !message || run.state !== "working" || !send({ type: "steer", message })) return false;
+    pushEntry(run, { kind: "steer", rev: 0, text: message });
+    run.steered++;
+    update();
+    return true;
+  };
+  const pause = async (): Promise<boolean> => {
+    if (finished || closing) return false;
+    // A hibernated agent spends nothing already; remember the pause for its next BTW answer.
+    if (run.state === "hibernated") {
+      if (rest !== "paused") { rest = "paused"; run.pauses++; update(); }
       return true;
-    };
-    pause = async () => {
-      if (finished || closing || !alive) return false;
-      if (run.state === "paused") return true;
-      if (run.state === "idle") { run.state = "paused"; run.pauses++; update(); return true; }
-      if (run.state !== "working") return false;
-      pauseRequested = true;
-      run.pauses++;
-      run.activity = "pausing";
-      const waiting = waitSettled();
-      send({ type: "clear_queue" });
-      if (!send({ type: "abort" })) {
-        pauseRequested = false;
-        run.pauses = Math.max(0, run.pauses - 1);
-        run.activity = "thinking";
-        update();
-        return false;
-      }
+    }
+    if (!current?.alive) return false;
+    if (run.state === "paused") return true;
+    if (run.state === "idle") { run.state = "paused"; run.pauses++; update(); return true; }
+    if (run.state !== "working") return false;
+    pauseRequested = true;
+    run.pauses++;
+    run.activity = "pausing";
+    const waiting = waitSettled();
+    send({ type: "clear_queue" });
+    if (!send({ type: "abort" })) {
+      pauseRequested = false;
+      run.pauses = Math.max(0, run.pauses - 1);
+      run.activity = "thinking";
       update();
-      // A child that ignores abort must not hang the moderator; it still pauses when it settles.
-      if (!await settlesWithin(waiting, PAUSE_GRACE_MS)) return false;
-      return (run.state as DelegateState) === "paused";
-    };
-    resume = (text) => {
-      if (run.state !== "paused" && run.state !== "idle") return false;
-      const message = text?.trim() || "Continue the assigned task from where you stopped. Review your current checklist and remaining work first.";
-      return beginPrompt(message);
-    };
-    ask = async (text) => {
-      const question = cleanBlock(text, MAX_STEER_CHARS);
-      if (!question || finished || closing || askBusy) return undefined;
-      askBusy = true;
-      const wasPaused = run.state === "paused";
-      try {
-        // Cross a settled boundary so the active task's report cannot answer the question.
-        if (run.state === "working" && !await pause()) return undefined;
-        const instruction = "Moderator BTW: answer only this question in one compact paragraph. Preserve your assigned task scope for the next resume. Question: " + question;
-        if (!beginPrompt(instruction, wasPaused)) return undefined;
-        const answered = await settlesWithin(waitSettled(), 2 * 60_000);
-        if (!answered) { void pause(); return undefined; }
-        return !finished && !run.error ? run.output || undefined : undefined;
-      } finally { askBusy = false; }
-    };
-    shutdown = () => {
-      if (shutdownPromise) return shutdownPromise;
-      closing = true;
-      shutdownPromise = Promise.resolve().then(async () => {
+      return false;
+    }
+    update();
+    // A child that ignores abort must not hang the moderator; it still pauses when it settles.
+    if (!await settlesWithin(waiting, PAUSE_GRACE_MS)) return false;
+    return (run.state as DelegateState) === "paused";
+  };
+  const resume = (text?: string): boolean => {
+    if (run.state !== "paused" && run.state !== "idle" && run.state !== "hibernated") return false;
+    const message = text?.trim() || "Continue the assigned task from where you stopped. Review your current checklist and remaining work first.";
+    return beginPrompt(message);
+  };
+  const ask = async (text: string): Promise<string | undefined> => {
+    const question = cleanBlock(text, MAX_STEER_CHARS);
+    if (!question || finished || closing || askBusy) return undefined;
+    askBusy = true;
+    const wasPaused = run.state === "paused" || (run.state === "hibernated" && rest === "paused");
+    try {
+      // Cross a settled boundary so the active task's report cannot answer the question.
+      if (run.state === "working" && !await pause()) return undefined;
+      const instruction = "Moderator BTW: answer only this question in one compact paragraph. Preserve your assigned task scope for the next resume. Question: " + question;
+      if (!beginPrompt(instruction, wasPaused)) return undefined;
+      const answered = await settlesWithin(waitSettled(), 2 * 60_000);
+      if (!answered) { void pause(); return undefined; }
+      return !finished && !run.error ? run.output || undefined : undefined;
+    } finally {
+      askBusy = false;
+      // The BTW turn settled while askBusy kept the child awake: its quiet period starts now.
+      armHibernate();
+    }
+  };
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    closing = true;
+    clearTimeout(hibernateTimer);
+    shutdownPromise = Promise.resolve().then(async () => {
       if (finished) { await closed; return; }
-      if (run.state === "working") {
+      const proc = current;
+      // Hibernated: there is no process to stop, so the agent simply ends here.
+      if (!proc) { finish("done"); return; }
+      if (run.state === "working" && !proc.hibernating) {
         const waiting = waitSettled();
         send({ type: "clear_queue" });
         if (send({ type: "abort" })) {
           if (!await settlesWithin(waiting, 3000) && !finished) hardStop();
         } else hardStop();
       }
-      if (child.stdin && !child.stdin.writableEnded) child.stdin.end();
-      const killer = setTimeout(() => { if (child.exitCode === null) hardStop(); }, 3000);
+      const stdin = proc.child.stdin;
+      if (stdin && !stdin.writableEnded) stdin.end();
+      const killer = setTimeout(() => { if (proc.child.exitCode === null) hardStop(); }, 3000);
       killer.unref?.();
       await closed;
       clearTimeout(killer);
-      });
-      return shutdownPromise;
-    };
+    });
+    return shutdownPromise;
+  };
 
-    if (signal?.aborted) { abort(); return; }
-    if (!send({ id: "prompt", type: "prompt", message: prompt })) { hardStop(); finish("failed", "could not send the task to the subagent"); }
-  });
+  if (launch(args)) {
+    run.state = "working";
+    run.startedAt = Date.now();
+    run.endedAt = undefined;
+    run.activity = "starting";
+    update();
+    signal?.addEventListener("abort", abort, { once: true });
+    armTurnTimer();
+    if (signal?.aborted) abort();
+    else if (!send({ id: "prompt", type: "prompt", message: prompt })) { hardStop(); finish("failed", "could not send the task to the subagent"); }
+  }
   return {
-    firstSettled,
-    closed,
-    steer: (text) => steer(text),
-    pause: () => pause(),
-    resume: (text) => resume(text),
-    ask: (text) => ask(text),
-    shutdown: () => shutdown(),
-    alive: () => alive
+    firstSettled, closed, steer, pause, resume, ask, shutdown,
+    alive: () => !!current?.alive,
+    pid: () => current?.alive ? current.child.pid : undefined
   };
 }
 
 const isRunning = (state: DelegateState) => state === "queued" || state === "working";
-const isRetained = (state: DelegateState) => isRunning(state) || state === "idle" || state === "paused";
+const isRetained = (state: DelegateState) => isRunning(state) || state === "idle" || state === "paused" || state === "hibernated";
+/** A finished worktree whose private changes were not reconciled: kept until stop retries or discard removes it. */
+const isRecovery = (record: SubagentRecord) => !!record.run.workspace && !isRetained(record.run.state) && !record.alive?.();
 
 export interface SubagentStopReport {
   key: string;
@@ -759,10 +907,36 @@ export interface SubagentRecord {
   steer(text: string): boolean;
   ask(text: string): Promise<string | undefined>;
   changed(): string[];
-  discard(): void;
+  /** Retire for good without applying edits; `keepWorkspace` leaves an unresolved recovery worktree on disk. */
+  discard(keepWorkspace?: boolean): Promise<void>;
   alive?(): boolean;
+  pid?(): number | undefined;
   closed?(): Promise<void>;
 }
+/** What an unresolved worktree recovery keeps: enough to retry reconciliation or discard it, nothing bulky. */
+export interface RecoveryRecord {
+  key: string;
+  name: string;
+  workspace: string;
+  changed: string[];
+  error?: string;
+  startedAt?: number;
+  failedAt?: number;
+}
+/** On-demand lifecycle diagnostics; `live` and `pids` describe child Pi processes running right now. */
+export interface SubagentStats { retained: number; live: number; hibernated: number; recovery: number; recoveryLimit: number; pids: number[] }
+
+/** Recovery keeps the facts needed to retry or discard; the transcript, stream and read list are released. */
+const releaseForRecovery = (run: DelegateRun) => {
+  run.transcript = [{ kind: "note", rev: 0, text: `Recovery workspace kept at ${run.workspace}: stop retries reconciliation; discard removes it without applying.` }];
+  run.live = "";
+  run.filesRead = [];
+  run.output = cleanBlock(run.output, MAX_RECOVERY_OUTPUT);
+};
+/** Symlinked temp roots (macOS /var → /private/var) must not make a child's own directory look foreign. */
+const sameDirectory = (a: string, b: string) => {
+  try { return realpathSync(a) === realpathSync(b); } catch { return false; } // a missing directory is nobody's session
+};
 
 /**
  * Live subagents for the activity view. Tool details are saved in the session, so they stay small;
@@ -846,18 +1020,69 @@ export class DelegateRegistry {
     for (const { record } of this.entries.values()) if (isRetained(record.run.state) || record.alive?.()) count++;
     return count;
   }
-  /** Session changes discard retained workers and their private workspaces; they never auto-apply here. */
-  clear(): void {
+  /** Unresolved worktree recovery workspaces, oldest first. */
+  recoveries(): RecoveryRecord[] {
+    const recoveries: RecoveryRecord[] = [];
+    for (const { record } of this.entries.values()) {
+      if (!isRecovery(record)) continue;
+      const { key, run } = record;
+      recoveries.push({ key, name: run.name, workspace: run.workspace!, changed: [...run.filesEdited],
+        ...(run.error ? { error: run.error } : {}),
+        ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
+        ...(run.endedAt !== undefined ? { failedAt: run.endedAt } : {}) });
+    }
+    return recoveries.sort((a, b) => (a.failedAt ?? 0) - (b.failedAt ?? 0));
+  }
+  /** Remove an unresolved recovery workspace without applying it, freeing its recovery slot. */
+  async discard(key: string): Promise<RecoveryRecord | undefined> {
+    const record = this.resolve(key);
+    const recovery = record && this.recoveries().find((item) => item.key === record.key);
+    if (!record || !recovery) return undefined;
+    await record.discard();
+    if (this.get(record.key) === record) this.entries.delete(record.key);
+    this.notify();
+    return recovery;
+  }
+  /** Lifecycle counts computed on demand from memory: no polling, no filesystem access. */
+  stats(): SubagentStats {
+    let live = 0;
+    let hibernated = 0;
+    let recovery = 0;
+    const pids: number[] = [];
+    const visit = (record: SubagentRecord) => {
+      if (!record.alive?.()) return;
+      live++;
+      const pid = record.pid?.();
+      if (pid !== undefined) pids.push(pid);
+    };
+    for (const { record } of this.entries.values()) {
+      visit(record);
+      if (record.run.state === "hibernated") hibernated++;
+      else if (isRecovery(record)) recovery++;
+    }
+    for (const record of this.draining) visit(record);
+    return { retained: this.retained(), live, hibernated, recovery, recoveryLimit: RECOVERY_LIMIT, pids };
+  }
+  /**
+   * Session changes discard retained workers without applying edits. Any worktree that might hold
+   * changes stays on disk and its path is returned, including a worker still running at shutdown.
+   */
+  clear(): string[] {
     const records = [...this.entries.values()].map(({ record }) => record);
     this.entries.clear();
+    const preserved: string[] = [];
     for (const record of records) {
+      const keepWorkspace = !!record.run.workspace;
+      if (keepWorkspace) preserved.push(record.run.workspace!);
       if (record.closed && (isRetained(record.run.state) || record.alive?.())) {
         this.draining.add(record);
         void record.closed().finally(() => { this.draining.delete(record); this.notify(); });
       }
-      try { record.discard(); } catch { /* best effort */ }
+      try { void Promise.resolve(record.discard(keepWorkspace)).catch((error) => console.error("pi-jar: subagent discard failed", error)); }
+      catch (error) { console.error("pi-jar: subagent discard failed", error); }
     }
     this.notify();
+    return preserved;
   }
   add(...records: SubagentRecord[]): void {
     for (const record of records) this.entries.set(record.key, { record });
@@ -874,13 +1099,19 @@ export class DelegateRegistry {
     for (const entry of this.entries.values()) {
       if (isRetained(entry.record.run.state) || entry.record.alive?.()) { entry.finished = undefined; continue; }
       entry.finished ??= ++this.sequence;
-      finished++;
+      // Recovery workspaces are bounded by worktree admission, never by this history cap.
+      if (!entry.record.run.workspace) finished++;
     }
     if (finished <= MAX_FINISHED) return;
     // Conflicted/failed workspaces are recovery state, not disposable transcript history.
     const oldest = [...this.entries].filter(([, entry]) => entry.finished !== undefined && !entry.record.run.workspace)
       .sort((a, b) => a[1].finished! - b[1].finished!);
-    for (const [key] of oldest.slice(0, finished - MAX_FINISHED)) this.entries.delete(key);
+    for (const [key, { record }] of oldest.slice(0, finished - MAX_FINISHED)) {
+      this.entries.delete(key);
+      // A sibling still registered keeps the whole batch closure alive; free what only views read.
+      record.run.transcript = [];
+      record.run.live = "";
+    }
   }
 }
 
@@ -964,8 +1195,14 @@ export interface DelegateOptions {
   changes?: () => ChangeTracker | undefined;
   /** Called after a subagent edit was added to the tracker. */
   changed?: () => void;
-  /** Session-scoped shared discussion paper. */
-  discussionFile?: () => string | undefined;
+  /** Discussion broker environment for one child spawn; idempotent per key and read again on every relaunch. */
+  discussionEnv?: (key: string, name: string) => Record<string, string> | undefined;
+  /** The agent was permanently stopped or discarded: release its discussion identity. */
+  discussionRetire?: (key: string) => void;
+  /** Unread discussion messages waiting for an agent, shown in the moderator's fleet line. */
+  discussionUnread?: (key: string) => number;
+  /** Settled quiet time before a retained child's process hibernates; defaults to HIBERNATE_AFTER_MS. */
+  hibernateAfterMs?: number;
 }
 
 const roleForMode = (mode: DelegateExecutionMode): string =>
@@ -1001,16 +1238,40 @@ const peekRecord = (record: SubagentRecord): string => {
   const current = open.find((todo) => todo.status === "in_progress");
   const next = open.filter((todo) => todo !== current).slice(0, 3).map((todo) => cleanText(todo.title, 80));
   const more = open.length - (current ? 1 : 0) - next.length;
+  const recovery = isRecovery(record);
   return [
-    `${record.key} · ${run.name} · ${run.state}`,
+    `${record.key} · ${run.name} · ${run.state}${recovery ? " · unresolved recovery" : ""}`,
     `progress: ${leaves.length ? `${leaves.length - open.length}/${leaves.length} tasks` : "no checklist"}`
       + (current ? ` · now: ${cleanText(current.title, 80)}` : "") + (run.activity ? ` · ${cleanText(run.activity, 60)}` : ""),
-    next.length ? `next: ${next.join("; ")}${more > 0 ? ` (+${more} more)` : ""}` : ""
+    next.length ? `next: ${next.join("; ")}${more > 0 ? ` (+${more} more)` : ""}` : "",
+    ...(recovery ? [
+      `workspace: ${run.workspace}`,
+      `changed: ${run.filesEdited.length ? fileList(run.filesEdited, 20) : "none recorded"}`,
+      run.error ? `error: ${cleanText(run.error, 300)}` : "",
+      "resolve: stop retries reconciliation into /diff; discard removes the workspace without applying it"
+    ] : [])
   ].filter(Boolean).join("\n");
 };
 /** The wake-up after a resumed turn: its progress plus the bounded report the turn produced. */
 const settledRecord = (record: SubagentRecord): string =>
   peekRecord(record) + (record.run.output ? `\nlast: ${cleanBlock(record.run.output, 1200)}` : "");
+
+/**
+ * Every active worktree agent may still end up needing recovery, so admission reserves a recovery slot for
+ * it: unresolved recovery workspaces never exceed RECOVERY_LIMIT, and none is ever deleted to make room.
+ */
+function worktreeAdmission(registry: DelegateRegistry, requested: number): string | undefined {
+  const recoveries = registry.recoveries();
+  const active = registry.records().filter((record) => record.run.mode === "worktree" && (isRetained(record.run.state) || record.alive?.())).length;
+  if (recoveries.length + active + requested <= RECOVERY_LIMIT) return undefined;
+  return [
+    `Worktree recovery limit: ${plural(recoveries.length, "unresolved recovery workspace")} and ${plural(active, "active worktree agent")} leave no room for ${requested} more (limit ${RECOVERY_LIMIT}).`,
+    recoveries.length ? "Resolve recovery records with jar_subagent stop (retry reconciliation) or discard (remove without applying):"
+      : "Stop finished worktree agents first so their changes reconcile.",
+    ...recoveries.map((item) => `- ${item.key} · ${item.name} · ${item.workspace}`
+      + (item.changed.length ? ` · changed: ${fileList(item.changed, 5)}` : "") + (item.error ? ` · ${cleanText(item.error, 160)}` : ""))
+  ].join("\n");
+}
 
 /** jar_delegate plus jar_subagent: the parent remains a moderator while retained workers do the work. */
 export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, registry: DelegateRegistry, options: DelegateOptions = {}): void {
@@ -1028,18 +1289,32 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     const resolved = roles.resolve(role);
     return resolved ? [resolved] : [];
   };
+  const discussionEnv = (key: string, name: string): Record<string, string> => {
+    try { return options.discussionEnv?.(key, name) ?? {}; }
+    catch (error) { console.error("pi-jar: discussion broker unavailable for a subagent", error); return {}; }
+  };
+  const discussionUnread = (key: string): number => {
+    try { return Math.max(0, Math.floor(options.discussionUnread?.(key) ?? 0)) || 0; }
+    catch { return 0; } // the count is decoration; the fleet line must still render
+  };
+  const retireDiscussion = (key: string) => {
+    try { options.discussionRetire?.(key); } catch (error) { console.error("pi-jar: could not retire a subagent's discussion identity", error); }
+  };
 
   pi.on?.("before_agent_start", (_event, ctx) => {
     controllerContext = ctx;
     const retained = registry.records().filter((record) => isRetained(record.run.state));
     if (!retained.length) return;
-    const fleet = retained.map((record) =>
-      `- ${record.key} · ${record.run.name} · ${record.run.state} · ${record.run.role}: ${cleanText(record.run.task, 140)}`).join("\n");
+    const fleet = retained.map((record) => {
+      const unread = discussionUnread(record.key);
+      return `- ${record.key} · ${record.run.name} · ${record.run.state}${unread ? ` · ${plural(unread, "unread discussion message")}` : ""} · ${record.run.role}: ${cleanText(record.run.task, 140)}`;
+    }).join("\n");
     return { message: { customType: "pi-jar.moderator-context", display: false, content: [
       "[PI-JAR MODERATOR MODE]",
       "You are the coordinator while retained subagents do delegated work. Decompose and route work, steer only to correct direction, use ask for terse BTW questions, and use jar_discuss for structured cross-agent Q/A.",
       "Initial/resumed turns and asynchronous ask/pause/stop operations wake you with pi-jar.subagent events. Accepted receipts are not completion: do not poll peek or claim files applied before the final event. Keep responding to user steering or do other work.",
       "Do not duplicate work already owned by a retained subagent. Stop completed workers to obtain their handoff and reconcile worktree changes into /diff. Synthesize the final answer from their reports and evidence.",
+      "Hibernated agents are idle with their process closed to save memory; resume and ask relaunch them with context and workspace intact.",
       "Retained fleet:",
       fleet
     ].join("\n") } };
@@ -1103,14 +1378,14 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   const delegateTool: ToolDefinition<typeof Parameters> = {
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Start retained session-scoped subagents within the configured live pool limit and return immediately. scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Each task may provide an explicit tools allowlist or inheritTools=true to filter the parent's active tools by mode. Turn completions arrive as pi-jar.subagent event messages; control workers with jar_subagent. Worktree changes apply only when the moderator stops that agent.`,
+    description: `Start retained session-scoped subagents within the configured retained pool limit and return immediately. scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Each task may provide an explicit tools allowlist or inheritTools=true to filter the parent's active tools by mode. Turn completions arrive as pi-jar.subagent event messages; control workers with jar_subagent. Settled agents hibernate (process closed, context kept) until resumed. Worktree changes apply only when the moderator stops that agent; at most ${RECOVERY_LIMIT} worktree workspaces may be active or awaiting recovery at once.`,
     promptSnippet: "Act as moderator: delegate parallel work, then continue responding to the user while subagents run. Their turn completions arrive as pi-jar.subagent event messages; steer, pause or stop them with jar_subagent without polling.",
     promptGuidelines: [
       "When useful work can be delegated, act as the moderator: decompose, assign, monitor, resolve disagreements, and synthesize. Do not redo a delegated implementation yourself while its worker is active.",
       "Use scout for cheap independent discovery, fork/reviewer for context-aware review, and worktree/worker for implementation. Explicit task.role overrides these mode defaults. Grant optional task.tools narrowly; task.inheritTools snapshots active parent tools then filters by mode. Scout/fork stay read-only; worktree only accepts path-guarded tools.",
-      "Retained agents become idle after each turn. Initial and resumed turn completions arrive as pi-jar.subagent event messages, so keep responding to user steering while they work; do not poll jar_subagent peek. Reuse them with jar_subagent resume instead of spawning replacements; pause them when priorities change; stop completed workers to reconcile their worktree into /diff.",
-      "Use jar_subagent ask for a brief BTW question to one worker. For agent-to-agent questions, have them use the bounded jar_discuss paper so answers stay structured and cheap.",
-      "Respect the configured pool limit, including idle and paused agents. Stop agents you no longer need."
+      "Retained agents become idle after each turn and hibernate after a quiet period; resume and ask relaunch them with their context. Initial and resumed turn completions arrive as pi-jar.subagent event messages, so keep responding to user steering while they work; do not poll jar_subagent peek. Reuse them with jar_subagent resume instead of spawning replacements; pause them when priorities change; stop completed workers to reconcile their worktree into /diff.",
+      "Use jar_subagent ask for a brief BTW question to one worker. For agent-to-agent questions, have them use jar_discuss so answers stay structured and cheap.",
+      "Respect the configured pool limit, including idle, paused and hibernated agents. Stop agents you no longer need; resolve failed worktree recovery records (stop to retry, discard to drop) before starting more worktree agents."
     ],
     parameters: Parameters,
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -1154,6 +1429,9 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           }
         }
       }
+      const worktreeTasks = requested.filter((item) => (item.mode ?? params.mode ?? (params.write === true ? "direct" : "scout")) === "worktree").length;
+      const recoveryBlock = worktreeTasks ? worktreeAdmission(registry, worktreeTasks) : undefined;
+      if (recoveryBlock) return { content: [{ type: "text", text: recoveryBlock }], details: { runs: [], write: false }, isError: true };
       const maximum = maxSubagents();
       const releaseReservation = registry.reserve(requested.length, maximum);
       if (!releaseReservation) {
@@ -1211,7 +1489,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         if (!ctx.hasUI) return;
         for (const { key, run } of records) {
           const state = run.state === "done" || run.state === "failed" || run.state === "stopped" ? ""
-            : run.state === "queued" || run.state === "paused" ? "waiting" : run.state === "idle" ? "idle" : "working";
+            : run.state === "queued" || run.state === "paused" ? "waiting" : run.state === "idle" || run.state === "hibernated" ? "idle" : "working";
           if (published.get(key) === state) continue;
           published.set(key, state);
           try {
@@ -1249,7 +1527,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       };
       const failedHandle = (): DelegateHandle => ({
         firstSettled: Promise.resolve(), closed: Promise.resolve(), steer: () => false, pause: async () => false,
-        resume: () => false, ask: async () => undefined, shutdown: async () => {}, alive: () => false
+        resume: () => false, ask: async () => undefined, shutdown: async () => {}, alive: () => false, pid: () => undefined
       });
       const cleanupPrivate = async (index: number, discardWorktree: boolean) => {
         const dir = sessionDirs.get(index);
@@ -1269,7 +1547,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         update();
       };
 
-      let discarded = false;
+      /** Runs discarded by a session change or the discard action: their edits are never applied. */
+      const discarded = new Set<number>();
+      /** Discarded recovery runs whose unresolved workspace stays on disk for the user. */
+      const preserved = new Set<number>();
+      const dropsWorktree = (index: number) => discarded.has(index) && !preserved.has(index);
       const markStartStopped = (run: DelegateRun) => {
         run.state = "stopped";
         run.error = undefined;
@@ -1281,33 +1563,30 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       const readyResolvers: Array<() => void> = [];
       const ready = runs.map(() => new Promise<void>((resolve) => readyResolvers.push(resolve)));
       const startRuns = async () => Promise.all(runs.map(async (run, index) => {
+        const key = `delegate-${id}-${run.index}`;
         try {
-        if (discarded) { run.state = "stopped"; readyResolvers[index]!(); return; }
+        if (discarded.has(index)) { run.state = "stopped"; readyResolvers[index]!(); return; }
         const start = async (): Promise<DelegateHandle> => {
         if ((run.mode === "fork" || run.mode === "worktree") && !parentSession) {
           failBeforeStart(run, "fork/worktree mode requires a persisted parent Pi session");
           return failedHandle();
         }
         let cwd = ctx.cwd;
-        let fork: DelegateForkOptions | undefined;
-        const env: Record<string, string> = {
-          [SUBAGENT_KEY_ENV]: `delegate-${id}-${run.index}`,
-          [SUBAGENT_NAME_ENV]: run.name
-        };
+        let session: DelegateSessionOptions | undefined;
+        const env: Record<string, string> = { [SUBAGENT_KEY_ENV]: key, [SUBAGENT_NAME_ENV]: run.name };
         const effectiveTools = toolsByRun.get(run.index) ?? (run.mode === "worktree" ? WORKTREE_TOOLS : run.mode === "direct" ? undefined : READ_ONLY_TOOLS);
         if (effectiveTools) env[CHILD_TOOLS_ENV] = JSON.stringify(effectiveTools);
-        const discussion = options.discussionFile?.();
-        if (discussion) env[DISCUSSION_FILE_ENV] = discussion;
         const hooks: DelegateHooks = {};
         const write = run.mode === "direct" || run.mode === "worktree";
 
-        if (run.mode === "fork" || run.mode === "worktree") {
+        // Retained modes keep a private session so a settled child can hibernate and continue it later;
+        // legacy direct writers are one-shot and stay ephemeral.
+        if (run.mode !== "direct") {
           try {
-            const sessionDir = mkdtempSync(join(tmpdir(), "pi-jar-fork-"));
+            const sessionDir = mkdtempSync(join(tmpdir(), run.mode === "scout" ? "pi-jar-scout-" : "pi-jar-fork-"));
             sessionDirs.set(run.index, sessionDir);
-            const requestedTools = toolsByRun.get(run.index);
-            fork = { source: parentSession!, sessionDir,
-              ...((run.mode === "worktree" || run.mode === "fork") ? { tools: requestedTools ?? (run.mode === "worktree" ? WORKTREE_TOOLS : READ_ONLY_TOOLS) } : {}) };
+            session = run.mode === "scout" ? { sessionDir } : { source: parentSession!, sessionDir,
+              tools: toolsByRun.get(run.index) ?? (run.mode === "worktree" ? WORKTREE_TOOLS : READ_ONLY_TOOLS) };
           } catch (error) {
             failBeforeStart(run, error);
             return failedHandle();
@@ -1322,7 +1601,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
             env[CHILD_WORKTREE_ENV] = worktree.root;
           } catch (error) {
             await cleanupPrivate(run.index, true);
-            if (discarded || stopRequested.has(index)) markStartStopped(run);
+            if (discarded.has(index) || stopRequested.has(index)) markStartStopped(run);
             else failBeforeStart(run, error);
             return failedHandle();
           }
@@ -1330,15 +1609,23 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           env[CHILD_BASELINE_ENV] = baselines;
           hooks.edited = edited;
         }
-        hooks.env = env;
-        return startDelegate(run, delegateArgs(run.model, thinkingByRun.get(run.index), write, process.argv, fork,
-          run.mode === "scout" ? toolsByRun.get(run.index) : undefined),
-          delegatePrompt(run.task, write, run.mode), cwd, controllers[index]!.signal, update, options.spawnProcess, hooks, run.mode !== "direct");
+        // Read at every spawn, so a relaunch after hibernation reaches the current discussion broker.
+        hooks.env = () => ({ ...env, ...discussionEnv(key, run.name) });
+        const argsFor = (resume?: string) => delegateArgs(run.model, thinkingByRun.get(run.index), write, process.argv,
+          session && resume ? { ...session, resume } : session, run.mode === "scout" ? toolsByRun.get(run.index) : undefined);
+        if (session) {
+          const own = session.sessionDir;
+          // Only ever continue this child's own private session, never a file it reports elsewhere.
+          hooks.resumeArgs = (file) => sameDirectory(dirname(file), own) ? argsFor(file) : undefined;
+          hooks.hibernateAfterMs = options.hibernateAfterMs ?? HIBERNATE_AFTER_MS;
+        }
+        return startDelegate(run, argsFor(), delegatePrompt(run.task, write, run.mode), cwd, controllers[index]!.signal,
+          update, options.spawnProcess, hooks, run.mode !== "direct");
         };
         let handle: DelegateHandle;
         try { handle = await start(); }
         catch (error) {
-          if (discarded || stopRequested.has(index)) markStartStopped(run);
+          if (discarded.has(index) || stopRequested.has(index)) markStartStopped(run);
           else failBeforeStart(run, error);
           handle = failedHandle();
         }
@@ -1346,13 +1633,17 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         started.add(index);
         readyResolvers[index]!();
         void handle.closed.then(async () => {
-          await cleanupPrivate(run.index, discarded || run.mode !== "worktree");
+          // The agent ended for good (hibernation never resolves closed): drop its private session and
+          // discussion identity. An unreconciled worktree outlives it as lightweight recovery state.
+          retireDiscussion(key);
+          await cleanupPrivate(run.index, dropsWorktree(index) || run.mode !== "worktree");
+          if (worktrees.has(run.index) && !stopRequested.has(index)) releaseForRecovery(run);
           update();
         }).catch((error) => {
           run.error ??= "subagent cleanup failed: " + cleanText(error instanceof Error ? error.message : String(error), 240);
           update();
         });
-        if (discarded) void handle.shutdown().finally(() => cleanupPrivate(run.index, true))
+        if (discarded.has(index)) void handle.shutdown().finally(() => cleanupPrivate(run.index, dropsWorktree(index)))
           .catch(error => console.error("pi-jar: subagent cleanup failed", error));
         } catch (error) {
           failBeforeStart(run, error);
@@ -1381,14 +1672,15 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const run = runs[index]!;
         const key = `delegate-${id}-${run.index}`;
         const workspace = run.workspace;
-        if (run.error?.startsWith("changes not applied:")) run.error = undefined;
+        // Reconciliation failures are retryable once the parent drift or Git problem is resolved.
+        if (run.error?.startsWith("changes not applied:") || run.error?.startsWith("could not inspect isolated changes:")) run.error = undefined;
         await ready[index];
         const handle = handles[index]!;
         await handle.shutdown();
 
         let changed: string[] = [];
         const worktree = worktrees.get(run.index);
-        if (worktree && !discarded) {
+        if (worktree && !discarded.has(index)) {
           try { changed = await worktreeChangedFiles(worktree, controllers[index]!.signal); run.filesEdited = changed; }
           catch (error) { run.error = "could not inspect isolated changes: " + cleanText(String(error), 240); }
           if (changed.length && !run.error) {
@@ -1404,16 +1696,17 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
               if (error instanceof WorktreeApplyError) run.appliedFiles = error.appliedFiles;
               run.error = "changes not applied: " + cleanText(error instanceof Error ? error.message : String(error), 240);
             }
-          } else if (!changed.length) {
+          } else if (!changed.length && !run.error?.startsWith("could not inspect isolated changes:")) {
             try { await disposeDelegateWorktree(worktree); } catch { /* best effort */ }
             worktrees.delete(run.index);
             run.workspace = undefined;
           }
         }
-        await cleanupPrivate(run.index, discarded);
-        if (discarded) { run.error = undefined; run.workspace = undefined; }
+        await cleanupPrivate(run.index, dropsWorktree(index));
+        if (dropsWorktree(index)) { run.error = undefined; run.workspace = undefined; }
         run.state = run.error ? "failed" : "stopped";
         run.endedAt ??= Date.now();
+        if (worktrees.has(run.index)) releaseForRecovery(run);
         update();
         return {
           key, name: run.name, state: run.state, task: run.task, ...(workspace ? { workspace } : {}),
@@ -1426,26 +1719,28 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         stop: () => stopRun(index),
         pause: async () => {
           await ready[index];
-          return discarded || stopRequested.has(index) ? false : handles[index]!.pause();
+          return discarded.has(index) || stopRequested.has(index) ? false : handles[index]!.pause();
         },
-        resume: (text) => !discarded && !stopRequested.has(index) && handles[index]!.resume(text),
-        steer: (text) => !discarded && !stopRequested.has(index) && handles[index]!.steer(text),
+        resume: (text) => !discarded.has(index) && !stopRequested.has(index) && handles[index]!.resume(text),
+        steer: (text) => !discarded.has(index) && !stopRequested.has(index) && handles[index]!.steer(text),
         ask: async (text) => {
           await ready[index];
-          return discarded || stopRequested.has(index) ? undefined : handles[index]!.ask(text);
+          return discarded.has(index) || stopRequested.has(index) ? undefined : handles[index]!.ask(text);
         },
         alive: () => handles[index]!.alive(),
+        pid: () => handles[index]!.pid(),
         closed: () => ready[index]!.then(() => handles[index]!.closed),
         changed: () => {
           const worktree = worktrees.get(run.index);
           if (!worktree) return [...run.filesEdited];
           return [...run.filesEdited]; // synchronous activity snapshots never launch subprocesses
         },
-        discard: () => {
-          discarded = true;
+        discard: (keepWorkspace = false) => {
+          discarded.add(index);
+          if (keepWorkspace) preserved.add(index);
           // Cancellation is synchronous: a concurrent stop must never apply discarded edits.
           controllers[index]!.abort(STOP_REASON);
-          void ready[index]!.then(() => handles[index]!.shutdown()).finally(() => cleanupPrivate(run.index, true))
+          return ready[index]!.then(() => handles[index]!.shutdown()).finally(() => cleanupPrivate(run.index, dropsWorktree(index)))
             .catch(error => console.error("pi-jar: subagent discard failed", error));
         }
       }));
@@ -1537,7 +1832,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           if (registry.get(record.key) !== record) { cleanup(); reject(new Error("Scout session was discarded")); return; }
           if (isRunning(record.run.state)) return;
           cleanup();
-          if (record.run.error || record.run.state !== "idle") reject(new Error(record.run.error ?? "Scout failed to settle"));
+          if (record.run.error || (record.run.state !== "idle" && record.run.state !== "hibernated")) reject(new Error(record.run.error ?? "Scout failed to settle"));
           else resolve();
         };
         const abort = () => { cleanup(); void registry.stop(record.key); reject(new Error("Scout launch aborted")); };
@@ -1565,7 +1860,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const abort = () => { cleanup(); void registry.stop(id); reject(new Error("Scout resume aborted")); };
         unsubscribe = registry.subscribe(check);
         signal?.addEventListener("abort", abort, { once: true });
-        if (!registry.resume(id, prompt)) { cleanup(); reject(new Error("Scout is not idle or paused")); }
+        if (!registry.resume(id, prompt)) { cleanup(); reject(new Error(record.run.error ?? "Scout is not idle, paused or hibernated")); }
         else check();
       });
       return result;
@@ -1589,18 +1884,18 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   pi.registerTool({
     name: "jar_subagent",
     label: "subagent",
-    description: "Non-blocking moderator control for retained subagents. peek, steer and resume return immediately. ask, pause and stop return an accepted operation receipt; the final answer or handoff arrives as a pi-jar.subagent event. Stop completion safely reconciles worktree changes; acceptance does not mean changes are applied yet.",
-    promptSnippet: "Use jar_subagent as the moderator control plane. Prefer peek over rereading transcripts; reuse paused/idle agents with resume; stop finished workers to reconcile their work.",
+    description: "Non-blocking moderator control for retained subagents. peek, steer, resume and discard return immediately. ask, pause and stop return an accepted operation receipt; the final answer or handoff arrives as a pi-jar.subagent event. Settled agents hibernate (process closed, context and workspace kept); resume and ask relaunch them transparently. Stop completion safely reconciles worktree changes; acceptance does not mean changes are applied yet. discard removes an unresolved worktree recovery workspace without applying it.",
+    promptSnippet: "Use jar_subagent as the moderator control plane. Prefer peek over rereading transcripts; reuse paused/idle/hibernated agents with resume; stop finished workers to reconcile their work.",
     promptGuidelines: [
-      "peek returns only task progress. Do not poll: initial/resumed turns and control completions send pi-jar.subagent events. Stop returns an accepted receipt first, then changed files and the full handoff in its completion event.",
+      "peek returns only task progress, plus workspace and changed files for unresolved worktree recovery records. Do not poll: initial/resumed turns and control completions send pi-jar.subagent events. Stop returns an accepted receipt first, then changed files and the full handoff in its completion event.",
       "Use steer for active direction and ask for a brief BTW question. ask, pause and stop do not wait on the child; continue responding to the user until their completion event arrives.",
-      "Pause when an agent should stop spending tokens but keep its context/workspace. Resume the same agent later instead of spawning a replacement.",
-      "Stop when an agent is no longer needed. Stop aborts any active turn, retires the process, reports progress/workspace/changes/remaining work, and reconciles safe worktree changes into /diff."
+      "Pause when an agent should stop spending tokens but keep its context/workspace. Resume the same agent later instead of spawning a replacement; a hibernated agent resumes exactly like an idle one.",
+      "Stop when an agent is no longer needed. Stop aborts any active turn, retires the process, reports progress/workspace/changes/remaining work, and reconciles safe worktree changes into /diff. On a failed/conflicted worktree recovery record, stop retries reconciliation; discard it only when its changes are not wanted."
     ],
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("peek"), Type.Literal("steer"), Type.Literal("ask"),
-        Type.Literal("pause"), Type.Literal("resume"), Type.Literal("stop")
+        Type.Literal("pause"), Type.Literal("resume"), Type.Literal("stop"), Type.Literal("discard")
       ]),
       agent: Type.Optional(Type.String({ description: "Subagent key or unique name. Omit only for peek to show all retained agents." })),
       message: Type.Optional(Type.String({ description: "Direction, BTW question, or resume instruction." }))
@@ -1610,7 +1905,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       const work = (async () => {
       if (params.action === "peek") {
         const targets = params.agent ? [registry.resolve(params.agent)].filter((item): item is SubagentRecord => !!item)
-          : registry.records().filter((record) => isRetained(record.run.state));
+          : registry.records().filter((record) => isRetained(record.run.state) || isRecovery(record));
         if (!targets.length) return { content: [{ type: "text", text: params.agent ? "Subagent not found: " + params.agent : "No retained subagents." }] };
         return { content: [{ type: "text", text: targets.map(peekRecord).join("\n\n") }] };
       }
@@ -1630,6 +1925,15 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const message = cleanBlock(params.message ?? "", MAX_STEER_CHARS);
         if (!message) return { content: [{ type: "text", text: "steer requires message." }], isError: true };
         return { content: [{ type: "text", text: registry.steer(record.key, message) ? "Steered " + record.run.name + "." : "Subagent is not currently working; use resume instead." }] };
+      }
+      if (params.action === "discard") {
+        const removed = await registry.discard(record.key);
+        if (!removed) return { content: [{ type: "text", text: `${record.run.name} is not an unresolved worktree recovery record; discard only removes recovery workspaces (use stop for agents).` }], isError: true };
+        const left = existsSync(removed.workspace);
+        return { content: [{ type: "text", text: left
+          ? `Discarded recovery record ${removed.key}, but could not delete ${removed.workspace}; remove it manually.`
+          : `Discarded ${removed.name}: removed ${removed.workspace} without applying${removed.changed.length ? ` its changes (${fileList(removed.changed, 10)})` : " it"}.` }],
+          ...(left ? { isError: true } : {}) };
       }
       // The moderator is handling this agent directly now; its settle no longer needs a wake-up.
       if (params.action !== "resume") watched.delete(record.key);
@@ -1651,7 +1955,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       if (params.action === "resume") {
         const resumed = registry.resume(record.key, params.message);
         if (resumed) watched.set(record.key, record);
-        return { content: [{ type: "text", text: resumed ? "Resumed " + record.run.name + ". You will be woken when its turn ends; do not poll peek." : record.run.name + " is not idle or paused." }] };
+        return { content: [{ type: "text", text: resumed ? "Resumed " + record.run.name + ". You will be woken when its turn ends; do not poll peek."
+          : record.run.state === "failed" && record.run.error ? `Could not resume ${record.run.name}: ${record.run.error}` : record.run.name + " is not idle, paused or hibernated." }] };
       }
       const report = await registry.stop(record.key);
       if (!report) return { content: [{ type: "text", text: "Subagent is already retired: " + record.run.name }] };

@@ -39,7 +39,7 @@ ctx.ui.setStatus("pi-jar.quota.openai-codex", JSON.stringify({
 - `used` is a percentage from 0 to 100. Either window may be omitted, and each can carry an optional `resetsAt` (epoch milliseconds).
 - `expiresAt` is required and may be at most five minutes ahead. A valid published status always wins.
 - `/jar quota on` (the default each session) lets pi-jar resolve the current Anthropic or OpenAI Codex OAuth credentials through Pi's model registry and make a **read-only** request to the provider's quota endpoint when nothing is published.
-- Requests have a 5 s timeout and results (including failures) are cached for 5 minutes. `/jar quota off` cancels pending requests and clears the cache.
+- Requests have a 5 s timeout; successful results are cached for 5 minutes, while consecutive failures back off for 5, 10, 20, then 30 minutes. `/jar quota off` cancels pending requests and clears the cache. Renders only read cached values.
 - These provider endpoints are not stable public APIs.
 
 ## Session entries owned by pi-jar

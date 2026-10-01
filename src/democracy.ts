@@ -25,7 +25,8 @@ export interface DemocracyResult {
   shortlist: string[];
   winner?: string;
 }
-const live = (agent: SubagentReport) => ["queued", "working", "idle", "paused"].includes(agent.state);
+/** Retained voters hold pool slots whether or not their process is currently running. */
+const live = (agent: SubagentReport) => ["queued", "working", "idle", "paused", "hibernated"].includes(agent.state);
 /** One round never outlives this; late ballots count as failures, never as guesses. */
 export const BALLOT_TIMEOUT_MS = 10 * 60_000;
 /** Rationale and failure text returned to the moderator per voter. */
@@ -53,7 +54,8 @@ export function validateDemocracy(request: DemocracyRequest): void {
 }
 
 export function parseBallot(report: SubagentReport, nonce: string, options: readonly DecisionOption[]): Ballot {
-  if (report.error || report.state !== "idle") throw new Error(report.error ?? "Scout did not finish its ballot");
+  // A finished ballot turn is idle, or already hibernated if its process closed before the tally.
+  if (report.error || (report.state !== "idle" && report.state !== "hibernated")) throw new Error(report.error ?? "Scout did not finish its ballot");
   const lines = report.output.split(/\r?\n/).filter((line) => line.startsWith("JAR_BALLOT "));
   if (lines.length !== 1) throw new Error("Expected exactly one private JAR_BALLOT response");
   const raw = JSON.parse(lines[0]!.slice(11)) as { round?: unknown; option?: unknown; rationale?: unknown };
@@ -95,8 +97,8 @@ export async function conductDemocracy(controller: DelegateController, request: 
   const fleet = controller.list();
   for (const id of agents) {
     const agent = fleet.find((item) => item.id === id);
-    if (!agent || agent.mode !== "scout" || !["idle", "paused"].includes(agent.state)) {
-      throw new Error("Only idle/paused fresh-context read-only scouts can be resumed for voting: " + id);
+    if (!agent || agent.mode !== "scout" || !["idle", "paused", "hibernated"].includes(agent.state)) {
+      throw new Error("Only idle/paused/hibernated fresh-context read-only scouts can be resumed for voting: " + id);
     }
   }
   const newScouts = voters - agents.length;

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ACCENT_NAMES } from "./accent.ts";
-import { DEFAULT_FOOTER_SETTINGS, FOOTER_FIELDS, loadFooterSettings, type FooterSettings } from "./footer-settings.ts";
+import { DEFAULT_FOOTER_SETTINGS, FOOTER_FIELDS, type FooterSettings } from "./footer-settings.ts";
 import { ICON_SETS, type IconSet } from "./icons.ts";
 
 export type JarAccent = "follow" | "default" | (typeof ACCENT_NAMES)[number];
@@ -45,7 +45,7 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
   let text: string;
   try { text = readFileSync(join(directory, SETTINGS_FILE), "utf8"); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaultVisualSettings(loadFooterSettings(directory));
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaultVisualSettings();
     return defaultVisualSettings();
   }
   let raw: unknown;
@@ -74,16 +74,6 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     footer: Object.fromEntries(FOOTER_FIELDS.map((field) => [field,
       typeof footer[field] === "boolean" ? footer[field] : fallback.footer[field]])) as FooterSettings
   };
-}
-
-export function migrateLegacySettings(directory: string): boolean {
-  if (existsSync(join(directory, SETTINGS_FILE)) || !existsSync(join(directory, "pi-jar-footer.json"))) return false;
-  try {
-    const legacy: unknown = JSON.parse(readFileSync(join(directory, "pi-jar-footer.json"), "utf8"));
-    if (!legacy || typeof legacy !== "object" || Array.isArray(legacy)) return false;
-    saveVisualSettings(directory, defaultVisualSettings(loadFooterSettings(directory)));
-    return true;
-  } catch { return false; } // Leave malformed legacy preferences untouched for manual repair.
 }
 
 export function saveVisualSettings(directory: string, settings: JarVisualSettings): void {

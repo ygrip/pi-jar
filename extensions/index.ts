@@ -16,7 +16,7 @@ import { openJarHistory } from "../src/history-ui.ts";
 import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
 import { GoalLoop } from "../src/goal-loop.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
-import { defaultVisualSettings, loadVisualSettings, migrateLegacySettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
+import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
 import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
@@ -38,12 +38,13 @@ import { WorkingState } from "../src/working.ts";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_ENV, DelegateRegistry, registerDelegate, SUBAGENT_MESSAGE, type DelegateRun } from "../src/delegate.ts";
 import { CHILD_WORKTREE_ENV, workspacePathAllowed } from "../src/delegate-worktree.ts";
-import { createDiscussionPaper, DISCUSSION_FILE_ENV, disposeDiscussionPaper, registerDiscussionTool, SUBAGENT_NAME_ENV } from "../src/discussion.ts";
+import { DiscussionBroker, DISCUSSION_NOTICE, discussionClientFromEnv, registerDiscussionTool } from "../src/discussion.ts";
 import { openActivityView, type ActivityTarget } from "../src/activity-view.ts";
 import { ICON_SETS, setIconSet, withIcon } from "../src/icons.ts";
 import { collectPrompts, openPromptSearch } from "../src/prompt-search.ts";
 import { ago, recentSessions, sessionDetails, type RecentSession } from "../src/session-gallery.ts";
 import { clearSessionBranchCache, sessionBranch } from "../src/session-branch.ts";
+import { ContextSampler, formatPerf, LARGE_SESSION_ENTRIES, processRss, RenderScheduler, type RenderKind } from "../src/perf.ts";
 import { registerChangeReview } from "../src/diff-view.ts";
 import { registerShells, ShellManager, type ShellEvent, type ShellJob } from "../src/shells.ts";
 import { registerShellNotifications } from "../src/shell-notifications.ts";
@@ -57,7 +58,6 @@ const VERSION = (() => {
 })();
 /** Ignore the click Pi may synthesize right after a press we already acted on. */
 const WELCOME_CLICK_DEDUPE_MS = 400;
-const LARGE_SESSION_ENTRIES = 800;
 /** Entries Pi writes when a fresh session starts; a branch holding only these has no transcript yet. */
 const SESSION_SETUP_ENTRIES = new Set(["thinking_level_change", "model_change", "session_info"]);
 export default function piJar(pi: ExtensionAPI): void {
@@ -68,7 +68,7 @@ export default function piJar(pi: ExtensionAPI): void {
     // and handlers are disabled. Remove only parent automation, not task/user context.
     const parentAutomation = new Set([
       "pi-jar.goal-context", "pi-jar.goal-continuation",
-      "pi-jar.plan-context", "pi-jar.plan-reminder", "pi-jar.moderator-context", SUBAGENT_MESSAGE
+      "pi-jar.plan-context", "pi-jar.plan-reminder", "pi-jar.moderator-context", SUBAGENT_MESSAGE, DISCUSSION_NOTICE
     ]);
     pi.on("context", (event) => {
       const messages = event.messages.filter((message) => !parentAutomation.has((message as { customType?: string }).customType ?? ""));
@@ -101,18 +101,30 @@ export default function piJar(pi: ExtensionAPI): void {
   let enabled = visualSettings.ui;
   let disposeFooter: (() => void) | undefined;
   let footerTui: { requestRender(): void } | undefined;
-  /** Footer facts that walk the session to compute; refreshed on the events that change them, never per frame. */
-  let footerContext = "ctx ?";
+  /**
+   * Per-session render budget and context-usage cache (src/perf.ts): created on session_start and
+   * disposed on shutdown, so no repaint or sampling timer outlives its session.
+   */
+  let renders: RenderScheduler | undefined;
+  let contextUsage: ContextSampler | undefined;
+  /** Only an installed footer in a live session is repainted; user actions and transitions stay prompt. */
+  const repaint = (source: string, kind: RenderKind = "foreground") => { if (footerTui) renders?.request(source, kind); };
   let footerSessionName: string | undefined;
+  /** Boundaries refresh the footer facts that walk the session; message ends only mark context dirty. */
   const sampleFooter = (ctx: ExtensionContext) => {
-    try {
-      const usage = ctx.getContextUsage();
-      footerContext = usage?.percent == null || !Number.isFinite(usage.percent) ? "ctx ?" : `ctx ${Math.round(usage.percent)}%`;
-    } catch { footerContext = "ctx ?"; }
+    contextUsage?.refresh(() => ctx.getContextUsage());
     try { footerSessionName = ctx.sessionManager?.getSessionName?.(); } catch { footerSessionName = undefined; }
-    footerTui?.requestRender();
+    repaint("session", "transition");
   };
   let quotaCache: QuotaCache | undefined;
+  let enableQuota: NodeJS.Timeout | undefined;
+  /**
+   * Lookups start on session boundaries, never from a render, and only while an installed footer can
+   * show them (never in RPC children or with the UI off); the cache bounds them to one per TTL.
+   */
+  const refreshQuota = (ctx: ExtensionContext) => {
+    if (footerTui && footerSettings.quota) quotaCache?.refresh(ctx.model?.provider, welcomeStatuses(), Date.now());
+  };
   let cost = 0;
   let welcomeInterval: ReturnType<typeof setInterval> | undefined;
   let welcomeFrame = 0;
@@ -133,8 +145,9 @@ export default function piJar(pi: ExtensionAPI): void {
   let workingIndicatorKey = "";
   let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
   let settingsOpen = false;
-  let discussionFile: string | undefined = process.env[DISCUSSION_FILE_ENV];
-  registerDiscussionTool(pi, () => discussionFile, () => process.env[SUBAGENT_NAME_ENV] ?? "moderator");
+  const discussionClient = delegatedChild ? discussionClientFromEnv() : undefined;
+  let discussion: DiscussionBroker | undefined;
+  registerDiscussionTool(pi, () => delegatedChild ? discussionClient : discussion?.local());
 
   // A finished list stays visible (all struck through) until the user's next prompt, like Claude.
   let todosAcknowledged = false;
@@ -182,38 +195,47 @@ export default function piJar(pi: ExtensionAPI): void {
   let changes: ChangeTracker | undefined;
   let changeCount = 0;
   const refreshChanges = () => {
+    const before = changeCount;
     try { changeCount = changes?.count() ?? 0; } catch { changeCount = 0; }
-    footerTui?.requestRender();
+    if (changeCount !== before) repaint("changes", "transition");
   };
   registerChangeReview(pi, () => changes, refreshChanges);
   let shells: ShellManager | undefined;
   registerShells(pi, () => shells);
   const shellNotifications = registerShellNotifications(pi, () => shells);
+  /** Shell rows show status and watch matches: changing those is a transition, anything else a background delta. */
+  let shellSignature = "";
+  const noteShells = () => {
+    if (!footerTui) return;
+    const signature = (shells?.summaries() ?? []).map((job) => `${job.id}:${job.status}:${job.matched ? 1 : 0}`).join(" ");
+    repaint("shells", signature === shellSignature ? "background" : "transition");
+    shellSignature = signature;
+  };
   const onShellEvent = (event: ShellEvent) => {
-    footerTui?.requestRender();
+    noteShells();
     if (!event.job.notify) return;
     // Queue compact metadata until a model boundary; observed completions are acknowledged.
     shellNotifications.notify();
   };
   /** Footer indicators owned by pi-jar; live subagents and shells get their own rows. */
   const footerChips = () => changeCount ? [withIcon("changes", `${changeCount} file${changeCount === 1 ? "" : "s"} · /diff`)] : [];
-  /**
-   * Subagent streams and shell output change the footer many times a second; every requested frame
-   * re-renders the whole transcript, so background sources repaint it at most this often.
-   */
-  const BACKGROUND_REPAINT_MS = 250;
-  let backgroundRepaint: NodeJS.Timeout | undefined;
-  const repaintFooterSoon = () => {
-    if (backgroundRepaint) return;
-    backgroundRepaint = setTimeout(() => { backgroundRepaint = undefined; footerTui?.requestRender(); }, BACKGROUND_REPAINT_MS);
-    backgroundRepaint.unref?.();
-  };
   const subagents = new DelegateRegistry();
-  subagents.subscribe(repaintFooterSoon);
+  /**
+   * Subagent streams notify many times a second, but footer rows only change state rarely: a changed
+   * key/state set is a transition, anything else (tool counts, activity text) a background delta.
+   */
+  let subagentSignature = "";
+  subagents.subscribe(() => {
+    if (!footerTui) return;
+    const signature = subagents.records().map(({ key, run }) => `${key}:${run.state}`).join(" ");
+    repaint("subagents", signature === subagentSignature ? "background" : "transition");
+    subagentSignature = signature;
+  });
   /** Finished work stays visible briefly so a quick run is not a flicker. */
   const ACTIVITY_LINGER_MS = 5000;
+  // A hibernated agent has no live process but resumes on demand: the footer shows it as idle.
   const subagentState = (run: DelegateRun): ActivityState => run.state === "working" ? "running" : run.state === "queued" ? "queued"
-    : run.state === "idle" ? "idle" : run.state === "paused" ? "paused" : run.state === "stopped" ? "stopped"
+    : run.state === "idle" || run.state === "hibernated" ? "idle" : run.state === "paused" ? "paused" : run.state === "stopped" ? "stopped"
       : run.state === "done" ? "done" : "failed";
   const shellActivityState = (job: Omit<ShellJob, "lines">): ActivityState => job.status === "running" ? "running"
     : job.status === "killed" ? "stopped" : job.status === "exited" && job.exitCode === 0 ? "done" : "failed";
@@ -235,17 +257,23 @@ export default function piJar(pi: ExtensionAPI): void {
     return rows;
   };
   let overlayOpen = false;
-  /** Subagents, shells and other extensions' roles in one live split view. */
+  /**
+   * Subagents, shells and other extensions' roles in one live split view. While it is open it
+   * repaints live updates itself (on the tier's focused cadence), so footer background deltas wait.
+   */
   const openActivity = async (ctx: ExtensionContext, initial?: ActivityTarget) => {
     if (!ctx.hasUI || ctx.mode !== "tui" || overlayOpen) return;
     overlayOpen = true;
+    const budget = renders;
+    budget?.setFocused(true);
     try {
       await openActivityView(ctx, {
         subagents, ...(shells ? { shells } : {}),
         roles: () => collectStatuses(welcomeStatuses(), Date.now()).roles.filter((role) => !role.id.startsWith("delegate-"))
-          .map((role) => ({ id: role.id, name: role.name, state: role.state, ...(role.task ? { task: role.task } : {}) }))
+          .map((role) => ({ id: role.id, name: role.name, state: role.state, ...(role.task ? { task: role.task } : {}) })),
+        repaintMs: () => renders?.focusedMs() ?? 100
       }, initial);
-    } finally { overlayOpen = false; }
+    } finally { overlayOpen = false; budget?.setFocused(false); }
   };
   /** Searchable project sessions with a details pane; Enter resumes the selected one. */
   const openSessions = async (ctx: ExtensionContext | ExtensionCommandContext, query = "") => {
@@ -280,7 +308,10 @@ export default function piJar(pi: ExtensionAPI): void {
     quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
   modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild });
   let delegateController: DelegateController | undefined;
-  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges, discussionFile: () => discussionFile,
+  registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges,
+    discussionEnv: (key, name) => discussion?.childEnv(key, name),
+    discussionRetire: (key) => discussion?.retire(key),
+    discussionUnread: (key) => discussion?.unreadFor(key) ?? 0,
     getMaxSubagents: () => visualSettings.maxSubagents, onController: (controller) => { delegateController = controller; } });
   if (!delegatedChild) registerDemocracy(pi, () => delegateController, () => visualSettings.maxSubagents);
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
@@ -289,7 +320,7 @@ export default function piJar(pi: ExtensionAPI): void {
     goals: () => goals, todos: () => todos, roles: modelRoles, planActive: () => planMode.isEnabled(),
     maxRounds: () => visualSettings.goalRounds,
     subagentMode: (agent) => subagents.resolve(agent)?.run.mode,
-    changed: (ctx) => { footerTui?.requestRender(); welcomeTui?.requestRender(); updateTaskWidget(ctx); },
+    changed: (ctx) => { repaint("goal", "transition"); welcomeTui?.requestRender(); updateTaskWidget(ctx); },
     completed: () => composer.flash("complete", 4000)
   });
   if (!delegatedChild) goalLoop.register();
@@ -372,9 +403,8 @@ export default function piJar(pi: ExtensionAPI): void {
     welcomeFrame = 0;
     welcomeDismiss = 0;
     try {
-      const contextUsage = ctx.getContextUsage();
-      const context = contextUsage?.percent != null && Number.isFinite(contextUsage.percent)
-        ? `ctx ${Math.round(contextUsage.percent)}%` : "ctx ?";
+      // The cached sample: the welcome never forces its own walk of the session.
+      const context = contextUsage?.label ?? "ctx ?";
       const commands = pi.getCommands().filter((item) => item.source === "extension");
       const managers: ("tasks" | "subagents")[] = [];
       if (commands.some((item) => item.name === "tasks")) managers.push("tasks");
@@ -498,7 +528,7 @@ export default function piJar(pi: ExtensionAPI): void {
         let disposed = false;
         let hits: FooterHit[] = [];
         let pressed: { target: FooterTarget; at: number } | undefined;
-        const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
+        const unsubscribe = footerData.onBranchChange(() => repaint("branch", "transition"));
         const dispose = () => {
           if (disposed) return;
           disposed = true;
@@ -527,6 +557,8 @@ export default function piJar(pi: ExtensionAPI): void {
           },
           render(width: number): string[] {
             try {
+              // Whatever background state was waiting for a repaint is drawn by this frame, ours or Pi's.
+              renders?.painted();
               const now = Date.now();
               const statuses = footerData.getExtensionStatuses();
               const live = collectStatuses(statuses, now);
@@ -539,7 +571,7 @@ export default function piJar(pi: ExtensionAPI): void {
                 expiryTimer = undefined;
                 expiryAt = nearest;
                 if (nearest != null) {
-                  expiryTimer = setTimeout(() => { expiryTimer = undefined; expiryAt = undefined; tui.requestRender(); }, Math.max(1, nearest - now));
+                  expiryTimer = setTimeout(() => { expiryTimer = undefined; expiryAt = undefined; repaint("roles", "transition"); }, Math.max(1, nearest - now));
                   expiryTimer.unref?.();
                 }
               }
@@ -557,7 +589,7 @@ export default function piJar(pi: ExtensionAPI): void {
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: footerSessionName,
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
-                context: footerContext, goal: goalLoop.progress(), chips: footerChips(), activity: footerActivity(now),
+                context: contextUsage?.label ?? "ctx ?", goal: goalLoop.progress(), chips: footerChips(), activity: footerActivity(now),
                 memory, cost: formatCost(cost), quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
@@ -583,6 +615,7 @@ export default function piJar(pi: ExtensionAPI): void {
   const applyVisualSettings = (next: JarVisualSettings, ctx: ExtensionContext) => {
     const wasEnabled = enabled;
     const hadMotion = animations;
+    const quotaShown = !!footerTui && footerSettings.quota;
     if (next.accent !== visualSettings.accent && next.accent !== "follow" && !selectAccent(ctx, next.accent)) {
       ctx.ui.notify(`Accent ${next.accent} is not loaded`, "warning");
       return;
@@ -609,8 +642,10 @@ export default function piJar(pi: ExtensionAPI): void {
     else if (!hadMotion && animations && welcomeTui && !welcomeInterval) {
       { welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS); welcomeInterval.unref?.(); }
     }
-    footerTui?.requestRender();
+    repaint("settings");
     welcomeTui?.requestRender();
+    // Quota shown again (field or UI back on): hiding it stopped lookups and dropped the cache.
+    if (!quotaShown) refreshQuota(ctx);
     try { saveVisualSettings(getAgentDir(), next); }
     catch { ctx.ui.notify("Visual preferences changed for this session but could not be saved", "warning"); }
   };
@@ -623,9 +658,9 @@ export default function piJar(pi: ExtensionAPI): void {
     finally { settingsOpen = false; }
   };
 
+  /** Callers are lifecycle handlers that repaint once through sampleFooter. */
   const updateCost = (ctx: ExtensionContext) => {
     try { cost = sessionCost(ctx); } catch { cost = 0; }
-    footerTui?.requestRender();
   };
   const addMessageCost = (message: { usage?: { cost?: { total?: number } } }) => {
     const value = message.usage?.cost?.total;
@@ -637,11 +672,9 @@ export default function piJar(pi: ExtensionAPI): void {
   };
   const restoreGoal = (ctx: ExtensionContext, branch?: readonly unknown[]) => {
     try { goals?.restore(branch ?? sessionBranch(ctx)); } catch { goals?.restore([]); }
-    footerTui?.requestRender();
   };
   pi.on("session_start", (_event, ctx) => {
     sideUsage.clear();
-    migrateLegacySettings(getAgentDir());
     visualSettings = loadVisualSettings(getAgentDir());
     setIconSet(visualSettings.icons);
     animations = visualSettings.animations;
@@ -652,20 +685,37 @@ export default function piJar(pi: ExtensionAPI): void {
     workingIndicatorKey = "";
     working.end();
     quotaCache?.stop();
+    clearTimeout(enableQuota);
+    // Render and sampling counters are session-scoped; nothing from a previous session may fire.
+    renders?.dispose();
+    contextUsage?.dispose();
     todos = new TodoStore((entry) => pi.appendEntry(TASK_ENTRY, entry));
     changes = new ChangeTracker(() => ctx.cwd);
     changeCount = 0;
     shells?.dispose();
-    subagents.clear();
+    const preserved = subagents.clear();
+    if (preserved.length) ctx.ui.notify(`Unresolved subagent worktrees preserved on disk:\n${preserved.join("\n")}`, "warning");
+    const previousDiscussion = discussion;
     if (!delegatedChild) {
-      disposeDiscussionPaper(discussionFile);
-      discussionFile = createDiscussionPaper();
+      discussion = new DiscussionBroker();
+      discussion.onChange = () => repaint("discussion", "background");
     }
+    renders = new RenderScheduler(() => {
+      const tui = footerTui;
+      if (!tui) return false;
+      tui.requestRender();
+      return true;
+    });
+    contextUsage = new ContextSampler(() => repaint("context", "background"));
+    subagentSignature = "";
+    shellSignature = "";
     shells = new ShellManager(onShellEvent);
-    shells.onChange = repaintFooterSoon;
+    shells.onChange = noteShells;
     goals = new GoalStore((entry) => pi.appendEntry(GOAL_ENTRY, entry));
     let branch: readonly unknown[] = [];
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
+    // Counted from here on per message_end: no per-event branch walk.
+    renders.setEntries(branch.length);
     if (delegatedChild) {
       todos.restore([]);
       goals.restore([]);
@@ -676,12 +726,15 @@ export default function piJar(pi: ExtensionAPI): void {
     // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
-      () => footerTui?.requestRender()
+      () => repaint("quota", "transition")
     );
     // Hold the network lookup until startup settles; the footer shows it once it arrives.
     quotaCache.enabled = false;
     const cache = quotaCache;
-    const enableQuota = setTimeout(() => { if (quotaCache === cache && !quotaDisabledByUser) { cache.enabled = true; footerTui?.requestRender(); } }, STARTUP_GRACE_MS);
+    enableQuota = setTimeout(() => {
+      enableQuota = undefined;
+      if (quotaCache === cache && !quotaDisabledByUser) { cache.enabled = true; refreshQuota(ctx); }
+    }, STARTUP_GRACE_MS);
     enableQuota.unref?.();
     quotaDisabledByUser = false;
     updateCost(ctx);
@@ -705,6 +758,11 @@ export default function piJar(pi: ExtensionAPI): void {
     const resumed = branch.some((entry) => !(typeof entry === "object" && entry !== null && "type" in entry
       && typeof entry.type === "string" && SESSION_SETUP_ENTRIES.has(entry.type)));
     if (!delegatedChild && !resumed) showWelcome(ctx);
+    if (discussion) {
+      const current = discussion;
+      return (previousDiscussion ? previousDiscussion.close().then(() => current.start()) : current.start())
+        .catch((error) => { ctx.ui.notify("Discussion broker unavailable: " + String(error), "warning"); });
+    }
   });
   // Any real prompt dismisses the welcome. Slash commands bypass `input`, so `agent_start` covers them.
   const dismissWelcome = (ctx: ExtensionContext) => {
@@ -724,15 +782,18 @@ export default function piJar(pi: ExtensionAPI): void {
     dismissWelcome(ctx);
     if (!todosAcknowledged && todos?.all().every((item) => item.done)) { todosAcknowledged = true; updateTaskWidget(ctx); }
   });
-  pi.on("agent_start", (_event, ctx) => { dismissWelcome(ctx); working.start(); applyWorking(ctx); });
+  pi.on("agent_start", (_event, ctx) => { dismissWelcome(ctx); working.start(); applyWorking(ctx); refreshQuota(ctx); });
   pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
   pi.on("message_end", (event, ctx) => {
-    // Every message (user, assistant, tool result) moves the context window.
-    sampleFooter(ctx);
+    // Every message (user, assistant, tool result) moves the context window, and a tool-heavy turn
+    // ends many: count the entry and let the sampler recompute once per window, not per message.
+    renders?.addEntries(1);
+    contextUsage?.markDirty(() => ctx.getContextUsage());
     if (event.message.role === "assistant") {
       working.reportOutputTokens(event.message.usage?.output ?? 0);
       addMessageCost(event.message);
       applyWorking(ctx);
+      repaint("cost", "background");
     }
   });
   pi.on("tool_execution_start", (event, ctx) => { working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx); });
@@ -740,13 +801,15 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("ui_prompt_start", (_event, ctx) => { working.prompt(true); applyWorking(ctx); });
   pi.on("ui_prompt_end", (_event, ctx) => { working.prompt(false); applyWorking(ctx); });
   // A request may span several tool turns; keep its elapsed time and reported tokens until agent_end.
-  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); });
-  pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); });
+  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); refreshQuota(ctx); });
+  pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); sampleFooter(ctx); });
   pi.on("agent_before_settle", (event) => { if (event.outcome === "error") composer.flash("error"); });
-  pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); });
+  // Retries or compaction after agent_end may have added messages; otherwise the agent_end sample stands.
+  pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); if (contextUsage?.dirty) sampleFooter(ctx); refreshQuota(ctx); });
   pi.on("session_tree", (_event, ctx) => {
     let branch: readonly unknown[] = [];
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
+    renders?.setEntries(branch.length);
     if (!delegatedChild) {
       restoreTodos(ctx, branch);
       restoreGoal(ctx, branch);
@@ -756,12 +819,15 @@ export default function piJar(pi: ExtensionAPI): void {
     sampleFooter(ctx);
   });
   pi.on("session_compact", (_event, ctx) => {
-    if (!delegatedChild) { restoreTodos(ctx); restoreGoal(ctx); }
+    let branch: readonly unknown[] = [];
+    try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
+    renders?.setEntries(branch.length);
+    if (!delegatedChild) { restoreTodos(ctx, branch); restoreGoal(ctx, branch); }
     updateCost(ctx);
     sampleFooter(ctx);
   });
-  pi.on("model_select", (_event, ctx) => sampleFooter(ctx));
-  pi.on("thinking_level_select", (_event, _ctx) => footerTui?.requestRender());
+  pi.on("model_select", (_event, ctx) => { sampleFooter(ctx); refreshQuota(ctx); });
+  pi.on("thinking_level_select", (_event, _ctx) => repaint("effort"));
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); sampleFooter(ctx); });
   pi.on("session_shutdown", (_event, ctx) => {
     clearSessionBranchCache(ctx);
@@ -772,17 +838,27 @@ export default function piJar(pi: ExtensionAPI): void {
     try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
     quotaCache?.stop();
     quotaCache = undefined;
-    if (!delegatedChild) { disposeDiscussionPaper(discussionFile); discussionFile = undefined; }
+    clearTimeout(enableQuota);
+    enableQuota = undefined;
+    // Late notifications (draining children, shell disposal) find no scheduler and start no timer.
+    renders?.dispose();
+    renders = undefined;
+    contextUsage?.dispose();
+    contextUsage = undefined;
     todos = undefined;
     changes = undefined;
     changeCount = 0;
     shells?.dispose();
     shells = undefined;
-    subagents.clear();
+    const preserved = subagents.clear();
+    if (preserved.length) ctx.ui.notify(`Unresolved subagent worktrees preserved on disk:\n${preserved.join("\n")}`, "warning");
+    const closingDiscussion = discussion;
+    discussion = undefined;
     goals = undefined;
     disposeFooter?.();
     disposeFooter = undefined;
     demo = false;
+    return closingDiscussion?.close();
   });
 
   pi.registerShortcut?.(Key.ctrlAlt("r"), {
@@ -808,7 +884,7 @@ export default function piJar(pi: ExtensionAPI): void {
   });
   pi.registerShortcut?.(Key.ctrlAlt("m"), {
     description: "Cycle pi-jar model roles",
-    handler: async (ctx) => { await modelRoles.cycle(ctx); footerTui?.requestRender(); }
+    handler: async (ctx) => { await modelRoles.cycle(ctx); repaint("roles"); }
   });
   pi.registerShortcut?.(Key.ctrlAlt("a"), {
     description: "Subagents and background shells (pi-jar)",
@@ -833,6 +909,20 @@ export default function piJar(pi: ExtensionAPI): void {
       }
       if (!command || command === "status") {
         ctx.ui.notify(`pi-jar: UI ${enabled ? "on" : "off"}; animations ${animations ? "on" : "off"}; quota ${quotaCache?.enabled ? "on" : "off"} (session-only); composer ${composer.enabled ? "on" : "off"}; mascot ${visualSettings.mascot ? "on" : "off"}; suggestions ${visualSettings.suggestions ? "on" : "off"}; ${todos?.all().length ?? 0} to-dos; demo ${demo ? "on" : "off"}`, "info");
+        return;
+      }
+      if (command === "perf") {
+        // On demand only: one `ps` call for live children; everything else is an in-memory counter.
+        const subagentStats = subagents.stats();
+        const childRssBytes = await processRss(subagentStats.pids);
+        ctx.ui.notify(formatPerf({
+          entries: renders?.entries ?? 0, context: contextUsage?.label ?? "ctx ?", rssBytes: process.memoryUsage.rss(),
+          ...(renders ? { render: renders.stats() } : {}), ...(contextUsage ? { sampling: contextUsage.stats() } : {}),
+          subagents: subagentStats, ...(childRssBytes !== undefined ? { childRssBytes } : {}),
+          ...(shells ? { shells: shells.stats() } : {}), ...(discussion ? { discussion: discussion.stats() } : {}),
+          ...(quotaCache ? { quota: quotaCache.stats() } : {}),
+          sideCalls: sideUsage.all().length, now: Date.now()
+        }), "info");
         return;
       }
       // `/jar resume` without a number opens the same searchable picker.
@@ -879,7 +969,7 @@ export default function piJar(pi: ExtensionAPI): void {
           return;
         }
         footerSettings = visualSettings.footer;
-        footerTui?.requestRender();
+        repaint("settings");
         const labels: Record<(typeof FOOTER_FIELDS)[number], string> = {
           model: "Model", effort: "Model effort", sessionName: "Session name", cwd: "Working directory", context: "Context",
           memory: "Process RAM (RSS)", cost: "Session cost", quota: "Quota", roles: "Roles", extras: "Extension statuses", branch: "Git branch"
@@ -974,10 +1064,10 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "animations off") applyVisualSettings({ ...visualSettings, animations: false }, ctx);
       else if (command === "ui on") applyVisualSettings({ ...visualSettings, ui: true }, ctx);
       else if (command === "ui off") applyVisualSettings({ ...visualSettings, ui: false }, ctx);
-      else if (command === "quota on" && quotaCache) { quotaCache.enabled = true; quotaDisabledByUser = false; }
+      else if (command === "quota on" && quotaCache) { quotaCache.enabled = true; quotaDisabledByUser = false; refreshQuota(ctx); }
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaDisabledByUser = true; quotaCache.stop(); }
       else {
-        ctx.ui.notify("Usage: /jar [status|settings|activity|shells|sessions [search]|icons [unicode|nerd|ascii]|commit [note]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        ctx.ui.notify("Usage: /jar [status|perf|settings|activity|shells|sessions [search]|icons [unicode|nerd|ascii]|commit [note]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
       }
       if (!["animations on", "animations off", "ui on", "ui off"].includes(command)) installUi(ctx);
