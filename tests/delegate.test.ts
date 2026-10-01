@@ -47,6 +47,7 @@ test("subagents run in RPC mode with the parent's extensions, read-only tools pl
   });
   assert.equal(worktree.at(-1), WORKTREE_TOOLS.join(","));
   assert.ok(!WORKTREE_TOOLS.includes("bash" as never), "worktree writers deliberately have no shell");
+  assert.equal(delegateArgs("p/m", undefined, false, ["node", "cli"], undefined, ["read", "web_search"]).at(-1), "read,web_search");
   const prompt = delegatePrompt("Find the auth code", false);
   assert.match(prompt, /read-only[\s\S]*jar_todo[\s\S]*## Summary[\s\S]*## Details[\s\S]*## Verification[\s\S]*## Open issues[\s\S]*Task: Find the auth code$/);
   assert.match(delegatePrompt("x", true), /You may edit files/);
@@ -60,6 +61,55 @@ test("subagents run in RPC mode with the parent's extensions, read-only tools pl
     registerDelegate({ registerTool() { registered = true; } } as never, roles({}), new DelegateRegistry());
     assert.equal(registered, false, "children do not get jar_delegate");
   } finally { delete process.env[CHILD_ENV]; }
+});
+
+test("explicit active web tools and filtered parent inheritance produce per-child allowlists", async () => {
+  const active = [...READ_ONLY_TOOLS, "web_search", "edit", "write", "bash", "jar_delegate", "jar_subagent", "jar_democracy"];
+  const fake = fakeSpawn(child => { say(child, "ready"); settle(child); });
+  const host = moderatorHost(fake.spawn, active);
+  const context = { ...quiet, sessionManager: { getSessionFile: () => "/tmp/parent.jsonl" } };
+  const explicit = await host.delegate.execute("d1", {
+    tasks: [{ task: "browse docs", mode: "scout", tools: ["read", "web_search"] }]
+  }, undefined, undefined, quiet);
+  assert.match(explicit.content[0]!.text, /launch is asynchronous/);
+  await tick();
+  assert.ok(fake.calls[0]!.args.includes("--tools") && fake.calls[0]!.args.at(-1) === "read,web_search");
+  await host.registry.stop(host.registry.records()[0]!.key);
+
+  await host.delegate.execute("d2", {
+    tasks: [{ task: "review", mode: "fork", inheritTools: true }]
+  }, undefined, undefined, context);
+  await tick();
+  const inherited = fake.calls[1]!.args.at(-1)!;
+  assert.ok(inherited.includes("read") && inherited.includes("jar_discuss") && inherited.includes("web_search"));
+  for (const forbidden of ["edit", "write", "bash", "jar_delegate", "jar_subagent", "jar_democracy"])
+    assert.ok(!inherited.split(",").includes(forbidden), `${forbidden} is filtered from read-only inheritance`);
+  await host.registry.stop(host.registry.records()[0]!.key);
+});
+
+test("custom subagent tools validate active names and cannot widen unsafe modes", async () => {
+  const fake = fakeSpawn(child => { say(child, "ready"); settle(child); });
+  const host = moderatorHost(fake.spawn, ["read", "edit", "bash", "multi_file_edit", "web_search", "jar_delegate"]);
+  const missing = await host.delegate.execute("d", { tasks: [{ task: "x", tools: ["not_active"] }] }, undefined, undefined, quiet);
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0]!.text, /not currently active/);
+  const readOnly = await host.delegate.execute("d", { tasks: [{ task: "x", mode: "scout", tools: ["read", "edit"] }] }, undefined, undefined, quiet);
+  assert.equal(readOnly.isError, true);
+  assert.match(readOnly.content[0]!.text, /read-only/);
+  const recursive = await host.delegate.execute("d", { tasks: [{ task: "x", mode: "fork", tools: ["read", "jar_delegate"] }] }, undefined, undefined, quiet);
+  assert.equal(recursive.isError, true);
+  assert.match(recursive.content[0]!.text, /recursive delegation/);
+  const unguarded = await host.delegate.execute("d", { tasks: [{ task: "x", mode: "worktree", tools: ["read", "bash"] }] }, undefined, undefined, quiet);
+  assert.equal(unguarded.isError, true);
+  assert.match(unguarded.content[0]!.text, /path-guarded|bash/);
+  assert.equal(fake.calls.length, 0, "rejected capability sets must not spawn a child");
+});
+
+test("tool inheritance fails clearly when the Pi host cannot enumerate active tools", async () => {
+  const host = moderatorHost(fakeSpawn(() => {}).spawn);
+  const result = await host.delegate.execute("d", { tasks: [{ task: "x", inheritTools: true }] }, undefined, undefined, quiet);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0]!.text, /does not expose active tool names/);
 });
 
 test("jar_delegate runs tasks in parallel on roles and returns a detailed report per subagent", async () => {
@@ -320,7 +370,9 @@ test("worktree mode retains isolated edits until stop, then safely applies them 
     });
     const call = fake.calls[0]!;
     assert.ok(call.args.includes("--fork") && call.args.includes("/tmp/pi-parent.jsonl"), "child receives a real Pi fork");
-    assert.ok(call.args.includes("--tools") && call.args.includes(WORKTREE_TOOLS.join(",")), "writer receives the sandboxed tool allowlist");
+    const expectedTools = WORKTREE_TOOLS.filter(name => name !== "multi_file_edit");
+    assert.ok(call.args.includes("--tools") && call.args.includes(expectedTools.join(",")), "writer receives the guarded defaults without unavailable extension tools");
+    assert.deepEqual(JSON.parse(call.env.PI_JAR_CHILD_TOOLS!), expectedTools, "runtime capabilities match the CLI allowlist");
     assert.ok(call.env[CHILD_WORKTREE_ENV], "child receives its workspace boundary");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "before\n", "parent stays untouched while the worker is reusable");
     assert.equal(tracker.count(), 0);
@@ -626,7 +678,7 @@ test("session discard racing a worktree stop never applies private edits", async
 });
 
 /** jar_delegate + jar_subagent on a host that records hooks and wake-up messages. */
-const moderatorHost = (spawn: unknown) => {
+const moderatorHost = (spawn: unknown, activeTools?: string[]) => {
   const registry = new DelegateRegistry();
   const tools = new Map<string, Tool>();
   const events = new Map<string, (event: { messages: unknown[] }) => { messages: unknown[] } | undefined>();
@@ -635,7 +687,7 @@ const moderatorHost = (spawn: unknown) => {
     registerTool(definition: Tool) { tools.set(definition.name, definition); },
     on(name: string, handler: never) { events.set(name, handler); },
     sendMessage(message: { customType: string; content: string }, options: { triggerTurn?: boolean; deliverAs?: string }) { sent.push({ message, options }); }
-  } as never, roles({}), registry, { spawnProcess: spawn as never });
+  } as never, roles({}), registry, { spawnProcess: spawn as never, ...(activeTools ? { getActiveToolNames: () => activeTools } : {}) });
   return { registry, delegate: tools.get("jar_delegate")!, control: tools.get("jar_subagent")!, events, sent };
 };
 

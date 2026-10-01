@@ -180,11 +180,20 @@ test("jar_todo mutation results keep persisted previews bounded", async () => {
   assert.doesNotMatch(result.content[0].text, /Task 11/, "mutation result does not duplicate the full task list into session history");
 });
 
-test("working message shows the running task's active form", () => {
+test("working message preserves creative phrases even when a task is active", () => {
   const state = new WorkingState();
+  const fg = (_c: string, text: string) => text;
   state.start(0);
-  assert.match(state.view(false, (_c, t) => t, 1000, undefined, "Running the tests").message ?? "", /Running the tests….*1s.*esc to interrupt/);
-  assert.match(state.view(false, (_c, t) => t, 1000).message ?? "", /A spark remains/);
+  const message = state.view(false, fg, 1000, undefined, "Running the tests").message ?? "";
+  assert.match(message, /A spark remains….*1s.*esc to interrupt/);
+  assert.doesNotMatch(message, /Running the tests/);
+  assert.match(state.view(false, fg, 9000, "high", "Running the tests").message ?? "", /Kindling a thought….*high effort/);
+  state.toolStart("read-1", "read");
+  assert.match(state.view(false, fg, 9000, undefined, "Inspecting sources").message ?? "", /Tracing light through read/);
+  state.prompt(true);
+  assert.match(state.view(false, fg, 9000, undefined, "Inspecting sources").message ?? "", /Holding the lantern for your answer/);
+  state.end();
+  assert.equal(state.view(false, fg, 9000, undefined, "Inspecting sources").message, undefined);
 });
 
 test("task dialog is keyboard-accessible, width bounded and filters without deleting another manager's state", async () => {

@@ -45,7 +45,9 @@ import { collectPrompts, openPromptSearch } from "../src/prompt-search.ts";
 import { ago, recentSessions, sessionDetails, type RecentSession } from "../src/session-gallery.ts";
 import { clearSessionBranchCache, sessionBranch } from "../src/session-branch.ts";
 import { registerChangeReview } from "../src/diff-view.ts";
-import { registerShells, SHELL_MESSAGE, shellEventMessage, ShellManager, type ShellEvent, type ShellJob } from "../src/shells.ts";
+import { registerShells, ShellManager, type ShellEvent, type ShellJob } from "../src/shells.ts";
+import { registerShellNotifications } from "../src/shell-notifications.ts";
+import { CHILD_TOOLS_ENV, childToolAllowlist, RECURSIVE_TOOLS, worktreeToolViolation } from "../src/subagent-tools.ts";
 import { hopefulWelcomeMessage, welcomeHit, welcomeLines, type WelcomeAction } from "../src/welcome.ts";
 
 const WELCOME_KEY = "pi-jar.welcome";
@@ -73,24 +75,23 @@ export default function piJar(pi: ExtensionAPI): void {
       if (messages.length !== event.messages.length) return { messages };
     });
   }
-  if (delegatedWorktree) {
-    const pathTools = new Set(["read", "edit", "write", "grep", "find", "ls"]);
-    const shellTools = new Set(["bash", "powershell", "jar_shell"]);
+  if (delegatedChild) {
+    const allowed = childToolAllowlist(process.env[CHILD_TOOLS_ENV]);
     pi.on("tool_call", (event, ctx) => {
-      if (shellTools.has(event.toolName)) {
-        return { block: true, reason: "Sandboxed worktree subagents cannot run shell tools." };
+      // Enforce capabilities per call as well as CLI startup. A web/MCP bootstrap must not
+      // accidentally activate unrelated tools or permit recursive orchestration.
+      if (RECURSIVE_TOOLS.has(event.toolName) || (allowed && !allowed.has(event.toolName))) {
+        return { block: true, reason: "Tool was not granted to this subagent: " + event.toolName };
       }
-      if (!pathTools.has(event.toolName)) return;
-      const input = event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {};
-      if (!workspacePathAllowed(delegatedWorktree, ctx.cwd, ".")) {
-        return { block: true, reason: "Sandboxed worktree subagent working directory is outside its workspace." };
+      if (delegatedWorktree) {
+        const reason = worktreeToolViolation(delegatedWorktree, ctx.cwd, event.toolName, event.input);
+        if (reason) return { block: true, reason };
       }
-      for (const key of ["path", "file_path", "cwd"]) {
-        const value = input[key];
-        if (typeof value === "string" && value && !workspacePathAllowed(delegatedWorktree, ctx.cwd, value, event.toolName === "read")) {
-          return { block: true, reason: `Sandboxed worktree subagent cannot access outside its workspace: ${value}` };
-        }
-      }
+    });
+    pi.on("tool_result", event => {
+      if (!allowed || event.toolName !== "web_enable") return;
+      const available = new Set(pi.getAllTools().map(tool => tool.name));
+      pi.setActiveTools([...allowed].filter(name => available.has(name)));
     });
   }
   installCompactBuiltinTools(pi);
@@ -187,14 +188,12 @@ export default function piJar(pi: ExtensionAPI): void {
   registerChangeReview(pi, () => changes, refreshChanges);
   let shells: ShellManager | undefined;
   registerShells(pi, () => shells);
+  const shellNotifications = registerShellNotifications(pi, () => shells);
   const onShellEvent = (event: ShellEvent) => {
     footerTui?.requestRender();
     if (!event.job.notify) return;
-    // Wake the agent (or queue for its current run) so it never has to poll.
-    try {
-      pi.sendMessage({ customType: SHELL_MESSAGE, content: shellEventMessage(event), display: true, details: { id: event.job.id, kind: event.kind } },
-        { triggerTurn: true, deliverAs: "followUp" });
-    } catch (error) { console.error("pi-jar: could not deliver shell event", error); }
+    // Queue compact metadata until a model boundary; observed completions are acknowledged.
+    shellNotifications.notify();
   };
   /** Footer indicators owned by pi-jar; live subagents and shells get their own rows. */
   const footerChips = () => changeCount ? [withIcon("changes", `${changeCount} file${changeCount === 1 ? "" : "s"} · /diff`)] : [];
@@ -318,9 +317,8 @@ export default function piJar(pi: ExtensionAPI): void {
     composer.setActivity(enabled ? working.phase : "idle", animations);
     try {
       if (!enabled) { workingIndicatorKey = ""; ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); return; }
-      const task = todos?.current();
       const view = working.view(animations, (color, text) => ctx.ui.theme?.fg(color, text) ?? text,
-        Date.now(), ctx.thinkingLevel, task ? task.activeForm ?? task.title : undefined);
+        Date.now(), ctx.thinkingLevel);
       ctx.ui.setWorkingMessage?.(view.message);
       const indicatorKey = `${working.phase}:${animations}`;
       if (indicatorKey !== workingIndicatorKey) {

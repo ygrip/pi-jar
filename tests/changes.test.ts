@@ -4,9 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { ChangeTracker, diffRows, lineDiff, MAX_TRACKED_BYTES, MAX_TRACKED_TOTAL_BYTES } from "../src/changes.ts";
+import { ChangeTracker, diffHunkOffsets, diffRows, diffRowsWindow, lineDiff, MAX_REVIEW_DIFF_LINES, MAX_TRACKED_BYTES, MAX_TRACKED_TOTAL_BYTES } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, readChildBaseline, writeChildBaseline } from "../src/child-baselines.ts";
-import { openDiffView, registerChangeReview, renderDiff, safeLine } from "../src/diff-view.ts";
+import { filterChanges, fullReviewRequired, fullReviewSupported, openDiffView, registerChangeReview, renderDiff, safeLine } from "../src/diff-view.ts";
 
 const plain = (_color: string, text: string) => text;
 const workspace = () => realpathSync(mkdtempSync(join(tmpdir(), "pi-jar-changes-")));
@@ -24,6 +24,9 @@ test("line diff finds minimal edits and groups them into unified hunks", () => {
   const largeBefore = Array.from({ length: 800 }, (_, i) => "old-" + i).join("\n");
   const largeAfter = Array.from({ length: 800 }, (_, i) => "new-" + i).join("\n");
   assert.equal(lineDiff(largeBefore, largeAfter), undefined, "large quadratic diffs fall back to a summary");
+  const window = diffRowsWindow(ops, 3, 2, 4);
+  assert.deepEqual(window, diffRows(ops).slice(2, 6), "windowed rows match the full unified hunk output");
+  assert.deepEqual(diffHunkOffsets(ops), [0, 8], "hunks can be navigated without building a preview row array");
 });
 
 test("tracker captures once, reports added/modified/deleted, accepts and reverts", () => {
@@ -178,12 +181,45 @@ test("in a subagent the tool_call hook shares first-edit baselines with the pare
   }
 });
 
+test("search filters file paths/status without mutating the source list", () => {
+  const files = [
+    { path: "/repo/src/auth.ts", rel: "src/auth.ts", status: "modified" as const, before: "needle", after: "", added: 0, removed: 1 },
+    { path: "/repo/docs/guide.md", rel: "docs/guide.md", status: "added" as const, before: "", after: "needle", added: 1, removed: 0 }
+  ];
+  assert.deepEqual(filterChanges(files, "AUTH").files.map(item => item.rel), ["src/auth.ts"]);
+  assert.deepEqual(filterChanges(files, "added").files.map(item => item.rel), ["docs/guide.md"]);
+  assert.deepEqual(filterChanges(files, "missing").files, []);
+  assert.deepEqual(filterChanges(files, "").files, files);
+  assert.equal(files.length, 2);
+});
+
+test("large diffs default to a summary and permit an explicitly chosen bounded full preview", () => {
+  const before = Array.from({ length: 1800 }, (_, index) => `old ${index}`).join("\n");
+  const after = Array.from({ length: 1800 }, (_, index) => `new ${index}`).join("\n");
+  const change = { path: "/repo/large.ts", rel: "large.ts", status: "modified" as const, before, after, added: 1800, removed: 1800, diff: null };
+  assert.equal(fullReviewRequired(change), true);
+  assert.equal(fullReviewSupported(change), true);
+  const summary = renderDiff(change, 100, plain);
+  assert.match(summary.join("\n"), /Summary preview/);
+  assert.match(summary.join("\n"), /Press v/);
+  const full = renderDiff(change, 100, plain, { fullReview: true, scroll: 500, rows: 20 });
+  assert.ok(full.length <= 22, "the viewport renderer returns a bounded page, not the entire diff");
+  assert.match(full.join("\n"), /Coarse preview/);
+  assert.match(full.join("\n"), /old 4/);
+  const tooMany = { ...change, before: "x\n".repeat(MAX_REVIEW_DIFF_LINES), after: "y\n".repeat(1) };
+  assert.equal(fullReviewSupported(tooMany), false);
+  assert.match(renderDiff(tooMany, 100, plain, { fullReview: true }).join("\n"), /Full review unavailable/);
+});
+
 test("rendered diff keeps indentation, strips escapes and fits the pane", () => {
   const change = { path: "/x/a.ts", rel: "a.ts", status: "modified" as const, before: "  a\n", after: "  a\n\tb\x1b[31mred\n", added: 1, removed: 0 };
   const lines = renderDiff(change, 30, plain).map(stripTerminalSequences);
   assert.ok(lines.every((line) => visibleWidth(line) <= 30));
   assert.ok(lines.some((line) => line.includes("   a")), "context keeps indentation");
   assert.ok(lines.some((line) => line.includes("+  bred")));
+  const sideBySide = renderDiff(change, 60, plain, { unified: false });
+  assert.ok(sideBySide.some(line => line.includes("│")), "split view separates original and updated columns");
+  assert.ok(sideBySide.some(line => line.includes("+")));
   assert.equal(safeLine("a\x07b"), "a·b");
 });
 
@@ -217,10 +253,18 @@ test("review overlay accepts, confirms reverts and closes when nothing is left; 
       return new Promise<void>((resolve) => { component = factory({ requestRender() {} }, { fg: plain, bold: (t: string) => t }, {}, () => { closed = true; resolve(); }); });
     } } };
     const view = openDiffView(ctx as never, tracker);
-    const rendered = component.render(100).map(stripTerminalSequences).join("\n");
-    assert.match(rendered, /± CHANGES · 2 files · \+2 −2/);
+    const rendered = component.render(160).map(stripTerminalSequences).join("\n");
+    assert.match(rendered, /± CHANGES · 2\/2 files · \+2 −2/);
+    assert.match(rendered, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/a\\.ts"), "full absolute path heads the right column");
     assert.match(rendered, /-a/);
     assert.match(rendered, /\+A/);
+    component.handleInput("/");
+    for (const key of "b.ts") component.handleInput(key);
+    const searched = component.render(100).map(stripTerminalSequences).join("\n");
+    assert.match(searched, /1\/2 files/);
+    assert.match(searched, /b\.ts/);
+    component.handleInput("\r");
+    component.handleInput("\u001b"); // clear the filter
     component.handleInput("a"); // accept a.ts
     assert.equal(tracker.count(), 1);
     component.handleInput("r");

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { signalProcessTree } from "./async-process.ts";
+import { CHILD_TOOLS_ENV, RECURSIVE_TOOLS, WEB_TOOLS } from "./subagent-tools.ts";
 import { existsSync, mkdtempSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -32,7 +33,11 @@ export const SUBAGENT_LIMIT_CHOICES = [2, 4, 6, 8, 16] as const;
 /** Read-only subagents also keep jar_todo so their checklist shows in the activity view. */
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "jar_todo", "jar_discuss"] as const;
 /** Writable worktree children deliberately have no shell: edits stay inside path-guarded file tools. */
-export const WORKTREE_TOOLS = ["read", "edit", "write", "grep", "find", "ls", "jar_todo", "jar_discuss"] as const;
+export const WORKTREE_TOOLS = ["read", "edit", "write", "multi_file_edit", "grep", "find", "ls", "jar_todo", "jar_discuss"] as const;
+const READ_ONLY_SAFE_TOOLS = new Set<string>([...READ_ONLY_TOOLS, ...WEB_TOOLS, "ffgrep", "fffind", "lsp_diagnostics", "obs_recall"]);
+const WORKTREE_SAFE_TOOLS = new Set<string>([...WORKTREE_TOOLS, ...WEB_TOOLS]);
+const allowedInMode = (mode: DelegateExecutionMode, name: string) => !RECURSIVE_TOOLS.has(name)
+  && (mode === "direct" || (mode === "worktree" ? WORKTREE_SAFE_TOOLS.has(name) : READ_ONLY_SAFE_TOOLS.has(name)));
 export type DelegateMode = "scout" | "fork" | "worktree";
 type DelegateExecutionMode = DelegateMode | "direct";
 const MAX_OUTPUT_CHARS = 12_000;
@@ -148,7 +153,7 @@ export interface DelegateForkOptions {
 
 /** CLI arguments for one subagent: fresh ephemeral session or a real Pi session fork. */
 export function delegateArgs(model: string | undefined, thinking: string | undefined, write: boolean, argv = process.argv,
-  fork?: DelegateForkOptions): string[] {
+  fork?: DelegateForkOptions, toolOverride?: readonly string[]): string[] {
   const session = fork ? ["--fork", fork.source, "--session-dir", fork.sessionDir] : ["--no-session"];
   const extensions = extensionFlags(argv);
   // Worktree cwd/session forks do not inherit project extension discovery from the parent.
@@ -159,7 +164,7 @@ export function delegateArgs(model: string | undefined, thinking: string | undef
   const args = ["--mode", "rpc", ...session, ...extensions];
   if (model) args.push("--model", model);
   if (thinking) args.push("--thinking", thinking);
-  const tools = fork?.tools ?? (!write ? READ_ONLY_TOOLS : undefined);
+  const tools = fork?.tools ?? toolOverride ?? (!write ? READ_ONLY_TOOLS : undefined);
   if (tools) args.push("--tools", tools.join(","));
   return args;
 }
@@ -341,7 +346,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     let child: ChildProcess;
     try {
       const env = { ...process.env };
-      for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, DISCUSSION_FILE_ENV, SUBAGENT_KEY_ENV, SUBAGENT_NAME_ENV]) delete env[key];
+      for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, CHILD_TOOLS_ENV, DISCUSSION_FILE_ENV, SUBAGENT_KEY_ENV, SUBAGENT_NAME_ENV]) delete env[key];
       child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"], env: { ...env, ...hooks.env, [CHILD_ENV]: "1" } });
     } catch (error) {
       run.state = "failed"; run.error = error instanceof Error ? error.message : String(error); run.endedAt = Date.now(); update();
@@ -915,7 +920,10 @@ const Parameters = Type.Object({
     task: Type.String({ description: "Task instruction. scout sees only this task; fork/worktree also inherit the parent's active conversation branch." }),
     name: Type.Optional(Type.String({ description: "Short label, e.g. \"auth scout\"." })),
     role: Type.Optional(Type.String({ description: "pi-jar role override. Defaults by mode: scout→scout, fork→reviewer, worktree→worker; then role fallbacks/current model." })),
-    mode: Type.Optional(DelegateModeSchema)
+    mode: Type.Optional(DelegateModeSchema),
+    tools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), { minItems: 1, maxItems: 64, uniqueItems: true,
+      description: "Explicit child tool allowlist. scout/fork remain read-only; worktree accepts only sandbox-aware file tools. Browser/web tools may be enabled when active in the parent." })),
+    inheritTools: Type.Optional(Type.Boolean({ description: "Inherit the parent's currently active tool names, subject to mode safety restrictions. Recursive pi-jar delegation tools are always removed." }))
   }), { minItems: 1, maxItems: 16 }),
   mode: Type.Optional(DelegateModeSchema),
   write: Type.Optional(Type.Boolean({ description: "Deprecated compatibility switch. true keeps the old shared-workspace editing mode; prefer mode=\"worktree\"." }))
@@ -945,6 +953,8 @@ export interface DelegateController {
 }
 
 export interface DelegateOptions {
+  /** Snapshot names of tools active in the parent session. */
+  getActiveToolNames?: () => readonly string[];
   /** Allowed sizes: 2, 4, 6, 8, 16; defaults to 4. Read on every launch. */
   getMaxSubagents?: () => number;
   /** Shares the delegate lifecycle and capacity with scout orchestration. */
@@ -1087,11 +1097,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   const delegateTool: ToolDefinition<typeof Parameters> = {
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Start retained session-scoped subagents within the configured live pool limit and return immediately. scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Turn completions arrive as pi-jar.subagent event messages; control workers with jar_subagent. Worktree changes apply only when the moderator stops that agent.`,
+    description: `Start retained session-scoped subagents within the configured live pool limit and return immediately. scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Each task may provide an explicit tools allowlist or inheritTools=true to filter the parent's active tools by mode. Turn completions arrive as pi-jar.subagent event messages; control workers with jar_subagent. Worktree changes apply only when the moderator stops that agent.`,
     promptSnippet: "Act as moderator: delegate parallel work, then continue responding to the user while subagents run. Their turn completions arrive as pi-jar.subagent event messages; steer, pause or stop them with jar_subagent without polling.",
     promptGuidelines: [
       "When useful work can be delegated, act as the moderator: decompose, assign, monitor, resolve disagreements, and synthesize. Do not redo a delegated implementation yourself while its worker is active.",
-      "Use scout for cheap independent discovery, fork/reviewer for context-aware review, and worktree/worker for implementation. Explicit task.role overrides these mode defaults.",
+      "Use scout for cheap independent discovery, fork/reviewer for context-aware review, and worktree/worker for implementation. Explicit task.role overrides these mode defaults. Grant optional task.tools narrowly; task.inheritTools snapshots active parent tools then filters by mode. Scout/fork stay read-only; worktree only accepts path-guarded tools.",
       "Retained agents become idle after each turn. Initial and resumed turn completions arrive as pi-jar.subagent event messages, so keep responding to user steering while they work; do not poll jar_subagent peek. Reuse them with jar_subagent resume instead of spawning replacements; pause them when priorities change; stop completed workers to reconcile their worktree into /diff.",
       "Use jar_subagent ask for a brief BTW question to one worker. For agent-to-agent questions, have them use the bounded jar_discuss paper so answers stay structured and cheap.",
       "Respect the configured pool limit, including idle and paused agents. Stop agents you no longer need."
@@ -1100,6 +1110,44 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     async execute(_id, params, signal, onUpdate, ctx) {
       controllerContext = ctx;
       const requested = params.tasks;
+      const parentToolNames = (): string[] | undefined => {
+        try {
+          const supplied = options.getActiveToolNames?.();
+          if (supplied) return [...new Set(supplied.filter(name => typeof name === "string" && name.trim()).map(name => name.trim()))];
+          const tools = pi.getActiveTools?.();
+          return tools ? [...new Set(tools.filter(name => typeof name === "string" && name.trim()))] : undefined;
+        } catch { return undefined; }
+      };
+      const activeNames = parentToolNames();
+      const defaultWorktreeTools = WORKTREE_TOOLS.filter(name => name !== "multi_file_edit" || activeNames?.includes(name));
+      for (const [index, item] of requested.entries()) {
+        const mode = item.mode ?? params.mode ?? (params.write === true ? "direct" : "scout");
+        const selected = item.tools ?? (item.inheritTools && activeNames ? activeNames.filter(name =>
+          allowedInMode(mode, name)) : undefined);
+        if ((item.inheritTools || item.tools) && !activeNames) {
+          return { content: [{ type: "text", text: `Task ${index + 1}: this Pi host does not expose active tool names; configurable tools cannot be validated. Use default tools or a host with getActiveTools().` }], details: { runs: [], write: false }, isError: true };
+        }
+        if (item.inheritTools && !selected?.length) {
+          return { content: [{ type: "text", text: `Task ${index + 1}: no active tools remain after applying ${mode} safety filters. Choose explicit safe tools or use the mode defaults.` }], details: { runs: [], write: false }, isError: true };
+        }
+        if (selected) {
+          if (activeNames) {
+            const missing = selected.filter(name => !activeNames.includes(name));
+            if (missing.length) return { content: [{ type: "text", text: `Task ${index + 1}: tools are not currently active in the parent: ${missing.join(", ")}. Enable their extensions/tools first.` }], details: { runs: [], write: false }, isError: true };
+          } else if (item.inheritTools) {
+            return { content: [{ type: "text", text: `Task ${index + 1}: cannot resolve inherited tools from this Pi host.` }], details: { runs: [], write: false }, isError: true };
+          }
+          const recursive = selected.filter(name => RECURSIVE_TOOLS.has(name));
+          if (recursive.length) return { content: [{ type: "text", text: `Task ${index + 1}: recursive delegation tools are never available to subagents: ${recursive.join(", ")}.` }], details: { runs: [], write: false }, isError: true };
+          if ((mode === "scout" || mode === "fork") && selected.some(name => !READ_ONLY_SAFE_TOOLS.has(name))) {
+            return { content: [{ type: "text", text: `Task ${index + 1}: ${mode} is read-only; remove edit/write/shell tools or use mode="worktree" for sandboxed code changes.` }], details: { runs: [], write: false }, isError: true };
+          }
+          if (mode === "worktree") {
+            const unsafe = selected.filter(name => !WORKTREE_SAFE_TOOLS.has(name));
+            if (unsafe.length) return { content: [{ type: "text", text: `Task ${index + 1}: worktree cannot safely use tools outside its path-guarded allowlist: ${unsafe.join(", ")}. Arbitrary extension tools remain disabled unless the worktree boundary validates them.` }], details: { runs: [], write: false }, isError: true };
+          }
+        }
+      }
       const maximum = maxSubagents();
       const releaseReservation = registry.reserve(requested.length, maximum);
       if (!releaseReservation) {
@@ -1112,8 +1160,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       let available = new Set<string>();
       try { available = new Set(ctx.modelRegistry.getAvailable().map((model) => model.provider + "/" + model.id)); } catch { /* current model remains the fallback */ }
       const thinkingByRun = new Map<number, string | undefined>();
+      const toolsByRun = new Map<number, readonly string[] | undefined>();
       const runs: DelegateRun[] = requested.map((item, index) => {
         const mode: DelegateExecutionMode = item.mode ?? defaultMode;
+        toolsByRun.set(index + 1, item.tools ?? (item.inheritTools && activeNames ? activeNames.filter(name =>
+          allowedInMode(mode, name)) : mode === "worktree" ? defaultWorktreeTools : undefined));
         const role = cleanText(item.role ?? roleForMode(mode), 32) || roleForMode(mode);
         const candidates = [...roleCandidates(role), ...roleCandidates("default")];
         const selected = candidates.find((candidate) => available.has(candidate.provider + "/" + candidate.model));
@@ -1237,6 +1288,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           [SUBAGENT_KEY_ENV]: `delegate-${id}-${run.index}`,
           [SUBAGENT_NAME_ENV]: run.name
         };
+        const effectiveTools = toolsByRun.get(run.index) ?? (run.mode === "worktree" ? WORKTREE_TOOLS : run.mode === "direct" ? undefined : READ_ONLY_TOOLS);
+        if (effectiveTools) env[CHILD_TOOLS_ENV] = JSON.stringify(effectiveTools);
         const discussion = options.discussionFile?.();
         if (discussion) env[DISCUSSION_FILE_ENV] = discussion;
         const hooks: DelegateHooks = {};
@@ -1246,7 +1299,9 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           try {
             const sessionDir = mkdtempSync(join(tmpdir(), "pi-jar-fork-"));
             sessionDirs.set(run.index, sessionDir);
-            fork = { source: parentSession!, sessionDir, ...(run.mode === "worktree" ? { tools: WORKTREE_TOOLS } : {}) };
+            const requestedTools = toolsByRun.get(run.index);
+            fork = { source: parentSession!, sessionDir,
+              ...((run.mode === "worktree" || run.mode === "fork") ? { tools: requestedTools ?? (run.mode === "worktree" ? WORKTREE_TOOLS : READ_ONLY_TOOLS) } : {}) };
           } catch (error) {
             failBeforeStart(run, error);
             return failedHandle();
@@ -1270,7 +1325,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           hooks.edited = edited;
         }
         hooks.env = env;
-        return startDelegate(run, delegateArgs(run.model, thinkingByRun.get(run.index), write, process.argv, fork),
+        return startDelegate(run, delegateArgs(run.model, thinkingByRun.get(run.index), write, process.argv, fork,
+          run.mode === "scout" ? toolsByRun.get(run.index) : undefined),
           delegatePrompt(run.task, write, run.mode), cwd, controllers[index]!.signal, update, options.spawnProcess, hooks, run.mode !== "direct");
         };
         let handle: DelegateHandle;

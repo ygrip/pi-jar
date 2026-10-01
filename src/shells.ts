@@ -31,6 +31,8 @@ export interface ShellJob {
   signal?: string | null;
   error?: string;
   watch?: string;
+  purpose?: "task" | "service";
+  complete?: boolean;
   matched?: string;
   /** Wake the agent when the pattern matches or the process ends. */
   notify: boolean;
@@ -39,7 +41,7 @@ export interface ShellJob {
   dropped: number;
 }
 export type ShellEvent = { kind: "match" | "exit"; job: ShellJob };
-export interface StartOptions { command: string; cwd: string; name?: string; watch?: string; notify?: boolean }
+export interface StartOptions { command: string; cwd: string; name?: string; watch?: string; notify?: boolean; purpose?: "task" | "service" }
 
 const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 
@@ -57,6 +59,9 @@ interface ShellEntry {
 export class ShellManager {
   private jobs = new Map<string, ShellEntry>();
   private next = 1;
+  private pending = new Map<string, ShellEvent>();
+  private listeners = new Set<() => void>();
+  private disposed = false;
   private lineChars = new Map<string, number>();
   private readonly onEvent: (event: ShellEvent) => void;
   private readonly spawnShell: typeof spawn;
@@ -72,6 +77,44 @@ export class ShellManager {
     });
   }
   get(id: string): ShellJob | undefined { const entry = this.jobs.get(id); return entry && { ...entry.job, lines: [...entry.job.lines] }; }
+  acknowledge(ids: readonly string[]): void { for (const id of ids) this.pending.delete(id); }
+  takeNotifications(): ShellEvent[] { const events = [...this.pending.values()]; this.pending.clear(); return events; }
+  restoreNotifications(events: readonly ShellEvent[]): void {
+    for (const event of events) if (this.jobs.has(event.job.id) && !this.pending.has(event.job.id)) this.pending.set(event.job.id, event);
+  }
+  pendingNotifications(): number { return this.pending.size; }
+  verificationPending(): Array<Omit<ShellJob, "lines">> {
+    return [...this.jobs.values()].filter(entry => !entry.finished && entry.job.purpose !== "service").map(({ job }) => {
+      const { lines: _lines, ...summary } = job;
+      return summary;
+    });
+  }
+  private emitEvent(kind: ShellEvent["kind"], job: ShellJob): void {
+    if (!this.jobs.has(job.id) || this.disposed) return;
+    // Terminal state supersedes readiness; queue metadata only, not duplicated log buffers.
+    if (job.notify) this.pending.set(job.id, { kind, job: { ...job, lines: [] } });
+    this.onEvent({ kind, job: { ...job, lines: job.lines.slice(-20) } });
+  }
+  async wait(ids: readonly string[], timeoutMs = 1000, signal?: AbortSignal): Promise<boolean> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 30_000) throw new Error("waitMs must be between 0 and 30000");
+    for (const id of ids) if (!this.jobs.has(id)) throw new Error("no shell " + id);
+    if (this.disposed) throw new Error("shell session disposed");
+    if (signal?.aborted) throw signal.reason ?? new Error("wait cancelled");
+    const ready = () => ids.every(id => this.jobs.get(id)?.finished === true);
+    if (ready() || timeoutMs === 0) return ready();
+    return new Promise<boolean>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); this.listeners.delete(check); signal?.removeEventListener("abort", abort); };
+      const check = () => {
+        if (this.disposed || ids.some(id => !this.jobs.has(id))) { cleanup(); reject(new Error("shell session disposed or result expired")); }
+        else if (ready()) { cleanup(); resolve(true); }
+      };
+      const abort = () => { cleanup(); reject(signal?.reason ?? new Error("wait cancelled")); };
+      const timer = setTimeout(() => { cleanup(); resolve(false); }, timeoutMs);
+      this.listeners.add(check);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort(); else check();
+    });
+  }
   running(): number {
     let count = 0;
     for (const { job } of this.jobs.values()) if (job.status === "running") count++;
@@ -79,6 +122,7 @@ export class ShellManager {
   }
 
   start(options: StartOptions): ShellJob {
+    if (this.disposed) throw new Error("shell session disposed");
     const command = options.command.trim();
     if (!command) throw new Error("command is required");
     if (this.running() >= MAX_RUNNING_SHELLS) throw new Error(`at most ${MAX_RUNNING_SHELLS} shells can run at once; kill one first`);
@@ -90,7 +134,7 @@ export class ShellManager {
     this.prune();
     const id = "s" + this.next++;
     const job: ShellJob = { id, name: cleanText(options.name || command, 40), command, cwd: options.cwd, startedAt: Date.now(), status: "running",
-      notify: options.notify ?? true, lines: [], dropped: 0, ...(options.watch ? { watch: options.watch } : {}) };
+      notify: options.notify ?? true, complete: false, purpose: options.purpose ?? (options.watch ? "service" : "task"), lines: [], dropped: 0, ...(options.watch ? { watch: options.watch } : {}) };
     const entry: ShellEntry = { job, partial: "", ...(pattern ? { pattern } : {}) };
     this.jobs.set(id, entry);
     this.lineChars.set(id, 0);
@@ -123,6 +167,8 @@ export class ShellManager {
     child.once("exit", (code, signal) => {
       if (entry.finished) return;
       if (job.status === "running") job.status = "exited";
+      job.exitCode = code;
+      job.signal = signal;
       job.endedAt ??= Date.now();
       // Grandchildren may keep stdio open after the shell exits. Drain briefly, then reclaim
       // the entire group and emit exactly one terminal event even if close never arrives.
@@ -162,20 +208,22 @@ export class ShellManager {
     }
     if (entry.pattern && !job.matched && entry.pattern.test(line)) {
       job.matched = line;
-      this.onEvent({ kind: "match", job: { ...job, lines: job.lines.slice(-20) } });
+      this.emitEvent("match", job);
     }
   }
 
   private finish(entry: ShellEntry): void {
     if (entry.finished) return;
     entry.finished = true;
+    entry.job.complete = true;
     entry.job.endedAt ??= Date.now();
     clearTimeout(entry.timer);
     clearTimeout(entry.closeTimer);
     if (entry.child) signalProcessTree(entry.child);
     entry.child?.stdout?.destroy?.();
     entry.child?.stderr?.destroy?.();
-    this.onEvent({ kind: "exit", job: { ...entry.job, lines: entry.job.lines.slice(-20) } });
+    this.emitEvent("exit", entry.job);
+    for (const listener of [...this.listeners]) listener();
     this.onChange?.();
   }
 
@@ -213,10 +261,14 @@ export class ShellManager {
     for (const { job } of finished.slice(0, Math.max(0, this.jobs.size - MAX_KEPT_SHELLS + 1))) {
       this.jobs.delete(job.id);
       this.lineChars.delete(job.id);
+      this.pending.delete(job.id);
     }
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.pending.clear();
+    for (const listener of [...this.listeners]) listener();
     for (const id of this.jobs.keys()) { try { this.kill(id); } catch { /* already gone */ } }
     this.jobs.clear();
     this.lineChars.clear();
@@ -230,7 +282,7 @@ export const elapsed = (span: { startedAt: number; endedAt?: number }, now = Dat
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 };
 export const shellState = (job: ShellMeta | ShellJob) => job.status === "running" ? "running"
-  : job.status === "exited" ? `exited ${job.exitCode ?? "?"}` : job.status === "failed" ? `failed: ${cleanText(job.error ?? "", 60)}` : "killed";
+  : job.status === "exited" ? `exited ${job.exitCode ?? "?"}${job.complete === false ? " (draining)" : ""}` : job.status === "failed" ? `failed: ${cleanText(job.error ?? "", 60)}` : "killed";
 export const describe = (job: ShellMeta | ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
 const boundedTail = (lines: readonly string[], limit = MAX_TOOL_OUTPUT_CHARS): string => {
   let size = 0;
@@ -258,12 +310,15 @@ export function shellEventMessage(event: ShellEvent): string {
 }
 
 const Parameters = Type.Object({
-  action: Type.Unsafe<"start" | "list" | "output" | "kill">({ type: "string", enum: ["start", "list", "output", "kill"] }),
+  action: Type.Unsafe<"start" | "list" | "peek" | "wait" | "output" | "kill">({ type: "string", enum: ["start", "list", "peek", "wait", "output", "kill"] }),
   command: Type.Optional(Type.String({ description: "Shell command to run in the background (start)." })),
   name: Type.Optional(Type.String({ description: "Short label, e.g. \"dev server\"." })),
   watch: Type.Optional(Type.String({ description: "Regex; when a line matches you are woken once, e.g. \"ready on|error\"." })),
   notify: Type.Optional(Type.Boolean({ description: "Wake you when the pattern matches or the process ends (default true)." })),
-  id: Type.Optional(Type.String({ description: "Shell id for output/kill, e.g. s1." })),
+  purpose: Type.Optional(Type.Union([Type.Literal("task"), Type.Literal("service")], { description: "task is finite and must be checked before claiming completion; service is intentionally long-lived (default with watch)." })),
+  id: Type.Optional(Type.String({ description: "Shell id for output/kill/wait/peek, e.g. s1." })),
+  ids: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: "Selected ids for wait/peek. Omit to inspect all jobs or wait for finite tasks only." })),
+  waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 30000, description: "Bounded event-driven wait (default 1000ms, maximum 30000). Esc cancels the wait, not the shell." })),
   lines: Type.Optional(Type.Number({ description: "How many trailing output lines to return (default 40, max 400)." }))
 });
 
@@ -272,36 +327,49 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
   pi.registerTool({
     name: SHELL_TOOL,
     label: "shell",
-    description: "Run long-lived commands (dev servers, watchers, long test runs) in the background. start returns immediately; you are woken when an optional watch pattern matches or the process exits. Use output to read recent lines and kill to stop it.",
+    description: "Run background jobs. start returns immediately; notifications are compact and coalesced. peek reads status, wait checks selected tasks with a bounded event-driven wait, output loads logs and kill stops a process. Observed results are acknowledged so stale notifications do not replay. Verify relevant checks before claiming completion; do not wait for long-lived services.",
     promptSnippet: "Use jar_shell for long-running or never-ending commands instead of blocking bash.",
     promptGuidelines: [
       "Use jar_shell start for servers, watchers and slow commands; set watch to a regex for the line you are waiting for (e.g. \"listening|ready|error\").",
-      "Do not poll: after starting, continue other work or end your turn; a message wakes you when the watch matches or the process ends. Kill shells you no longer need."
+      "Do not poll: work while commands run, then use wait with explicit ids for relevant checks before the final summary. A bounded wait returns pending jobs honestly; never claim success without their exit codes. Do not wait for services/watchers. output, peek, list and wait acknowledge observed events, preventing stale replay.",
+      "Notifications contain coalesced status, not log dumps. Inspect output only for relevant diagnostics. Mark never-ending jobs purpose: service and kill shells you no longer need."
     ],
     parameters: Parameters,
-    async execute(_id, params, _signal, _update, ctx) {
+    async execute(_id, params, signal, _update, ctx) {
       const manager = shells();
       const reply = (text: string) => ({ content: [{ type: "text" as const, text: text.slice(0, MAX_TOOL_OUTPUT_CHARS) }], details: {
-        jobs: (manager?.summaries() ?? []).map((job) => ({ id: job.id, name: job.name, status: job.status, pid: job.pid, exitCode: job.exitCode }))
+        jobs: (manager?.summaries() ?? []).map((job) => ({ id: job.id, name: job.name, status: job.status, purpose: job.purpose, complete: job.complete, pid: job.pid, exitCode: job.exitCode })),
+        pendingNotifications: manager?.pendingNotifications() ?? 0
       } });
       if (!manager) return reply("Background shells are unavailable before a Pi session starts.");
       try {
         switch (params.action) {
           case "start": {
             const job = manager.start({ command: params.command ?? "", cwd: ctx.cwd, ...(params.name ? { name: params.name } : {}), ...(params.watch ? { watch: params.watch } : {}),
-              ...(params.notify !== undefined ? { notify: params.notify } : {}) });
+              ...(params.notify !== undefined ? { notify: params.notify } : {}), ...(params.purpose ? { purpose: params.purpose } : {}) });
             return reply(`Started ${describe(job)} (pid ${job.pid ?? "?"}). ${job.notify ? "You will be woken when it " + (job.watch ? "matches or " : "") + "exits." : "Notifications are off; check it with output."}`);
           }
           case "output": {
             if (!params.id) return reply("output needs an id.");
             const lines = manager.output(params.id, params.lines ?? 40);
+            manager.acknowledge([params.id]);
             return reply(`${describe(manager.get(params.id)!)}\n${lines.length ? boundedTail(lines) : "(no output yet)"}`);
           }
           case "kill":
             if (!params.id) return reply("kill needs an id.");
             return reply(manager.kill(params.id) ? `Stopping ${params.id}.` : `${params.id} is not running.`);
+          case "wait": {
+            const ids = params.ids ?? (params.id ? [params.id] : manager.summaries().filter(job => job.purpose !== "service").map(job => job.id));
+            const completed = await manager.wait(ids, params.waitMs ?? 1000, signal);
+            const jobs = manager.summaries().filter(job => ids.includes(job.id));
+            manager.acknowledge(ids);
+            return reply((completed ? "Selected jobs completed." : "Wait timed out; jobs still pending. Do not claim they passed.") + (jobs.length ? "\n" + jobs.map(describe).join("\n") : " No finite tasks selected."));
+          }
           default: {
-            const jobs = manager.summaries();
+            const ids = params.ids ?? (params.id ? [params.id] : undefined);
+            const jobs = manager.summaries().filter(job => !ids || ids.includes(job.id));
+            if (ids?.some(id => !jobs.some(job => job.id === id))) return reply("Unknown shell id in selection.");
+            manager.acknowledge(jobs.map(job => job.id));
             return reply(jobs.length ? jobs.map(describe).join("\n") : "No background shells.");
           }
         }

@@ -6,6 +6,8 @@ export const MAX_TRACKED_BYTES = 1024 * 1024;
 export const MAX_TRACKED_FILES = 200;
 /** Bound total retained baselines so a long editing session cannot pin hundreds of MiB. */
 export const MAX_TRACKED_TOTAL_BYTES = 8 * 1024 * 1024;
+/** Explicit full-review choice supports bounded matrix-free previews beyond the exact-diff budget. */
+export const MAX_REVIEW_DIFF_LINES = 100_000;
 /** Keep the quadratic fallback small; larger edits render a summary instead of allocating a huge matrix. */
 const MAX_DIFF_CELLS = 500_000;
 const MAX_DIFF_MIDDLE_LINES = 4_000;
@@ -26,6 +28,29 @@ function readText(path: string): string | null | undefined {
 }
 
 const splitLines = (text: string) => text === "" ? [] : text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+
+export function diffLineCount(text: string): number {
+  if (!text) return 0;
+  let count = 1;
+  for (let index = 0; index < text.length; index++) if (text.charCodeAt(index) === 10) count++;
+  if (text.endsWith("\n")) count--;
+  return count;
+}
+
+/** Safe O(n) fallback that preserves common prefix/suffix and clearly marks coarse replacements. */
+export function coarseLineDiff(before: string, after: string): DiffOp[] {
+  const a = splitLines(before), b = splitLines(after);
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let endA = a.length, endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA--; endB--; }
+  return [
+    ...a.slice(0, start).map(text => ({ op: " " as const, text })),
+    ...a.slice(start, endA).map(text => ({ op: "-" as const, text })),
+    ...b.slice(start, endB).map(text => ({ op: "+" as const, text })),
+    ...a.slice(endA).map(text => ({ op: " " as const, text }))
+  ];
+}
 
 /** Line diff: trims the common prefix/suffix, then an LCS over the changed middle. */
 export function lineDiff(before: string, after: string): DiffOp[] | undefined {
@@ -57,38 +82,89 @@ export function lineDiff(before: string, after: string): DiffOp[] | undefined {
 
 /** Unified hunks with `context` lines around each change. */
 export function diffRows(ops: readonly DiffOp[], context = 3): DiffRow[] {
-  const rows: DiffRow[] = [];
-  const changed = ops.map((op) => op.op !== " ");
-  let oldLine = 1, newLine = 1;
-  const positions = ops.map((op) => {
-    const at = { oldLine, newLine };
-    if (op.op !== "+") oldLine++;
-    if (op.op !== "-") newLine++;
-    return at;
-  });
-  let index = 0;
+  return diffRowsWindow(ops, context, 0, Number.MAX_SAFE_INTEGER);
+}
+
+const linePositionCache = new WeakMap<readonly DiffOp[], { old: Uint32Array; next: Uint32Array }>();
+
+type DiffHunk = { from: number; end: number; offset: number };
+const hunkCache = new WeakMap<readonly DiffOp[], { context: number; offsets: number[]; rows: number; hunks: DiffHunk[] }>();
+
+/** Logical rendered row offsets for hunk navigation, without materializing unchanged rows. */
+export function diffHunkOffsets(ops: readonly DiffOp[], context = 3): number[] {
+  const cached = hunkCache.get(ops);
+  if (cached?.context === context) return cached.offsets.slice();
+  const offsets: number[] = [];
+  const hunks: DiffHunk[] = [];
+  let rendered = 0, index = 0;
   while (index < ops.length) {
-    if (!changed[index]) { index++; continue; }
+    if (ops[index]!.op === " ") { index++; continue; }
     const from = Math.max(0, index - context);
     let to = index;
-    // Extend the hunk while the next change is within 2 × context lines.
     while (to < ops.length) {
       let next = to + 1;
-      while (next < ops.length && !changed[next]) next++;
+      while (next < ops.length && ops[next]!.op === " ") next++;
       if (next < ops.length && next - to <= context * 2) { to = next; continue; }
       break;
     }
     const end = Math.min(ops.length, to + context + 1);
-    const slice = ops.slice(from, end);
-    const oldCount = slice.filter((op) => op.op !== "+").length;
-    const newCount = slice.filter((op) => op.op !== "-").length;
-    rows.push({ kind: "hunk", text: `@@ -${positions[from]!.oldLine},${oldCount} +${positions[from]!.newLine},${newCount} @@` });
-    for (let at = from; at < end; at++) {
+    offsets.push(rendered);
+    hunks.push({ from, end, offset: rendered });
+    rendered += 1 + end - from;
+    index = end;
+  }
+  hunkCache.set(ops, { context, offsets, rows: rendered, hunks });
+  return offsets.slice();
+}
+
+export function diffRowCount(ops: readonly DiffOp[], context = 3): number {
+  if (hunkCache.get(ops)?.context !== context) diffHunkOffsets(ops, context);
+  return hunkCache.get(ops)!.rows;
+}
+
+/** Compute only the requested output window; diff operations stay indexed without a second full row array. */
+export function diffRowsWindow(ops: readonly DiffOp[], context = 3, offset = 0, limit = Number.MAX_SAFE_INTEGER): DiffRow[] {
+  const rows: DiffRow[] = [];
+  const firstRow = Math.max(0, offset);
+  const lastRow = firstRow + Math.max(0, limit);
+  if (hunkCache.get(ops)?.context !== context) diffHunkOffsets(ops, context);
+  const layout = hunkCache.get(ops)!;
+  if (firstRow >= layout.rows || lastRow <= firstRow) return rows;
+  let positions = linePositionCache.get(ops);
+  if (!positions) {
+    const old = new Uint32Array(ops.length + 1), next = new Uint32Array(ops.length + 1);
+    let oldLine = 1, newLine = 1;
+    for (let at = 0; at < ops.length; at++) {
+      const op = ops[at]!;
+      old[at] = oldLine; next[at] = newLine;
+      if (op.op !== "+") oldLine++;
+      if (op.op !== "-") newLine++;
+    }
+    old[ops.length] = oldLine;
+    next[ops.length] = newLine;
+    positions = { old, next };
+    linePositionCache.set(ops, positions);
+  }
+  // Binary-search the first intersecting hunk, then visit only visible operations. In
+  // particular, a 100k-line replacement must not slice/filter/allocate 100k rows per frame.
+  let lo = 0, hi = layout.hunks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const hunk = layout.hunks[mid]!;
+    if (hunk.offset + 1 + hunk.end - hunk.from <= firstRow) lo = mid + 1;
+    else hi = mid;
+  }
+  for (let index = lo; index < layout.hunks.length; index++) {
+    const { from, end, offset: start } = layout.hunks[index]!;
+    if (start >= lastRow) break;
+    if (start >= firstRow) rows.push({ kind: "hunk", text: `@@ -${positions.old[from]!},${positions.old[end]! - positions.old[from]!} +${positions.next[from]!},${positions.next[end]! - positions.next[from]!} @@` });
+    const visibleFrom = from + Math.max(0, firstRow - start - 1);
+    const visibleEnd = Math.min(end, from + lastRow - start - 1);
+    for (let at = visibleFrom; at < visibleEnd; at++) {
       const op = ops[at]!;
       rows.push({ kind: op.op === "+" ? "add" : op.op === "-" ? "remove" : "context", text: op.text,
-        ...(op.op !== "+" ? { oldLine: positions[at]!.oldLine } : {}), ...(op.op !== "-" ? { newLine: positions[at]!.newLine } : {}) });
+        ...(op.op !== "+" ? { oldLine: positions.old[at]! } : {}), ...(op.op !== "-" ? { newLine: positions.next[at]! } : {}) });
     }
-    index = end;
   }
   return rows;
 }
@@ -174,13 +250,9 @@ export class ChangeTracker {
       if (now === undefined) { this.drop(path); continue; }
       if (now === before) { this.dirty.delete(path); continue; }
       const ops = lineDiff(before ?? "", now ?? "");
+      const summaryOps = ops ?? coarseLineDiff(before ?? "", now ?? "");
       let added = 0, removed = 0;
-      if (ops) {
-        for (const op of ops) { if (op.op === "+") added++; else if (op.op === "-") removed++; }
-      } else {
-        added = splitLines(now ?? "").length;
-        removed = splitLines(before ?? "").length;
-      }
+      for (const op of summaryOps) { if (op.op === "+") added++; else if (op.op === "-") removed++; }
       const rel = relative(this.cwd(), path);
       const change: FileChange = {
         path, rel: rel && !rel.startsWith("..") ? rel : path,
