@@ -4,7 +4,7 @@ This is the detailed design for item 6 of the broader [Long-Session Stability an
 
 ## Status
 
-Proposed. This document describes the implementation plan for replacing Pi Jar's file-backed `jar_discuss` coordination with a parent-owned message broker. It intentionally does not implement the broker yet.
+Implemented in v0.1.9. This document preserves the design and acceptance criteria for the parent-owned in-memory broker and authenticated session-local IPC that replaced the file-backed paper. The “current” paper behavior and imperative implementation phases describe the pre-0.1.9 baseline and original proposal.
 
 ## Problem
 

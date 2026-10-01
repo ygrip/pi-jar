@@ -3,6 +3,7 @@ import test, { after } from "node:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DelegateRegistry } from "../src/delegate.ts";
 import { loadVisualSettings } from "../src/settings.ts";
 import piJar from "../extensions/index.ts";
 
@@ -113,6 +114,35 @@ test("quota waits for startup to settle, skips unsupported providers and can be 
   await command?.("quota on", ctx);
   footer?.render(80);
   assert.equal(authCalls, 1);
+  events.get("session_shutdown")?.({}, ctx);
+});
+
+test("footer shows a hibernated subagent as resumable idle, not as a failure", () => {
+  const events = new Map<string, Function>();
+  let footer: { render(width: number): string[] } | undefined;
+  let registry: DelegateRegistry | undefined;
+  const subscribe = DelegateRegistry.prototype.subscribe;
+  DelegateRegistry.prototype.subscribe = function (this: DelegateRegistry, listener: () => void) { registry ??= this; return subscribe.call(this, listener); };
+  try {
+    piJar({ on: (name: string, fn: Function) => { events.set(name, fn); }, registerCommand() {}, getCommands: () => [] } as never);
+  } finally { DelegateRegistry.prototype.subscribe = subscribe; }
+  const ctx = {
+    hasUI: true, mode: "tui", cwd: "/tmp/pi-jar", isIdle: () => true, model: { id: "model" },
+    sessionManager: { getBranch: () => [{ type: "message", message: { role: "user", content: "hi" } }] },
+    getContextUsage: () => ({ percent: 10 }),
+    ui: { setWorkingIndicator() {}, setWidget() {}, notify() {},
+      setFooter(factory?: Function) { footer = factory?.({ requestRender() {} }, theme, {
+        getExtensionStatuses: () => new Map(), getGitBranch: () => null, onBranchChange: () => () => {}
+      }); }
+    }
+  };
+  events.get("session_start")?.({}, ctx);
+  const now = Date.now();
+  registry!.add({ key: "subagent-1", discard() {},
+    run: { index: 1, name: "auth scout", task: "Inspect the auth guard", state: "hibernated", tools: 3, startedAt: now - 5000, endedAt: now } } as never);
+  const row = footer?.render(120).find((line) => line.includes("auth scout")) ?? "";
+  assert.match(row, /○ .*auth scout/, "pending glyph: it resumes on demand");
+  assert.doesNotMatch(row, /✖/);
   events.get("session_shutdown")?.({}, ctx);
 });
 

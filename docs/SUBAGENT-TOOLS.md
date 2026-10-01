@@ -21,4 +21,6 @@ Subagents use Pi's standard `--tools` allowlist. Each `jar_delegate` task can cu
 - `jar_delegate`, `jar_subagent`, and `jar_democracy` are always removed from inherited tools and rejected in explicit lists. A child cannot recursively spawn more subagents.
 - Tool capabilities are per task; a batch can mix modes and allowlists. A fork still inherits the parent's conversation context, independently of its tool list.
 
+Retained scout/fork/worktree children hibernate after 30 seconds idle: their Pi process exits, but the private child session and worktree remain for `jar_subagent resume` or `ask`. Hibernated records count against Max subagents. Unresolved worktree recovery records do not occupy a pool slot, but at most four active/recovery worktrees are admitted. `jar_subagent stop` retries reconciliation; `discard` explicitly removes an unresolved recovery workspace without applying it. On session shutdown pi-jar reports paths for worktrees it preserves on disk, including still-active worktrees that might contain edits.
+
 If configurable tools are unavailable on a Pi host, use mode defaults or upgrade to a host exposing its active tool list. Avoid inheriting every tool for convenience; grant the narrowest capability needed for the assignment.

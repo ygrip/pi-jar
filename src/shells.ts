@@ -13,9 +13,19 @@ const MAX_KEPT_SHELLS = 20;
 const MAX_LINES = 2000;
 const LINE_PRUNE_BATCH = 128;
 const MAX_LINE_CHARS = 2000;
+/** Per-job cap. Alone it would let every retained job pin ~1 MiB of logs. */
 const MAX_RETAINED_CHARS = 1024 * 1024;
+/** All jobs together. Floors below (8 live tails + 20 compact tails) stay well under it. */
+const DEFAULT_BUDGET_CHARS = 4 * 1024 * 1024;
+/** Budget pressure never trims a live job below this, so services stay observable. */
+const DEFAULT_LIVE_TAIL_CHARS = 64 * 1024;
 const MAX_TOOL_OUTPUT_CHARS = 32 * 1024;
+/** A surfaced finished job keeps exactly what one `output` call can return. */
+const COMPACT_TAIL_CHARS = MAX_TOOL_OUTPUT_CHARS;
+const MAX_OUTPUT_LINES = 400;
 const KILL_GRACE_MS = 3000;
+/** Trim 1/16 below a cap so a chatty job does not re-trim on every following line. */
+const slack = (chars: number) => chars - (chars >> 4);
 
 export type ShellStatus = "running" | "exited" | "killed" | "failed";
 export interface ShellJob {
@@ -42,6 +52,19 @@ export interface ShellJob {
 }
 export type ShellEvent = { kind: "match" | "exit"; job: ShellJob };
 export interface StartOptions { command: string; cwd: string; name?: string; watch?: string; notify?: boolean; purpose?: "task" | "service" }
+export interface ShellManagerOptions { budgetChars?: number; liveTailChars?: number }
+export interface ShellStats {
+  /** Processes still alive, including killed jobs in their grace period and draining trees. */
+  live: number;
+  finished: number;
+  retainedChars: number;
+  budgetChars: number;
+  /** Live jobs marked purpose: service — expected long-lived processes, not leftovers. */
+  services: number;
+  oldestLiveStartedAt?: number;
+  /** `pid` is reported only while the process group is alive; a finished pid may be reused. */
+  jobs: Array<{ id: string; name: string; status: ShellStatus; purpose: "task" | "service"; pid?: number; chars: number }>;
+}
 
 const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 
@@ -50,23 +73,33 @@ interface ShellEntry {
   child?: ChildProcess;
   pattern?: RegExp;
   partial: string;
+  /** Retained line characters, maintained incrementally with the manager total. */
+  chars: number;
   timer?: ReturnType<typeof setTimeout>;
   closeTimer?: ReturnType<typeof setTimeout>;
   finished?: boolean;
 }
 
-/** Long-running shell commands with bounded output and optional pattern watches. */
+/** Long-running shell commands with bounded output and optional pattern watches. Retained logs
+ * are bounded per job and globally; log pressure trims text, never processes. */
 export class ShellManager {
   private jobs = new Map<string, ShellEntry>();
   private next = 1;
   private pending = new Map<string, ShellEvent>();
   private listeners = new Set<() => void>();
   private disposed = false;
-  private lineChars = new Map<string, number>();
+  private retained = 0;
+  private readonly budgetChars: number;
+  private readonly liveTailChars: number;
   private readonly onEvent: (event: ShellEvent) => void;
   private readonly spawnShell: typeof spawn;
   onChange?: () => void;
-  constructor(onEvent: (event: ShellEvent) => void, spawnShell: typeof spawn = spawn) { this.onEvent = onEvent; this.spawnShell = spawnShell; }
+  constructor(onEvent: (event: ShellEvent) => void, spawnShell: typeof spawn = spawn, options: ShellManagerOptions = {}) {
+    this.onEvent = onEvent;
+    this.spawnShell = spawnShell;
+    this.budgetChars = Math.max(1, Math.floor(options.budgetChars ?? DEFAULT_BUDGET_CHARS));
+    this.liveTailChars = Math.max(0, Math.floor(options.liveTailChars ?? DEFAULT_LIVE_TAIL_CHARS));
+  }
 
   list(): ShellJob[] { return [...this.jobs.values()].map(({ job }) => ({ ...job, lines: [...job.lines] })); }
   /** Read by the footer on every render: one shallow copy per job, never the output lines. */
@@ -77,8 +110,17 @@ export class ShellManager {
     });
   }
   get(id: string): ShellJob | undefined { const entry = this.jobs.get(id); return entry && { ...entry.job, lines: [...entry.job.lines] }; }
-  acknowledge(ids: readonly string[]): void { for (const id of ids) this.pending.delete(id); }
-  takeNotifications(): ShellEvent[] { const events = [...this.pending.values()]; this.pending.clear(); return events; }
+  /** The agent saw these results: finished jobs drop everything but their compact summary. */
+  acknowledge(ids: readonly string[]): void {
+    for (const id of ids) { this.pending.delete(id); this.compact(id); }
+  }
+  /** Taken events are being delivered to the agent, which surfaces their results. */
+  takeNotifications(): ShellEvent[] {
+    const events = [...this.pending.values()];
+    this.pending.clear();
+    for (const event of events) this.compact(event.job.id);
+    return events;
+  }
   restoreNotifications(events: readonly ShellEvent[]): void {
     for (const event of events) if (this.jobs.has(event.job.id) && !this.pending.has(event.job.id)) this.pending.set(event.job.id, event);
   }
@@ -135,9 +177,8 @@ export class ShellManager {
     const id = "s" + this.next++;
     const job: ShellJob = { id, name: cleanText(options.name || command, 40), command, cwd: options.cwd, startedAt: Date.now(), status: "running",
       notify: options.notify ?? true, complete: false, purpose: options.purpose ?? (options.watch ? "service" : "task"), lines: [], dropped: 0, ...(options.watch ? { watch: options.watch } : {}) };
-    const entry: ShellEntry = { job, partial: "", ...(pattern ? { pattern } : {}) };
+    const entry: ShellEntry = { job, partial: "", chars: 0, ...(pattern ? { pattern } : {}) };
     this.jobs.set(id, entry);
-    this.lineChars.set(id, 0);
     // Own process group so kill() stops the whole tree (dev servers spawn children).
     const child = this.spawnShell("/bin/sh", ["-c", command], { cwd: options.cwd, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], env: process.env });
     entry.child = child;
@@ -184,32 +225,65 @@ export class ShellManager {
     return { ...job, lines: [] };
   }
 
-  private receive(entry: { job: ShellJob; pattern?: RegExp; partial: string }, text: string): void {
+  private receive(entry: ShellEntry, text: string): void {
     const parts = (entry.partial + text.replace(/\r\n/g, "\n")).split("\n");
     entry.partial = parts.pop() ?? "";
     if (entry.partial.length > MAX_LINE_CHARS) { this.push(entry, entry.partial); entry.partial = ""; }
     for (const line of parts) this.push(entry, line);
   }
 
-  private push(entry: { job: ShellJob; pattern?: RegExp }, raw: string): void {
+  private push(entry: ShellEntry, raw: string): void {
+    // Disposed jobs are forgotten while their trees wind down; late output must not be counted.
+    if (this.disposed) return;
     const line = raw.replace(ANSI, "").replace(/\r/g, "").slice(0, MAX_LINE_CHARS);
     const { job } = entry;
     job.lines.push(line);
-    this.lineChars.set(job.id, (this.lineChars.get(job.id) ?? 0) + line.length);
+    entry.chars += line.length;
+    this.retained += line.length;
     // Bound both line count and retained characters. A shell that prints very wide lines should
     // not quietly reserve several MiB forever just because it has not reached MAX_LINES yet.
-    while (job.lines.length > MAX_LINES + LINE_PRUNE_BATCH || (this.lineChars.get(job.id) ?? 0) > MAX_RETAINED_CHARS) {
-      const removed = job.lines.splice(0, Math.min(LINE_PRUNE_BATCH, job.lines.length));
-      let removedChars = 0;
-      for (const item of removed) removedChars += item.length;
-      this.lineChars.set(job.id, Math.max(0, (this.lineChars.get(job.id) ?? 0) - removedChars));
-      job.dropped += removed.length;
-      if (!removed.length) break;
-    }
+    if (job.lines.length > MAX_LINES + LINE_PRUNE_BATCH || entry.chars > MAX_RETAINED_CHARS) this.trim(entry, slack(MAX_RETAINED_CHARS), MAX_LINES);
+    if (this.retained > this.budgetChars) this.enforceBudget();
     if (entry.pattern && !job.matched && entry.pattern.test(line)) {
       job.matched = line;
       this.emitEvent("match", job);
     }
+  }
+
+  /** Drop oldest lines until at most `chars` characters and `lines` lines remain. One splice. */
+  private trim(entry: ShellEntry, chars: number, lines = Infinity): void {
+    const buffer = entry.job.lines;
+    let count = 0;
+    let released = 0;
+    while (count < buffer.length && (entry.chars - released > chars || buffer.length - count > lines)) released += buffer[count++]!.length;
+    if (!count) return;
+    buffer.splice(0, count);
+    entry.chars -= released;
+    this.retained -= released;
+    entry.job.dropped += count;
+  }
+
+  /** Over budget: shrink oldest finished jobs to their compact tail, then oldest live jobs to
+   * their protected tail, then empty finished jobs. Jobs (≤ MAX_KEPT_SHELLS) iterate oldest
+   * first; the slack target keeps this off the per-line path. Processes are never touched. */
+  private enforceBudget(): void {
+    const target = slack(this.budgetChars);
+    for (const [floor, finished] of [[COMPACT_TAIL_CHARS, true], [this.liveTailChars, false], [0, true]] as const) {
+      for (const entry of this.jobs.values()) {
+        if (this.retained <= target) return;
+        if (!!entry.finished === finished) this.trim(entry, Math.max(floor, entry.chars - (this.retained - target)));
+      }
+    }
+  }
+
+  /** Keep exit status, command, timestamps, watch match and a bounded tail once surfaced. */
+  private compact(id: string): void {
+    const entry = this.jobs.get(id);
+    if (!entry?.finished) return;
+    this.trim(entry, COMPACT_TAIL_CHARS, MAX_OUTPUT_LINES);
+    // A finished job never reads its stream or matches again; release the process handle.
+    delete entry.child;
+    delete entry.pattern;
   }
 
   private finish(entry: ShellEntry): void {
@@ -231,10 +305,32 @@ export class ShellManager {
   output(id: string, count = 40): string[] {
     const entry = this.jobs.get(id);
     if (!entry) throw new Error("no shell " + id);
-    const limit = Math.max(1, Math.min(400, Math.floor(count)));
+    const limit = Math.max(1, Math.min(MAX_OUTPUT_LINES, Math.floor(count)));
     if (!entry.partial) return entry.job.lines.slice(-limit);
     if (limit === 1) return [entry.partial];
     return [...entry.job.lines.slice(-(limit - 1)), entry.partial];
+  }
+
+  /** Diagnostics snapshot, computed on demand in one pass over ≤ MAX_KEPT_SHELLS jobs. */
+  stats(): ShellStats {
+    let live = 0;
+    let services = 0;
+    let partials = 0;
+    let oldestLiveStartedAt: number | undefined;
+    const jobs: ShellStats["jobs"] = [];
+    for (const entry of this.jobs.values()) {
+      const { job } = entry;
+      const purpose = job.purpose ?? "task";
+      partials += entry.partial.length;
+      if (!entry.finished) {
+        live++;
+        if (purpose === "service") services++;
+        if (oldestLiveStartedAt === undefined || job.startedAt < oldestLiveStartedAt) oldestLiveStartedAt = job.startedAt;
+      }
+      jobs.push({ id: job.id, name: job.name, status: job.status, purpose, chars: entry.chars + entry.partial.length, ...(!entry.finished && job.pid !== undefined ? { pid: job.pid } : {}) });
+    }
+    return { live, finished: this.jobs.size - live, retainedChars: this.retained + partials, budgetChars: this.budgetChars, services,
+      ...(oldestLiveStartedAt !== undefined ? { oldestLiveStartedAt } : {}), jobs };
   }
 
   kill(id: string): boolean {
@@ -255,13 +351,17 @@ export class ShellManager {
     return true;
   }
 
-  /** Forget finished jobs beyond the retention limit (oldest first). */
+  /** Forget finished jobs beyond the retention limit (oldest first). A killed job still in its
+   * grace period or a draining tree is alive and stays managed until it finishes. */
   private prune(): void {
-    const finished = [...this.jobs.values()].filter(({ job }) => job.status !== "running");
-    for (const { job } of finished.slice(0, Math.max(0, this.jobs.size - MAX_KEPT_SHELLS + 1))) {
-      this.jobs.delete(job.id);
-      this.lineChars.delete(job.id);
-      this.pending.delete(job.id);
+    let excess = this.jobs.size - MAX_KEPT_SHELLS + 1;
+    for (const [id, entry] of this.jobs) {
+      if (excess <= 0) return;
+      if (!entry.finished) continue;
+      this.jobs.delete(id);
+      this.retained -= entry.chars;
+      this.pending.delete(id);
+      excess--;
     }
   }
 
@@ -269,9 +369,14 @@ export class ShellManager {
     this.disposed = true;
     this.pending.clear();
     for (const listener of [...this.listeners]) listener();
-    for (const id of this.jobs.keys()) { try { this.kill(id); } catch { /* already gone */ } }
+    for (const entry of this.jobs.values()) {
+      if (entry.finished) continue;
+      // Running trees get SIGTERM plus the bounded SIGKILL grace. A draining tree (leader gone,
+      // descendants holding pipes) is reclaimed now rather than after its drain timer.
+      if (!this.kill(entry.job.id) && entry.job.status !== "killed") this.finish(entry);
+    }
     this.jobs.clear();
-    this.lineChars.clear();
+    this.retained = 0;
   }
 }
 
@@ -283,7 +388,8 @@ export const elapsed = (span: { startedAt: number; endedAt?: number }, now = Dat
 };
 export const shellState = (job: ShellMeta | ShellJob) => job.status === "running" ? "running"
   : job.status === "exited" ? `exited ${job.exitCode ?? "?"}${job.complete === false ? " (draining)" : ""}` : job.status === "failed" ? `failed: ${cleanText(job.error ?? "", 60)}` : "killed";
-export const describe = (job: ShellMeta | ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
+// Services are labelled so a long-lived process reads as intended, not as a forgotten leftover.
+export const describe = (job: ShellMeta | ShellJob) => `${job.id} · ${job.name} · ${shellState(job)} · ${elapsed(job)}${job.purpose === "service" ? " · service" : ""}${job.watch ? ` · watch /${job.watch}/${job.matched ? " matched" : ""}` : ""}`;
 const boundedTail = (lines: readonly string[], limit = MAX_TOOL_OUTPUT_CHARS): string => {
   let size = 0;
   const kept: string[] = [];

@@ -4,7 +4,7 @@ import { EventEmitter, once } from "node:events";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, writeChildBaseline } from "../src/child-baselines.ts";
@@ -28,6 +28,8 @@ const register = (registry: DelegateRegistry, spawn: unknown, options: DelegateO
   return tool!;
 };
 const quiet = { cwd: "/repo", hasUI: false, modelRegistry: { getAvailable: () => [] } };
+/** Retained scouts own a private session directory, so finalization includes real filesystem cleanup. */
+const until = async (check: () => boolean) => { for (let turn = 0; turn < 1000 && !check(); turn++) await tick(); };
 
 test("subagents run in RPC mode with the parent's extensions, read-only tools plus jar_todo, and never recurse", () => {
   const argv = ["node", "/opt/pi/cli.js", "-ne", "-e", "./extensions", "--extension=/abs/other.ts", "--tui-mode", "fullscreen"];
@@ -46,6 +48,13 @@ test("subagents run in RPC mode with the parent's extensions, read-only tools pl
     source: "/tmp/parent.jsonl", sessionDir: "/tmp/forks", tools: WORKTREE_TOOLS
   });
   assert.equal(worktree.at(-1), WORKTREE_TOOLS.join(","));
+  const resumed = delegateArgs("p/m", undefined, true, ["node", "cli"], {
+    source: "/tmp/parent.jsonl", sessionDir: "/tmp/forks", tools: WORKTREE_TOOLS, resume: "/tmp/forks/child.jsonl"
+  });
+  assert.deepEqual(resumed.slice(0, 7), ["--mode", "rpc", "--session", "/tmp/forks/child.jsonl", "--session-dir", "/tmp/forks", "--extension"],
+    "a hibernated fork continues its own session file and still loads pi-jar; it never re-forks the parent");
+  assert.ok(!resumed.includes("--fork"));
+  assert.equal(resumed.at(-1), WORKTREE_TOOLS.join(","));
   assert.ok(!WORKTREE_TOOLS.includes("bash" as never), "worktree writers deliberately have no shell");
   assert.equal(delegateArgs("p/m", undefined, false, ["node", "cli"], undefined, ["read", "web_search"]).at(-1), "read,web_search");
   const prompt = delegatePrompt("Find the auth code", false);
@@ -610,7 +619,7 @@ test("controller resume abort retires only its scout and does not return a stale
   const pending = controller.resumeScout(scout.id, "vote slowly", abort.signal);
   abort.abort();
   await assert.rejects(pending, /aborted/);
-  await tick();
+  await registry.get(scout.id)!.stop();
   assert.equal(registry.get(scout.id)!.run.state, "stopped");
   assert.equal(registry.get(scout.id)!.run.output, "");
   assert.equal(registry.retained(), 1);
@@ -655,6 +664,7 @@ test("discarded live processes hold capacity until actual exit", async () => {
 
 test("session discard racing a worktree stop never applies private edits", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-jar-discard-race-"));
+  let preserved = "";
   try {
     const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
     git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
@@ -669,12 +679,15 @@ test("session discard racing a worktree stop never applies private edits", async
     });
     const record = registry.records()[0]!;
     const stopped = registry.stop(record.key);
-    registry.clear();
+    preserved = registry.clear()[0]!;
     assert.deepEqual((await stopped)?.applied, []);
     await tick();
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "parent\n");
-    assert.equal(existsSync(fake.calls[0]!.cwd!), false);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    assert.equal(existsSync(preserved), true, "the unresolved worktree survives a racing session change");
+  } finally {
+    if (preserved) rmSync(dirname(preserved), { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 /** jar_delegate + jar_subagent on a host that records hooks and wake-up messages. */
@@ -756,7 +769,7 @@ test("initial and resumed subagent turns wake the moderator over RPC without blo
   assert.deepEqual(host.sent[1]!.options, { triggerTurn: true, deliverAs: "followUp" });
   assert.match(host.sent[1]!.message.content, /auth scout · idle[\s\S]*last: follow-up report/);
   await host.control.execute("s", { action: "stop", agent: record!.key }, undefined, undefined, quiet);
-  await tick();
+  await until(() => host.sent.length >= 3);
   t.mock.timers.tick(1000);
   assert.equal(host.sent.length, 3, "stop completes through its operation event, not a duplicate turn wake-up");
   assert.match(host.sent[2]!.message.content, /stop subagent-op-.*completed/);
@@ -812,8 +825,7 @@ test("pause and stop return receipts even when the child ignores abort", async (
   assert.deepEqual(duplicate.details, stopReceipt.details, "duplicate stop shares an operation id");
   await tick();
   t.mock.timers.tick(3000);
-  await tick();
-  await tick();
+  await until(() => record!.run.state === "stopped");
   assert.equal(record!.run.state, "stopped");
   assert.ok(host.sent.some(item => /stop subagent-op-.*completed/.test(item.message.content)), "the final handoff arrives via event");
   assert.deepEqual(fake.children[0]!.killed, ["SIGTERM"]);

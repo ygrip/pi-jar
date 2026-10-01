@@ -3,7 +3,21 @@ export interface QuotaWindow { used: number; resetsAt?: number }
 export interface Quota { fiveHour?: QuotaWindow; week?: QuotaWindow }
 
 export const QUOTA_TTL_MS = 5 * 60_000;
+/** Consecutive failures double the retry delay from the TTL up to this, so a broken lookup cannot hot-loop. */
+export const QUOTA_MAX_BACKOFF_MS = 30 * 60_000;
 export const QUOTA_PREFIX = "pi-jar.quota.";
+
+export interface QuotaProviderStats {
+  provider: QuotaProvider;
+  pending: boolean;
+  /** Consecutive failed lookups. */
+  failures: number;
+  /** Last settled lookup, if any: whether it produced a value, how long ago it started, when the next may start. */
+  ok?: boolean;
+  ageMs?: number;
+  retryInMs?: number;
+}
+export interface QuotaStats { enabled: boolean; requests: number; failures: number; providers: QuotaProviderStats[] }
 
 function windowValue(value: unknown): QuotaWindow | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -108,10 +122,16 @@ export async function fetchQuota(provider: QuotaProvider, resolveAuth: (provider
   } catch { return undefined; }
 }
 
-/** One in-flight request per provider, negative-cache failures, never show expired values. */
+/**
+ * One in-flight request per provider; failures are negative-cached with exponential backoff;
+ * expired values are never shown. Reads never start IO: renders call `get` on every frame, and
+ * lookups start only from `refresh` at session boundaries.
+ */
 export class QuotaCache {
-  private entries = new Map<QuotaProvider, { value?: Quota; expiresAt: number }>();
+  private entries = new Map<QuotaProvider, { value?: Quota; requestedAt: number; expiresAt: number; failures: number }>();
   private pending = new Map<QuotaProvider, AbortController>();
+  private requests = 0;
+  private failures = 0;
   enabled = false;
   private readonly fetcher: (provider: QuotaProvider, signal: AbortSignal) => Promise<Quota | undefined>;
   private readonly changed: () => void;
@@ -122,34 +142,54 @@ export class QuotaCache {
   get(provider: string | undefined, statuses: ReadonlyMap<string, string>, now: number): Quota | undefined {
     if (provider !== "openai-codex" && provider !== "anthropic") return undefined;
     const published = publishedQuota(statuses, provider, now);
-    if (published) {
-      this.pending.get(provider)?.abort();
-      this.pending.delete(provider);
-      return published;
-    }
+    if (published) return published;
     if (!this.enabled) return undefined;
     const cached = this.entries.get(provider);
-    if (cached && cached.expiresAt > now) return cached.value;
-    if (!this.pending.has(provider)) {
-      const controller = new AbortController();
-      this.pending.set(provider, controller);
-      // A microtask keeps IO outside the synchronous render cycle.
-      queueMicrotask(() => {
-        if (controller.signal.aborted) {
-          if (this.pending.get(provider) === controller) this.pending.delete(provider);
-          return;
-        }
-        void this.fetcher(provider, controller.signal).then((value) => {
-          if (!controller.signal.aborted) {
-            this.entries.set(provider, { value, expiresAt: Date.now() + QUOTA_TTL_MS });
-            this.changed();
-          }
-        }).catch(() => {}).finally(() => {
-          if (this.pending.get(provider) === controller) this.pending.delete(provider);
-        });
-      });
+    return cached && cached.expiresAt > now ? cached.value : undefined;
+  }
+  /** Start one background lookup when nothing fresh is cached and no retry delay is pending; true if it started. */
+  refresh(provider: string | undefined, statuses: ReadonlyMap<string, string>, now: number): boolean {
+    if (provider !== "openai-codex" && provider !== "anthropic" || !this.enabled) return false;
+    if (publishedQuota(statuses, provider, now)) {
+      // A publisher is authoritative; an authenticated fallback would only duplicate it.
+      this.pending.get(provider)?.abort();
+      this.pending.delete(provider);
+      return false;
     }
-    return undefined;
+    const cached = this.entries.get(provider);
+    if (cached && cached.expiresAt > now || this.pending.has(provider)) return false;
+    const controller = new AbortController();
+    this.pending.set(provider, controller);
+    this.requests++;
+    // A microtask keeps IO outside the caller's synchronous event handler.
+    queueMicrotask(() => {
+      if (controller.signal.aborted) {
+        if (this.pending.get(provider) === controller) this.pending.delete(provider);
+        return;
+      }
+      // A rejected lookup is a failure like an empty one: both back off instead of retrying at once.
+      void this.fetcher(provider, controller.signal).catch(() => undefined).then((value) => {
+        if (controller.signal.aborted) return;
+        const failures = value ? 0 : (this.entries.get(provider)?.failures ?? 0) + 1;
+        if (!value) this.failures++;
+        const ttl = value ? QUOTA_TTL_MS : Math.min(QUOTA_MAX_BACKOFF_MS, QUOTA_TTL_MS * 2 ** (failures - 1));
+        this.entries.set(provider, { ...(value ? { value } : {}), requestedAt: now, expiresAt: now + ttl, failures });
+        // An expired value was already hidden, so only a new value changes what renders show.
+        if (value) this.changed();
+      }).finally(() => {
+        if (this.pending.get(provider) === controller) this.pending.delete(provider);
+      });
+    });
+    return true;
+  }
+  /** Diagnostics: per-provider cache age and retry delay, computed on demand. */
+  stats(now = Date.now()): QuotaStats {
+    const providers = new Set<QuotaProvider>([...this.entries.keys(), ...this.pending.keys()]);
+    return { enabled: this.enabled, requests: this.requests, failures: this.failures, providers: [...providers].map((provider) => {
+      const entry = this.entries.get(provider);
+      return { provider, pending: this.pending.has(provider), failures: entry?.failures ?? 0,
+        ...(entry ? { ok: entry.value !== undefined, ageMs: now - entry.requestedAt, retryInMs: Math.max(0, entry.expiresAt - now) } : {}) };
+    }) };
   }
   stop(): void { for (const controller of this.pending.values()) controller.abort(); this.pending.clear(); this.entries.clear(); }
 }

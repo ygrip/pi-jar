@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { QuotaCache, fetchQuota, publishedQuota, QUOTA_TTL_MS } from "../src/quota.ts";
+import { QuotaCache, fetchQuota, publishedQuota, QUOTA_MAX_BACKOFF_MS, QUOTA_TTL_MS, type Quota } from "../src/quota.ts";
 import { collectStatuses } from "../src/status.ts";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -17,38 +17,92 @@ test("quota publisher wins, stale and malformed payloads are hidden, no JSON lea
   assert.equal(publishedQuota(statuses, "openai-codex", now), undefined);
 });
 
-test("opt-in cache fetches once only when no valid public quota and hides unsuccessful values", async () => {
+test("opt-in cache fetches once only when no valid public quota, and never from a render", async () => {
   const now = Date.now();
   const statuses = new Map([["pi-jar.quota.anthropic", JSON.stringify({ week: { used: 80 }, expiresAt: now + 20_000 })]]);
   let calls = 0;
   let changes = 0;
   const cache = new QuotaCache(async () => { calls++; return { fiveHour: { used: 4 } }; }, () => { changes++; });
+  assert.equal(cache.refresh("anthropic", new Map(), now), false);
   assert.equal(cache.get("anthropic", new Map(), now), undefined);
+  await tick();
   assert.equal(calls, 0); // disabled by default
   cache.enabled = true;
   assert.deepEqual(cache.get("anthropic", statuses, now), { week: { used: 80 } });
+  assert.equal(cache.refresh("anthropic", statuses, now), false);
   await tick();
   assert.equal(calls, 0); // publisher prevents authenticated fallback
-  assert.equal(cache.get("anthropic", new Map(), Date.now()), undefined);
-  assert.equal(cache.get("anthropic", new Map(), Date.now()), undefined);
+  for (let frame = 0; frame < 100; frame++) assert.equal(cache.get("anthropic", new Map(), now), undefined);
+  await tick();
+  assert.equal(calls, 0, "renders read the cache; they never start a lookup");
+  assert.equal(cache.refresh("anthropic", new Map(), now), true);
   await tick();
   assert.equal(calls, 1);
   assert.equal(changes, 1);
-  assert.deepEqual(cache.get("anthropic", new Map(), Date.now()), { fiveHour: { used: 4 } });
-  assert.equal(calls, 1);
+  for (let frame = 0; frame < 100; frame++) assert.deepEqual(cache.get("anthropic", new Map(), now + frame), { fiveHour: { used: 4 } });
+  assert.equal(cache.refresh("anthropic", new Map(), now + 1000), false, "a fresh value is not refetched");
+  assert.equal(cache.get("anthropic", new Map(), now + QUOTA_TTL_MS), undefined, "an expired value is hidden");
+  await tick();
+  assert.equal(calls, 1, "and an expired value is not refetched by rendering it");
   cache.stop();
   cache.enabled = false;
-  assert.equal(cache.get("anthropic", new Map(), Date.now()), undefined);
+  assert.equal(cache.get("anthropic", new Map(), now), undefined);
 });
 
-test("failed quota fetch is hidden and negative-cached", async () => {
+test("provider lookups deduplicate while one is pending; stats report pending and cache age", async () => {
+  let release: (value: Quota | undefined) => void = () => {};
   let calls = 0;
-  const cache = new QuotaCache(async () => { calls++; return undefined; }, () => {});
+  const cache = new QuotaCache(() => { calls++; return new Promise((resolve) => { release = resolve; }); }, () => {});
   cache.enabled = true;
-  cache.get("anthropic", new Map(), Date.now());
+  const now = 1_000_000;
+  assert.equal(cache.refresh("openai-codex", new Map(), now), true);
+  for (let attempt = 1; attempt < 50; attempt++) assert.equal(cache.refresh("openai-codex", new Map(), now + attempt), false);
   await tick();
-  assert.equal(cache.get("anthropic", new Map(), Date.now()), undefined);
   assert.equal(calls, 1);
+  assert.deepEqual(cache.stats(now).providers, [{ provider: "openai-codex", pending: true, failures: 0 }]);
+  release({ week: { used: 10 } });
+  await tick();
+  assert.deepEqual(cache.stats(now + 60_000), { enabled: true, requests: 1, failures: 0, providers: [
+    { provider: "openai-codex", pending: false, failures: 0, ok: true, ageMs: 60_000, retryInMs: QUOTA_TTL_MS - 60_000 }
+  ] });
+  cache.stop();
+});
+
+test("failed lookups are hidden and back off exponentially instead of hot-looping", async () => {
+  let calls = 0;
+  let failing = true;
+  let changes = 0;
+  const cache = new QuotaCache(async () => {
+    calls++;
+    if (failing) throw new Error("network down");
+    return { week: { used: 5 } };
+  }, () => { changes++; });
+  cache.enabled = true;
+  let now = 0;
+  const attempt = async () => { const started = cache.refresh("anthropic", new Map(), now); await tick(); return started; };
+  assert.equal(await attempt(), true);
+  for (let retry = 0; retry < 20; retry++) {
+    assert.equal(cache.get("anthropic", new Map(), now), undefined);
+    assert.equal(await attempt(), false);
+  }
+  assert.equal(calls, 1, "a rejected lookup is negative-cached like an empty one");
+  // Consecutive failures double the retry delay from the TTL up to the cap.
+  for (const delay of [QUOTA_TTL_MS, 2 * QUOTA_TTL_MS, 4 * QUOTA_TTL_MS, QUOTA_MAX_BACKOFF_MS, QUOTA_MAX_BACKOFF_MS]) {
+    now += delay - 1;
+    assert.equal(await attempt(), false, "still backing off");
+    now += 1;
+    assert.equal(await attempt(), true);
+  }
+  assert.equal(calls, 6);
+  assert.equal(changes, 0, "a failure changes nothing a render shows");
+  assert.equal(cache.stats(now).failures, 6);
+  assert.equal(cache.stats(now).providers[0]?.failures, 6);
+  failing = false;
+  now += QUOTA_MAX_BACKOFF_MS;
+  assert.equal(await attempt(), true);
+  assert.deepEqual(cache.get("anthropic", new Map(), now), { week: { used: 5 } });
+  assert.deepEqual(cache.stats(now).providers[0], { provider: "anthropic", pending: false, failures: 0, ok: true, ageMs: 0, retryInMs: QUOTA_TTL_MS },
+    "success resets the backoff");
   cache.stop();
 });
 
@@ -60,6 +114,7 @@ test("unsupported provider is hidden and cancelled fallback does not resolve a t
   const cache = new QuotaCache(async () => { calls++; return undefined; }, () => {});
   cache.enabled = true;
   assert.equal(cache.get("unsupported", new Map(), Date.now()), undefined);
+  assert.equal(cache.refresh("unsupported", new Map(), Date.now()), false);
   await tick();
   assert.equal(calls, 0);
   cache.stop();

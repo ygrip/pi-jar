@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. This document captures the broader follow-up plan from the long-session Pi Jar audit. The current PR documents the work and retires the obsolete `pi-jar-footer.json` compatibility path; the runtime performance changes below should land as small, independently reviewable follow-up PRs.
+Implemented in v0.1.9 alongside the legacy footer-settings cleanup. The sections below preserve the audit rationale and acceptance criteria; the delivery sequence was consolidated into this release rather than separate follow-up PRs. The optional P2 quota path was tightened with cached reads and failure backoff, while further side-usage aggregation remains measurement-dependent. The “current behavior” sections and PR A–G steps describe the pre-0.1.9 baseline and original proposal, not the shipped behavior.
 
 A separate detailed design for replacing file-backed agent discussion lives in [DISCUSSION_BROKER_PLAN.md](./DISCUSSION_BROKER_PLAN.md).
 
@@ -630,7 +630,7 @@ Diagnostics should be calculated on demand where possible and should not create 
 
 # Delivery plan
 
-Keep implementation PRs small and root-cause focused.
+The following sequence was the original design decomposition; v0.1.9 delivered PR A–F together.
 
 ## PR A: measurement and context sampling
 

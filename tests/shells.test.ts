@@ -132,3 +132,112 @@ test("shell spawn errors followed by close notify only once", () => {
   assert.equal(events.length, 1);
   assert.equal(manager.get(job.id)!.status, "failed");
 });
+
+type FakeChild = EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; exitCode: number | null; signals: string[]; kill(signal: string): void };
+/** Fake children without a pid, so signalProcessTree falls back to child.kill (never a real group). */
+function fakeShells(options?: ConstructorParameters<typeof ShellManager>[2]) {
+  const children: FakeChild[] = [];
+  const spawnFake = (() => {
+    const child: FakeChild = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null as number | null, signals: [] as string[],
+      kill(signal: string) { child.signals.push(signal); } });
+    children.push(child);
+    return child;
+  }) as never;
+  return { children, manager: new ShellManager(() => {}, spawnFake, options) };
+}
+const emitLines = (child: FakeChild, prefix: string, count: number, width: number, from = 0) =>
+  child.stdout.emit("data", Array.from({ length: count }, (_, index) => `${prefix}${from + index}:`.padEnd(width, ".")).join("\n") + "\n");
+const charsOf = (manager: ShellManager, id: string) => manager.get(id)!.lines.reduce((sum, line) => sum + line.length, 0);
+
+test("the global output budget trims oldest finished output first and keeps live tails", () => {
+  const { children, manager } = fakeShells({ budgetChars: 100_000, liveTailChars: 5_000 });
+  try {
+    const done = manager.start({ command: "build", cwd: tmpdir() });
+    emitLines(children[0], "a", 60, 1000);
+    children[0].emit("close", 0, null);
+    const live = manager.start({ command: "dev", cwd: tmpdir(), purpose: "service" });
+    emitLines(children[1], "b", 45, 1000);
+    assert.ok(manager.get(done.id)!.dropped > 0, "finished output is trimmed first");
+    assert.equal(manager.get(live.id)!.dropped, 0, "live output is untouched while finished output can pay");
+    emitLines(children[1], "b", 60, 1000, 45);
+    const other = manager.start({ command: "watch", cwd: tmpdir() });
+    emitLines(children[2], "c", 80, 1000);
+    const stats = manager.stats();
+    assert.ok(stats.retainedChars <= 100_000, `retained ${stats.retainedChars} exceeds the global budget`);
+    assert.equal(stats.retainedChars, [done, live, other].reduce((sum, job) => sum + charsOf(manager, job.id), 0), "incremental accounting matches retained lines");
+    const finished = charsOf(manager, done.id);
+    assert.ok(finished > 0 && finished <= 32 * 1024, "a finished job keeps its compact tail before live tails are cut");
+    for (const job of [live, other]) assert.ok(charsOf(manager, job.id) >= 5_000, `${job.id} keeps its protected tail`);
+    assert.match(manager.output(live.id, 1)[0]!, /^b104:/, "the newest live line survives");
+    assert.match(manager.output(other.id, 1)[0]!, /^c79:/);
+    assert.deepEqual([live, other].map(job => manager.get(job.id)!.status), ["running", "running"], "log pressure never ends a process");
+    assert.deepEqual(children.slice(1).map(child => child.signals), [[], []]);
+  } finally { manager.dispose(); }
+});
+
+test("finished jobs compact once their result is surfaced", () => {
+  const { children, manager } = fakeShells();
+  try {
+    const job = manager.start({ command: "npm test", cwd: tmpdir(), watch: "READY", purpose: "task" });
+    children[0].stdout.emit("data", "READY\n");
+    emitLines(children[0], "t", 1000, 100);
+    children[0].emit("close", 2, null);
+    assert.equal(manager.get(job.id)!.lines.length, 1001, "unsurfaced results keep their full bounded log");
+    assert.deepEqual(manager.takeNotifications().map(event => event.kind), ["exit"]);
+    const compacted = manager.get(job.id)!;
+    assert.ok(compacted.lines.length <= 400 && charsOf(manager, job.id) <= 32 * 1024);
+    assert.equal(compacted.dropped, 1001 - compacted.lines.length);
+    assert.match(compacted.lines.at(-1)!, /^t999:/);
+    assert.deepEqual([compacted.exitCode, compacted.command, compacted.matched, compacted.status], [2, "npm test", "READY", "exited"]);
+    assert.ok(compacted.endedAt! >= compacted.startedAt);
+    assert.equal(manager.stats().retainedChars, charsOf(manager, job.id));
+
+    const quiet = manager.start({ command: "lint", cwd: tmpdir(), notify: false });
+    emitLines(children[1], "q", 1000, 100);
+    manager.acknowledge([quiet.id]);
+    assert.equal(manager.get(quiet.id)!.lines.length, 1000, "acknowledging a running job does not compact it");
+    children[1].emit("close", 0, null);
+    assert.equal(manager.get(quiet.id)!.lines.length, 1000);
+    manager.acknowledge([quiet.id]);
+    assert.ok(charsOf(manager, quiet.id) <= 32 * 1024, "reading a finished result compacts it");
+  } finally { manager.dispose(); }
+});
+
+test("pruning keeps killed-in-grace jobs managed and dispose reclaims draining trees", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { children, manager } = fakeShells();
+  const stubborn = manager.start({ command: "ignore TERM", cwd: tmpdir() });
+  manager.kill(stubborn.id);
+  for (let index = 0; index < 25; index++) { manager.start({ command: "true", cwd: tmpdir() }); children.at(-1)!.emit("close", 0, null); }
+  assert.ok(manager.get(stubborn.id), "a live process is never forgotten by finished-job pruning");
+  assert.equal(manager.stats().live, 1);
+  const draining = manager.start({ command: "spawns", cwd: tmpdir() });
+  children.at(-1)!.emit("exit", 0, null);
+  assert.equal(manager.get(draining.id)!.complete, false);
+  manager.dispose();
+  assert.deepEqual(children.at(-1)!.signals, ["SIGKILL"], "dispose reclaims a draining tree immediately");
+  t.mock.timers.tick(3000);
+  assert.deepEqual(children[0]!.signals.slice(0, 2), ["SIGTERM", "SIGKILL"], "the kill grace still ends a stubborn process");
+});
+
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+test("stats report live processes, purpose and retained chars; dispose leaves nothing running", async () => {
+  const manager = new ShellManager(() => {});
+  const service = manager.start({ command: "sleep 30 & echo $!; wait", cwd: tmpdir(), name: "dev", watch: "^\\d+$" });
+  const task = manager.start({ command: "printf 'one\\ntwo\\n'", cwd: tmpdir() });
+  await waitFor(() => manager.get(task.id)!.complete === true && manager.output(service.id).length > 0);
+  const descendant = Number(manager.output(service.id, 1)[0]);
+  const stats = manager.stats();
+  assert.deepEqual({ live: stats.live, finished: stats.finished, services: stats.services, budget: stats.budgetChars, oldest: stats.oldestLiveStartedAt },
+    { live: 1, finished: 1, services: 1, budget: 4 * 1024 * 1024, oldest: service.startedAt });
+  assert.deepEqual(stats.jobs, [
+    { id: service.id, name: "dev", status: "running", purpose: "service", pid: service.pid, chars: String(descendant).length },
+    { id: task.id, name: task.name, status: "exited", purpose: "task", chars: 6 }
+  ]);
+  assert.equal(stats.retainedChars, 6 + String(descendant).length);
+  assert.ok(alive(service.pid!) && alive(descendant));
+  manager.dispose();
+  await waitFor(() => !alive(service.pid!) && !alive(descendant));
+  assert.deepEqual([manager.stats().live, manager.stats().retainedChars], [0, 0]);
+});
