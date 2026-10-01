@@ -16,7 +16,7 @@ import { openJarHistory } from "../src/history-ui.ts";
 import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
 import { GoalLoop } from "../src/goal-loop.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
-import { defaultVisualSettings, loadVisualSettings, migrateLegacySettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
+import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
 import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
@@ -641,7 +641,6 @@ export default function piJar(pi: ExtensionAPI): void {
   };
   pi.on("session_start", (_event, ctx) => {
     sideUsage.clear();
-    migrateLegacySettings(getAgentDir());
     visualSettings = loadVisualSettings(getAgentDir());
     setIconSet(visualSettings.icons);
     animations = visualSettings.animations;
