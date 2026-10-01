@@ -77,3 +77,58 @@ test("jar_shell tool starts, lists, reads and kills", async () => {
     assert.match(tool.promptGuidelines.join(" "), /Do not poll/);
   } finally { manager.dispose(); }
 });
+
+test("shell exit with inherited pipes still emits exactly one terminal event", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const child = new EventEmitter() as any;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => {};
+  child.exitCode = 0;
+  const events: ShellEvent[] = [];
+  const manager = new ShellManager(event => events.push(event), (() => child) as never);
+  const job = manager.start({ command: "test", cwd: tmpdir() });
+  child.stdout.emit("data", "partial output");
+  child.emit("exit", 0, null);
+  assert.equal(manager.running(), 0);
+  t.mock.timers.tick(250);
+  assert.deepEqual(events.map(event => event.kind), ["exit"]);
+  assert.deepEqual(manager.output(job.id), ["partial output"]);
+  child.emit("close", 0, null);
+  assert.equal(events.length, 1, "late close must not duplicate the exit notification");
+});
+
+test("kill is bounded when a shell ignores signals and never emits close", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const child = new EventEmitter() as any;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.exitCode = null;
+  const killed: string[] = [];
+  child.kill = (signal: string) => killed.push(signal);
+  const events: ShellEvent[] = [];
+  const manager = new ShellManager(event => events.push(event), (() => child) as never);
+  const job = manager.start({ command: "test", cwd: tmpdir() });
+  assert.equal(manager.kill(job.id), true);
+  assert.deepEqual(killed, ["SIGTERM"]);
+  t.mock.timers.tick(3000);
+  assert.ok(killed.includes("SIGKILL"));
+  assert.equal(events.length, 1);
+  assert.equal(manager.get(job.id)!.status, "killed");
+  assert.ok(manager.get(job.id)!.endedAt);
+});
+
+test("shell spawn errors followed by close notify only once", () => {
+  const child = new EventEmitter() as any;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.exitCode = null;
+  child.kill = () => {};
+  const events: ShellEvent[] = [];
+  const manager = new ShellManager(event => events.push(event), (() => child) as never);
+  const job = manager.start({ command: "test", cwd: tmpdir() });
+  child.emit("error", new Error("spawn failed"));
+  child.emit("close", -2, null);
+  assert.equal(events.length, 1);
+  assert.equal(manager.get(job.id)!.status, "failed");
+});

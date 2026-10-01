@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { signalProcessTree } from "./async-process.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -42,9 +43,19 @@ export interface StartOptions { command: string; cwd: string; name?: string; wat
 
 const ANSI = /\x1b\][^\x07]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
 
+interface ShellEntry {
+  job: ShellJob;
+  child?: ChildProcess;
+  pattern?: RegExp;
+  partial: string;
+  timer?: ReturnType<typeof setTimeout>;
+  closeTimer?: ReturnType<typeof setTimeout>;
+  finished?: boolean;
+}
+
 /** Long-running shell commands with bounded output and optional pattern watches. */
 export class ShellManager {
-  private jobs = new Map<string, { job: ShellJob; child?: ChildProcess; pattern?: RegExp; partial: string; timer?: ReturnType<typeof setTimeout> }>();
+  private jobs = new Map<string, ShellEntry>();
   private next = 1;
   private lineChars = new Map<string, number>();
   private readonly onEvent: (event: ShellEvent) => void;
@@ -80,14 +91,16 @@ export class ShellManager {
     const id = "s" + this.next++;
     const job: ShellJob = { id, name: cleanText(options.name || command, 40), command, cwd: options.cwd, startedAt: Date.now(), status: "running",
       notify: options.notify ?? true, lines: [], dropped: 0, ...(options.watch ? { watch: options.watch } : {}) };
-    const entry: { job: ShellJob; child?: ChildProcess; pattern?: RegExp; partial: string; timer?: ReturnType<typeof setTimeout> } = { job, partial: "", ...(pattern ? { pattern } : {}) };
+    const entry: ShellEntry = { job, partial: "", ...(pattern ? { pattern } : {}) };
     this.jobs.set(id, entry);
     this.lineChars.set(id, 0);
     // Own process group so kill() stops the whole tree (dev servers spawn children).
     const child = this.spawnShell("/bin/sh", ["-c", command], { cwd: options.cwd, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], env: process.env });
     entry.child = child;
     if (child.pid !== undefined) job.pid = child.pid;
-    const receive = (chunk: Buffer | string) => this.receive(entry, String(chunk));
+    const receive = (chunk: Buffer | string) => { if (!entry.finished) this.receive(entry, String(chunk)); };
+    child.stdout?.setEncoding?.("utf8");
+    child.stderr?.setEncoding?.("utf8");
     child.stdout?.on("data", receive);
     child.stderr?.on("data", receive);
     child.on("error", (error) => {
@@ -97,13 +110,29 @@ export class ShellManager {
       job.endedAt = Date.now();
       this.finish(entry);
     });
-    child.on("close", (code, signal) => {
+    const complete = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (entry.finished) return;
       if (entry.partial) { this.push(entry, entry.partial); entry.partial = ""; }
       if (job.status === "running") job.status = "exited";
       job.exitCode = code;
       job.signal = signal;
       job.endedAt ??= Date.now();
       this.finish(entry);
+    };
+    child.once("close", complete);
+    child.once("exit", (code, signal) => {
+      if (entry.finished) return;
+      if (job.status === "running") job.status = "exited";
+      job.endedAt ??= Date.now();
+      // Grandchildren may keep stdio open after the shell exits. Drain briefly, then reclaim
+      // the entire group and emit exactly one terminal event even if close never arrives.
+      entry.closeTimer = setTimeout(() => {
+        signalProcessTree(child);
+        child.stdout?.destroy?.();
+        child.stderr?.destroy?.();
+        complete(code, signal);
+      }, 250);
+      entry.closeTimer.unref();
     });
     this.onChange?.();
     return { ...job, lines: [] };
@@ -137,8 +166,15 @@ export class ShellManager {
     }
   }
 
-  private finish(entry: { job: ShellJob; timer?: ReturnType<typeof setTimeout> }): void {
-    if (entry.timer) clearTimeout(entry.timer);
+  private finish(entry: ShellEntry): void {
+    if (entry.finished) return;
+    entry.finished = true;
+    entry.job.endedAt ??= Date.now();
+    clearTimeout(entry.timer);
+    clearTimeout(entry.closeTimer);
+    if (entry.child) signalProcessTree(entry.child);
+    entry.child?.stdout?.destroy?.();
+    entry.child?.stderr?.destroy?.();
     this.onEvent({ kind: "exit", job: { ...entry.job, lines: entry.job.lines.slice(-20) } });
     this.onChange?.();
   }
@@ -159,13 +195,13 @@ export class ShellManager {
     if (entry.job.status !== "running" || !entry.child) return false;
     entry.job.status = "killed";
     entry.job.endedAt = Date.now();
-    const signal = (name: NodeJS.Signals) => {
-      const pid = entry.child?.pid;
-      try { if (pid && process.platform !== "win32") process.kill(-pid, name); else entry.child?.kill(name); }
-      catch { entry.child?.kill(name); }
-    };
-    signal("SIGTERM");
-    entry.timer = setTimeout(() => signal("SIGKILL"), KILL_GRACE_MS);
+    signalProcessTree(entry.child, "SIGTERM");
+    entry.timer = setTimeout(() => {
+      signalProcessTree(entry.child!);
+      entry.child?.stdout?.destroy?.();
+      entry.child?.stderr?.destroy?.();
+      this.finish(entry);
+    }, KILL_GRACE_MS);
     entry.timer.unref?.();
     this.onChange?.();
     return true;

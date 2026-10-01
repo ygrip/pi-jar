@@ -5,6 +5,7 @@ import type { ModelRoleManager } from "./model-roles.ts";
 import { askRole, type SideUsage } from "./side-model.ts";
 import { ROLE_PREFIX } from "./status.ts";
 import { sessionBranch } from "./session-branch.ts";
+import { runProcess } from "./async-process.ts";
 
 export const ADVISOR_TOOL = "jar_advisor";
 export const ADVISOR_MESSAGE = "pi-jar.advisor";
@@ -119,7 +120,13 @@ export class StuckDetector {
   private take(): boolean { if (this.gates >= GATES_PER_PROMPT) return false; this.gates++; return true; }
 }
 
-export interface AdvisorOptions { enabled: () => boolean; gates: () => boolean; usage: SideUsage }
+export interface AdvisorOptions {
+  enabled: () => boolean;
+  gates: () => boolean;
+  usage: SideUsage;
+  /** Injectable subprocess boundary for hosts/tests; defaults to bounded asynchronous execution. */
+  processRunner?: typeof runProcess;
+}
 
 /** First-class advisor: the jar_advisor tool, /advisor, and automatic gates for loops and failure streaks. */
 export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, options: AdvisorOptions) {
@@ -133,14 +140,16 @@ export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, optio
     } catch { /* status is decoration */ }
   };
 
-  const gitState = async (ctx: ExtensionContext): Promise<string> => {
+  const gitState = async (ctx: ExtensionContext, signal?: AbortSignal): Promise<string> => {
+    const git = (args: string[]) => (options.processRunner ?? runProcess)(process.env.PI_JAR_GIT_PATH?.trim() || "git", args, {
+      cwd: ctx.cwd, signal, timeoutMs: 5_000, maxOutputBytes: GIT_LIMIT
+    }).then(output => output.toString("utf8"));
     try {
-      const [st, stat] = await Promise.all([
-        pi.exec("git", ["status", "--short", "--branch"], { cwd: ctx.cwd, timeout: 5_000 }),
-        pi.exec("git", ["diff", "--stat", "HEAD"], { cwd: ctx.cwd, timeout: 5_000 })
+      const [status, diff] = await Promise.all([
+        git(["status", "--short", "--branch"]),
+        git(["diff", "--stat", "HEAD"])
       ]);
-      if (st.code !== 0) return "";
-      return (st.stdout.trim() + (stat.code === 0 && stat.stdout.trim() ? "\n" + stat.stdout.trim() : "")).slice(0, GIT_LIMIT);
+      return (status.trim() + (diff.trim() ? "\n" + diff.trim() : "")).slice(0, GIT_LIMIT);
     } catch { return ""; } // repository state is optional context; not a git repo or git missing
   };
 
@@ -149,7 +158,7 @@ export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, optio
     status(ctx, request.trigger ?? request.question ?? "reviewing the current direction");
     try {
       const conversation = transcript(sessionBranch(ctx) as readonly Entry[]);
-      return await askRole(ctx, roles, options.usage, "advisor", ADVISOR_SYSTEM, advisorPrompt(request, conversation, await gitState(ctx)), signal);
+      return await askRole(ctx, roles, options.usage, "advisor", ADVISOR_SYSTEM, advisorPrompt(request, conversation, await gitState(ctx, signal)), signal);
     } finally { if (--busy === 0) status(ctx); }
   };
 

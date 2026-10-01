@@ -1,7 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { runProcess } from "./async-process.ts";
 import {
   chmodSync,
-  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -13,10 +12,10 @@ import {
   renameSync,
   rmdirSync,
   writeFileSync,
-  symlinkSync,
   unlinkSync,
   type Stats
 } from "node:fs";
+import { chmod, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -25,6 +24,10 @@ import { MAX_TRACKED_BYTES, type ChangeTracker } from "./changes.ts";
 /** Present only in writable delegated children. The child extension treats this as its filesystem boundary. */
 export const CHILD_WORKTREE_ENV = "PI_JAR_WORKTREE_ROOT";
 const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
+const GIT_TIMEOUT_MS = 30_000;
+/** Set PI_JAR_GIT_PATH to bypass wrappers such as git-ai for pi-jar's internal plumbing. */
+export const GIT_EXECUTABLE_ENV = "PI_JAR_GIT_PATH";
+const gitExecutable = () => process.env[GIT_EXECUTABLE_ENV]?.trim() || "git";
 
 export interface DelegateWorktree {
   /** Git repository root in the parent workspace. */
@@ -42,19 +45,14 @@ export interface DelegateWorktree {
 const safeGitArgs = (cwd: string, args: string[]) => ["-C", cwd, "--literal-pathspecs", "-c", "core.hooksPath=/dev/null",
   "-c", "core.fsmonitor=false", ...args];
 
-const gitText = (cwd: string, args: string[], input?: string | Buffer): string =>
-  execFileSync("git", safeGitArgs(cwd, args), {
-    encoding: "utf8",
-    ...(input === undefined ? {} : { input }),
-    maxBuffer: MAX_GIT_OUTPUT,
-    stdio: ["pipe", "pipe", "pipe"]
-  });
+const gitText = async (cwd: string, args: string[], input?: string | Buffer, signal?: AbortSignal): Promise<string> =>
+  (await runProcess(gitExecutable(), safeGitArgs(cwd, args), {
+    cwd, input, signal, timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_GIT_OUTPUT
+  })).toString("utf8");
 
-const gitBuffer = (cwd: string, args: string[]): Buffer =>
-  execFileSync("git", safeGitArgs(cwd, args), {
-    encoding: null,
-    maxBuffer: MAX_GIT_OUTPUT,
-    stdio: ["ignore", "pipe", "pipe"]
+const gitBuffer = (cwd: string, args: string[], signal?: AbortSignal): Promise<Buffer> =>
+  runProcess(gitExecutable(), safeGitArgs(cwd, args), {
+    cwd, signal, timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_GIT_OUTPUT
   });
 
 const nulList = (value: string): string[] => value.split("\0").filter(Boolean);
@@ -144,13 +142,16 @@ function canonicalWorkspacePathAllowed(root: string, lexical: string): boolean {
   } catch { return false; }
 }
 
-const copyInto = (fromRoot: string, toRoot: string, rel: string): void => {
-  const from = resolve(fromRoot, rel);
-  const to = resolve(toRoot, rel);
-  if (!safeFilePath(fromRoot, rel) || !safeFilePath(toRoot, rel)) throw new Error("unsafe worktree path: " + rel);
-  mkdirSync(dirname(to), { recursive: true });
-  if (lstatSync(from).isSymbolicLink()) symlinkSync(readlinkSync(from), to);
-  else cpSync(from, to, { force: true, dereference: false });
+const writeSnapshot = async (root: string, rel: string, bytes: Buffer, stat: Stats): Promise<void> => {
+  const to = resolve(root, rel);
+  if (!safeFilePath(root, rel)) throw new Error("unsafe worktree path: " + rel);
+  await mkdir(dirname(to), { recursive: true });
+  // Use the bytes we hashed, not a second copy of a source the user may edit during the await.
+  if (stat.isSymbolicLink()) await symlink(bytes.toString(), to);
+  else {
+    await writeFile(to, bytes, { mode: stat.mode & 0o777 });
+    await chmod(to, stat.mode & 0o777);
+  }
 };
 
 /**
@@ -158,9 +159,9 @@ const copyInto = (fromRoot: string, toRoot: string, rel: string): void => {
  * parent's tracked modifications plus non-ignored untracked files. The parent index/branch is not
  * touched. That baseline lets multiple children run against the exact same starting filesystem.
  */
-export function createDelegateWorktree(cwd: string): DelegateWorktree {
+export async function createDelegateWorktree(cwd: string, signal?: AbortSignal): Promise<DelegateWorktree> {
   const requested = realpathSync(cwd);
-  const repoRoot = realpathSync(gitText(requested, ["rev-parse", "--show-toplevel"]).trim());
+  const repoRoot = realpathSync((await gitText(requested, ["rev-parse", "--show-toplevel"], undefined, signal)).trim());
   if (!inside(repoRoot, requested)) throw new Error("working directory is outside the git repository");
   const relCwd = relative(repoRoot, requested);
   const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-jar-worktree-")));
@@ -168,61 +169,67 @@ export function createDelegateWorktree(cwd: string): DelegateWorktree {
   let added = false;
   try {
     // Never checkout/add: they execute clean/smudge filters and alter byte baselines.
-    gitText(repoRoot, ["worktree", "add", "--no-checkout", "--detach", root, "HEAD"]);
+    await gitText(repoRoot, ["worktree", "add", "--no-checkout", "--detach", root, "HEAD"], undefined, signal);
     added = true;
-    gitText(root, ["read-tree", "--empty"]);
-    const paths = new Set(nulList(gitText(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])));
+    await gitText(root, ["read-tree", "--empty"], undefined, signal);
+    const paths = new Set(nulList(await gitText(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], undefined, signal)));
     for (const rel of paths) {
       if (!safeFilePath(repoRoot, rel)) throw new Error("unsafe snapshot path: " + rel);
       const source = resolve(repoRoot, rel);
       const stat = statIfPresent(source);
       if (!stat) continue;
       if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error("unsupported snapshot file: " + rel);
-      const bytes = stat.isSymbolicLink() ? Buffer.from(readlinkSync(source)) : readFileSync(source);
-      const oid = gitText(root, ["hash-object", "-w", "--no-filters", "--stdin"], bytes).trim();
+      const bytes = stat.isSymbolicLink() ? Buffer.from(await readlink(source)) : await readFile(source);
+      const oid = (await gitText(root, ["hash-object", "-w", "--no-filters", "--stdin"], bytes, signal)).trim();
       const mode = stat.isSymbolicLink() ? "120000" : (stat.mode & 0o111) ? "100755" : "100644";
-      gitText(root, ["update-index", "--add", "--cacheinfo", mode, oid, rel]);
-      copyInto(repoRoot, root, rel);
+      await gitText(root, ["update-index", "--add", "--cacheinfo", mode, oid, rel], undefined, signal);
+      signal?.throwIfAborted();
+      await writeSnapshot(root, rel, bytes, stat);
     }
-    const tree = gitText(root, ["write-tree"]).trim();
-    const baseline = gitText(root, ["-c", "user.name=pi-jar", "-c", "user.email=pi-jar@local",
-      "commit-tree", "--no-gpg-sign", tree, "-p", "HEAD", "-m", "pi-jar delegate baseline"]).trim();
-    gitText(root, ["update-ref", "HEAD", baseline]);
+    const tree = (await gitText(root, ["write-tree"], undefined, signal)).trim();
+    const baseline = (await gitText(root, ["-c", "user.name=pi-jar", "-c", "user.email=pi-jar@local",
+      "commit-tree", "--no-gpg-sign", tree, "-p", "HEAD", "-m", "pi-jar delegate baseline"], undefined, signal)).trim();
+    await gitText(root, ["update-ref", "HEAD", baseline], undefined, signal);
     const childCwd = relCwd ? resolve(root, relCwd) : root;
     if (!workspacePathAllowed(root, root, childCwd)) throw new Error("unsafe child working directory");
     if (!existsSync(childCwd)) mkdirSync(childCwd, { recursive: true });
     return { repoRoot, root, cwd: childCwd, baseline, tempRoot };
   } catch (error) {
     if (added) {
-      try { gitText(repoRoot, ["worktree", "remove", "--force", root]); } catch { /* best effort */ }
+      try { await gitText(repoRoot, ["worktree", "remove", "--force", root]); } catch { /* best effort */ }
     }
-    rmSync(tempRoot, { recursive: true, force: true });
+    await rm(tempRoot, { recursive: true, force: true });
     throw error;
   }
 }
 
 /** Files whose final worktree state differs from the snapshot, including new untracked files. */
-export function worktreeChangedFiles(worktree: DelegateWorktree): string[] {
-  const baselinePaths = nulList(gitText(worktree.root, ["ls-tree", "-r", "--name-only", "-z", worktree.baseline]));
-  const currentPaths = nulList(gitText(worktree.root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]));
-  return [...new Set([...baselinePaths, ...currentPaths])]
-    .filter(rel => !parentMatchesBaseline(worktree, worktree.root, rel)).sort();
+export async function worktreeChangedFiles(worktree: DelegateWorktree, signal?: AbortSignal): Promise<string[]> {
+  const baselinePaths = nulList(await gitText(worktree.root, ["ls-tree", "-r", "--name-only", "-z", worktree.baseline], undefined, signal));
+  const currentPaths = nulList(await gitText(worktree.root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], undefined, signal));
+  const changed: string[] = [];
+  for (const rel of new Set([...baselinePaths, ...currentPaths])) {
+    if (!await parentMatchesBaseline(worktree, worktree.root, rel, signal)) changed.push(rel);
+  }
+  return changed.sort();
 }
 
 type BaselineEntry = { mode: string; content: Buffer } | null;
 
-const baselineEntry = (worktree: DelegateWorktree, rel: string): BaselineEntry => {
-  const line = gitText(worktree.root, ["ls-tree", "-z", worktree.baseline, "--", rel]);
+const baselineEntry = async (worktree: DelegateWorktree, rel: string, signal?: AbortSignal): Promise<BaselineEntry> => {
+  const line = await gitText(worktree.root, ["ls-tree", "-z", worktree.baseline, "--", rel], undefined, signal);
   if (!line || line.slice(line.indexOf("\t") + 1, -1) !== rel) return null;
   const [mode, type, oid] = line.slice(0, line.indexOf("\t")).split(" ");
   if (type !== "blob" || !mode || !oid) throw new Error("unsupported baseline entry: " + rel);
-  return { mode, content: gitBuffer(worktree.root, ["cat-file", "blob", oid]) };
+  return { mode, content: await gitBuffer(worktree.root, ["cat-file", "blob", oid], signal) };
 };
 
-const parentMatchesBaseline = (worktree: DelegateWorktree, parentRoot: string, rel: string): boolean => {
+const parentMatchesBaseline = async (worktree: DelegateWorktree, parentRoot: string, rel: string, signal?: AbortSignal): Promise<boolean> =>
+  matchesBaseline(await baselineEntry(worktree, rel, signal), parentRoot, rel);
+
+const matchesBaseline = (baseline: BaselineEntry, parentRoot: string, rel: string): boolean => {
   const target = resolve(parentRoot, rel);
   if (!safeFilePath(parentRoot, rel)) return false;
-  const baseline = baselineEntry(worktree, rel);
   const stat = statIfPresent(target);
   if (!baseline) return !stat;
   if (!stat) return false;
@@ -245,17 +252,20 @@ const reviewableBytes = (bytes: Buffer): boolean => bytes.length <= MAX_TRACKED_
  * Copy a completed child's changed files back to the parent only when every target still equals the
  * baseline snapshot. The parent is therefore never overwritten after another actor changed a file.
  */
-export function applyDelegateWorktree(worktree: DelegateWorktree, parentCwd: string, files: readonly string[],
-  tracker?: ChangeTracker): string[] {
-  const parentRoot = realpathSync(gitText(parentCwd, ["rev-parse", "--show-toplevel"]).trim());
+export async function applyDelegateWorktree(worktree: DelegateWorktree, parentCwd: string, files: readonly string[],
+  tracker?: ChangeTracker, signal?: AbortSignal): Promise<string[]> {
+  const parentRoot = realpathSync((await gitText(parentCwd, ["rev-parse", "--show-toplevel"], undefined, signal)).trim());
   if (parentRoot !== worktree.repoRoot) throw new Error("parent repository changed while subagent was running");
   // Review identities follow the caller's cwd spelling (e.g. /var rather than /private/var).
   const reviewRoot = resolve(parentCwd, relative(realpathSync(parentCwd), parentRoot));
+  const baselines = new Map<string, BaselineEntry>();
   for (const rel of files) {
     if (!safeFilePath(parentRoot, rel) || statIfPresent(resolve(parentRoot, rel))?.isSymbolicLink()) {
       throw new Error("unsafe parent changed path: " + rel);
     }
-    if (!parentMatchesBaseline(worktree, parentRoot, rel)) {
+    const baseline = await baselineEntry(worktree, rel, signal);
+    baselines.set(rel, baseline);
+    if (!matchesBaseline(baseline, parentRoot, rel)) {
       throw new Error(`parent changed since delegation started: ${rel}`);
     }
     const parentStat = statIfPresent(resolve(parentRoot, rel));
@@ -315,10 +325,15 @@ export function applyDelegateWorktree(worktree: DelegateWorktree, parentCwd: str
         chmodSync(entry.replacement, after.mode & 0o777);
       }
     }
+    // No await after entering the atomic apply/rollback section: asynchronous Git calls between
+    // replacements would let parent edits or a session switch interleave with partial application.
+    signal?.throwIfAborted();
     for (const entry of staged) {
-      if (!safeFilePath(parentRoot, entry.rel) || !parentMatchesBaseline(worktree, parentRoot, entry.rel)) {
+      if (!safeFilePath(parentRoot, entry.rel) || !matchesBaseline(baselines.get(entry.rel)!, parentRoot, entry.rel)) {
         throw new Error("parent changed while preparing finalization: " + entry.rel);
       }
+    }
+    for (const entry of staged) {
       if (entry.replacement) renameSync(entry.replacement, entry.target);
       else if (statIfPresent(entry.target)) unlinkSync(entry.target);
       applied.push(entry);
@@ -349,12 +364,12 @@ export class WorktreeApplyError extends Error {
 }
 
 /** Remove a disposable worktree and its dangling snapshot commit reference. */
-export function disposeDelegateWorktree(worktree: DelegateWorktree): void {
-  try { gitText(worktree.repoRoot, ["worktree", "remove", "--force", worktree.root]); }
+export async function disposeDelegateWorktree(worktree: DelegateWorktree, signal?: AbortSignal): Promise<void> {
+  try { await gitText(worktree.repoRoot, ["worktree", "remove", "--force", worktree.root], undefined, signal); }
   catch {
-    rmSync(worktree.tempRoot, { recursive: true, force: true });
-    try { gitText(worktree.repoRoot, ["worktree", "prune"]); } catch { /* best effort */ }
+    await rm(worktree.tempRoot, { recursive: true, force: true });
+    try { await gitText(worktree.repoRoot, ["worktree", "prune"], undefined, signal); } catch { /* best effort */ }
     return;
   }
-  rmSync(worktree.tempRoot, { recursive: true, force: true });
+  await rm(worktree.tempRoot, { recursive: true, force: true });
 }

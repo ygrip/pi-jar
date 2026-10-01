@@ -85,12 +85,16 @@ test("advisor tool, /advisor and the loop gate consult the advisor role", async 
     registerTool: (tool: any) => tools.set(tool.name, tool),
     registerCommand: (name: string, spec: any) => commands.set(name, spec.handler),
     on: (name: string, handler: Function) => events.set(name, handler),
-    sendMessage: (message: any, options: any) => sent.push({ message, options }),
-    exec: async () => ({ code: 0, stdout: "## main\n M a.ts", stderr: "" })
+    sendMessage: (message: any, options: any) => sent.push({ message, options })
   };
   const roles = { resolve: (role: string) => role === "advisor" ? { provider: "p", model: "opus", thinking: "high", via: ["advisor"] } : undefined };
   const usage = new SideUsage();
-  registerAdvisor(pi as never, roles as never, { enabled: () => enabled, gates: () => true, usage });
+  registerAdvisor(pi as never, roles as never, { enabled: () => enabled, gates: () => true, usage,
+    processRunner: async (_command, _args, options) => {
+      assert.equal(options?.timeoutMs, 5000, "advisor Git reads are bounded");
+      return Buffer.from("## main\n M a.ts");
+    }
+  });
   const ctx = {
     hasUI: true, cwd: "/w", model: { provider: "p", id: "main" }, isIdle: () => true,
     ui: { notify() {}, setStatus() {} },

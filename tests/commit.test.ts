@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,10 +12,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user
 function harness(cwd: string, reply: string, edit: (text: string) => string | undefined) {
   const notices: string[] = [];
   const prompts: string[] = [];
-  const pi = { exec: async (command: string, args: string[], options: { cwd: string }) => {
-    const result = spawnSync(command, ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd: options.cwd, encoding: "utf8" });
-    return { stdout: result.stdout, stderr: result.stderr, code: result.status ?? 1, killed: false };
-  } };
+  const pi = {}; // Git executes through the real asynchronous runner, not a pi.exec test double.
   const roles = { resolve: (role: string) => role === "commit" ? { provider: "p", model: "cheap", via: ["commit"] } : undefined };
   const ctx = { hasUI: true, cwd, model: { provider: "p", id: "main" },
     ui: { notify: (message: string) => notices.push(message), confirm: async () => true, editor: async (_title: string, text: string) => edit(text) },
@@ -35,6 +32,9 @@ test("/jar commit stages on request, drafts with the commit role, and commits th
   const cwd = mkdtempSync(join(tmpdir(), "pi-jar-commit-"));
   try {
     git(cwd, "init", "-q");
+    git(cwd, "config", "user.name", "t");
+    git(cwd, "config", "user.email", "t@t");
+    git(cwd, "config", "commit.gpgsign", "false");
     writeFileSync(join(cwd, "a.txt"), "a\n");
     git(cwd, "add", "."); git(cwd, "commit", "-qm", "chore: start");
     writeFileSync(join(cwd, "a.txt"), "b\n");
@@ -51,4 +51,13 @@ test("/jar commit stages on request, drafts with the commit role, and commits th
     assert.ok(cancel.notices.includes("Commit cancelled"));
     assert.equal(git(cwd, "log", "-1", "--format=%s").trim(), "fix: change a", "an empty message commits nothing");
   } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("/jar commit respects cancellation before invoking Git or the model", async () => {
+  const h = harness(tmpdir(), "unused", text => text);
+  const controller = new AbortController();
+  controller.abort(new Error("cancel commit git"));
+  await jarCommit(h.pi, Object.assign({}, h.ctx, { signal: controller.signal }) as never, h.roles, undefined);
+  assert.equal(h.prompts.length, 0);
+  assert.ok(h.notices.some(message => /cancel commit git/.test(message)));
 });

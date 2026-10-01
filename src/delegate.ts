@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { signalProcessTree } from "./async-process.ts";
+import { existsSync, mkdtempSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -286,6 +288,7 @@ interface ChildEvent {
   id?: unknown;
   command?: unknown;
   success?: unknown;
+  data?: { disposition?: unknown };
   error?: unknown;
   method?: unknown;
   toolCallId?: unknown;
@@ -339,7 +342,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     try {
       const env = { ...process.env };
       for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, DISCUSSION_FILE_ENV, SUBAGENT_KEY_ENV, SUBAGENT_NAME_ENV]) delete env[key];
-      child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, stdio: ["pipe", "pipe", "pipe"], env: { ...env, ...hooks.env, [CHILD_ENV]: "1" } });
+      child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"], env: { ...env, ...hooks.env, [CHILD_ENV]: "1" } });
     } catch (error) {
       run.state = "failed"; run.error = error instanceof Error ? error.message : String(error); run.endedAt = Date.now(); update();
       firstResolved = true; resolveFirst(); resolveClosed(); return;
@@ -373,13 +376,22 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     const send = (command: object): boolean => {
       const stdin = child.stdin;
       if (!alive || !stdin || stdin.destroyed || stdin.writableEnded) return false;
+      // Node queues writes until drain. Bound that queue if a hung RPC child stops reading;
+      // accepted commands remain complete JSONL records, never partial/manual framing.
+      if (stdin.writableLength > 256 * 1024) return false;
       try { stdin.write(JSON.stringify(command) + "\n"); return true; } catch { return false; }
     };
     const clearTurnTimer = () => { if (turnTimer) clearTimeout(turnTimer); turnTimer = undefined; };
     const hardStop = () => {
       if (!alive) return;
-      child.kill("SIGTERM");
-      killTimer ??= setTimeout(() => { if (alive) child.kill("SIGKILL"); }, 3000);
+      signalProcessTree(child, "SIGTERM");
+      killTimer ??= setTimeout(() => {
+        // Kill the group even if its leader exited: descendants can ignore SIGTERM and keep pipes.
+        signalProcessTree(child, "SIGKILL");
+        child.stdout?.destroy?.();
+        child.stderr?.destroy?.();
+        exited(child.exitCode);
+      }, 3000);
       killTimer.unref?.();
     };
     const armTurnTimer = (delay = IDLE_TIMEOUT_MS) => {
@@ -452,6 +464,27 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     };
 
     const running = new Map<string, { entry: ToolEntry; path?: string }>();
+    const settleTurn = () => {
+      if (settled || finished) return;
+      settled = true;
+      clearTurnTimer();
+      for (const call of running.values()) {
+        call.entry.status = "error";
+        call.entry.endedAt = Date.now();
+        call.entry.rev++;
+      }
+      running.clear();
+      run.live = "";
+      run.activity = undefined;
+      run.endedAt = Date.now();
+      run.state = run.error ? "failed" : pauseRequested ? "paused" : "idle";
+      pauseRequested = false;
+      if (!firstResolved && !run.error) { firstResolved = true; resolveFirst(); }
+      resolveSettled();
+      update();
+      if (run.error) { hardStop(); finish("failed", run.error); }
+      else if (!persistent && child.stdin && !child.stdin.writableEnded) child.stdin.end();
+    };
     const line = (raw: string) => {
       if (finished || !raw.trim()) return;
       let parsed: unknown;
@@ -461,7 +494,11 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       activityAt = Date.now();
       switch (event.type) {
         case "response":
-          if (event.success !== false) return;
+          // A handled prompt starts no run, so Pi deliberately sends no agent_settled event.
+          if (event.success !== false) {
+            if (event.command === "prompt" && event.data?.disposition === "handled") settleTurn();
+            return;
+          }
           if (event.command === "prompt") { hardStop(); finish("failed", cleanText(String(event.error ?? "prompt rejected"), 300)); return; }
           pushEntry(run, { kind: "note", rev: 0, text: `${cleanText(String(event.command ?? "command"), 24)} rejected: ${cleanText(String(event.error ?? ""), 200)}` });
           update();
@@ -537,30 +574,9 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
           update();
           return;
         }
-        case "agent_settled": {
-          settled = true;
-          clearTurnTimer();
-          for (const call of running.values()) {
-            call.entry.status = "error";
-            call.entry.endedAt = Date.now();
-            call.entry.rev++;
-          }
-          running.clear();
-          run.live = "";
-          run.activity = undefined;
-          run.endedAt = Date.now();
-          run.state = run.error ? "failed" : pauseRequested ? "paused" : "idle";
-          pauseRequested = false;
-          if (!firstResolved && !run.error) {
-            firstResolved = true;
-            resolveFirst();
-          }
-          resolveSettled();
-          update();
-          if (run.error) { hardStop(); finish("failed", run.error); }
-          else if (!persistent && child.stdin && !child.stdin.writableEnded) child.stdin.end();
+        case "agent_settled":
+          settleTurn();
           return;
-        }
       }
     };
 
@@ -570,7 +586,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       let start = 0;
       for (let end = text.indexOf("\n", start); end >= 0; end = text.indexOf("\n", start)) {
         const item = buffer + text.slice(start, end);
-        if (!overflow) line(item.endsWith("\r") ? item.slice(0, -1) : item);
+        if (!overflow && item.length <= MAX_LINE_CHARS) line(item.endsWith("\r") ? item.slice(0, -1) : item);
         buffer = "";
         overflow = false;
         start = end + 1;
@@ -585,10 +601,11 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       if (closedOnce) return;
       closedOnce = true;
       alive = false;
+      if (killTimer) signalProcessTree(child, "SIGKILL");
       clearTimeout(killTimer);
       clearTimeout(closeTimer);
       if (buffer && !overflow) { line(buffer); buffer = ""; }
-      if (code === 0 && settled && !run.error) finish("done");
+      if ((closing || (code === 0 && settled)) && !run.error) finish("done");
       else finish("failed", run.error ?? (cleanText(stderr, 300) || (settled ? `exited ${code}` : `exited ${code} before finishing`)));
       if (!firstResolved) { firstResolved = true; resolveFirst(); }
       resolveClosed();
@@ -598,6 +615,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     const drainThenClose = (code: number | null) => {
       if (closedOnce || closeTimer) return;
       closeTimer = setTimeout(() => {
+        signalProcessTree(child, "SIGKILL");
         child.stdout?.destroy?.();
         child.stderr?.destroy?.();
         exited(code);
@@ -614,9 +632,8 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     child.once("exit", (code) => {
       alive = false;
       clearTurnTimer();
-      clearTimeout(killTimer);
       if (!finished) {
-        run.state = code === 0 && settled && !run.error ? "done" : "failed";
+        run.state = (closing || (code === 0 && settled)) && !run.error ? "done" : "failed";
         if (run.state === "failed") run.error ??= `exited ${code}`;
         run.activity = undefined;
         resolveSettled();
@@ -1005,7 +1022,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     return { message: { customType: "pi-jar.moderator-context", display: false, content: [
       "[PI-JAR MODERATOR MODE]",
       "You are the coordinator while retained subagents do delegated work. Decompose and route work, steer only to correct direction, use ask for terse BTW questions, and use jar_discuss for structured cross-agent Q/A.",
-      "A resumed agent wakes you with a pi-jar.subagent message when its turn ends: do not poll jar_subagent peek while you wait; end your turn or do other work.",
+      "Initial/resumed turns and asynchronous ask/pause/stop operations wake you with pi-jar.subagent events. Accepted receipts are not completion: do not poll peek or claim files applied before the final event. Keep responding to user steering or do other work.",
       "Do not duplicate work already owned by a retained subagent. Stop completed workers to obtain their handoff and reconcile worktree changes into /diff. Synthesize the final answer from their reports and evidence.",
       "Retained fleet:",
       fleet
@@ -1026,19 +1043,26 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       (raw as { customType?: string }).customType !== "pi-jar.moderator-context" || (active && index === latest)) };
   });
 
-  /** Agents resumed by the moderator: their next settled turn wakes it, so it never has to poll peek. */
+  /** Native RPC drives registry state; Pi's message bus delivers frozen completion events to the moderator. */
+  const eventBusAvailable = typeof pi.sendMessage === "function";
   const watched = new Map<string, SubagentRecord>();
-  const settledQueue = new Map<string, SubagentRecord>();
+  const settledQueue = new Map<string, { record: SubagentRecord; content: string; turn: number }>();
+  const deleteSettled = (key: string) => {
+    for (const [eventKey, event] of settledQueue) if (event.record.key === key) settledQueue.delete(eventKey);
+  };
   let notifyTimer: NodeJS.Timeout | undefined;
   const flushSettled = () => {
     notifyTimer = undefined;
-    const records = [...settledQueue.values()].filter((record) => registry.get(record.key) === record);
+    const records = [...settledQueue.values()].filter(({ record }) => registry.get(record.key) === record);
     settledQueue.clear();
     if (!records.length) return;
     try {
       pi.sendMessage?.({
-        customType: SUBAGENT_MESSAGE, display: true, details: { keys: records.map((record) => record.key) },
-        content: ["[PI-JAR SUBAGENT] A resumed turn ended. Review, then resume, ask or stop:", ...records.map(settledRecord)].join("\n\n")
+        customType: SUBAGENT_MESSAGE, display: true, details: {
+          keys: [...new Set(records.map(({ record }) => record.key))],
+          turns: records.map(({ record, turn }) => ({ key: record.key, turn }))
+        },
+        content: ["[PI-JAR SUBAGENT] A subagent turn ended. Review, then resume, ask or stop:", ...records.map(event => event.content)].join("\n\n")
       }, { triggerTurn: true, deliverAs: "followUp" });
     } catch (error) { console.error("pi-jar: could not deliver a subagent event", error); }
   };
@@ -1048,7 +1072,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       if (registry.get(key) !== record) { watched.delete(key); continue; }
       if (isRunning(record.run.state)) continue;
       watched.delete(key);
-      if (record.run.state !== "stopped") settledQueue.set(key, record);
+      if (record.run.state !== "stopped") {
+        // Freeze reports at the settled boundary. A fast resume must not overwrite a queued
+        // initial report, and multiple turns in the coalescing window must each be delivered.
+        settledQueue.set(`${key}:${record.run.resumes}`, { record, turn: record.run.resumes, content: settledRecord(record) });
+      }
     }
     if (settledQueue.size && !notifyTimer) {
       notifyTimer = setTimeout(flushSettled, NOTIFY_COALESCE_MS);
@@ -1059,12 +1087,12 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   const delegateTool: ToolDefinition<typeof Parameters> = {
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Spawn retained session-scoped subagents within the configured live pool limit. scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Retained agents become idle after a turn and are controlled with jar_subagent. Worktree changes apply only when the moderator stops that agent.`,
-    promptSnippet: "Act as moderator: delegate parallel work, inspect progress with jar_subagent peek, steer only when needed, and synthesize results instead of duplicating subagent work.",
+    description: `Start retained session-scoped subagents within the configured live pool limit and return immediately. scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Turn completions arrive as pi-jar.subagent event messages; control workers with jar_subagent. Worktree changes apply only when the moderator stops that agent.`,
+    promptSnippet: "Act as moderator: delegate parallel work, then continue responding to the user while subagents run. Their turn completions arrive as pi-jar.subagent event messages; steer, pause or stop them with jar_subagent without polling.",
     promptGuidelines: [
       "When useful work can be delegated, act as the moderator: decompose, assign, monitor, resolve disagreements, and synthesize. Do not redo a delegated implementation yourself while its worker is active.",
       "Use scout for cheap independent discovery, fork/reviewer for context-aware review, and worktree/worker for implementation. Explicit task.role overrides these mode defaults.",
-      "Retained agents become idle after each turn. Reuse them with jar_subagent resume instead of spawning replacements; pause them when priorities change; stop completed workers to reconcile their worktree into /diff.",
+      "Retained agents become idle after each turn. Initial and resumed turn completions arrive as pi-jar.subagent event messages, so keep responding to user steering while they work; do not poll jar_subagent peek. Reuse them with jar_subagent resume instead of spawning replacements; pause them when priorities change; stop completed workers to reconcile their worktree into /diff.",
       "Use jar_subagent ask for a brief BTW question to one worker. For agent-to-agent questions, have them use the bounded jar_discuss paper so answers stay structured and cheap.",
       "Respect the configured pool limit, including idle and paused agents. Stop agents you no longer need."
     ],
@@ -1166,13 +1194,13 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         firstSettled: Promise.resolve(), closed: Promise.resolve(), steer: () => false, pause: async () => false,
         resume: () => false, ask: async () => undefined, shutdown: async () => {}, alive: () => false
       });
-      const cleanupPrivate = (index: number, discardWorktree: boolean) => {
+      const cleanupPrivate = async (index: number, discardWorktree: boolean) => {
         const dir = sessionDirs.get(index);
-        if (dir) { rmSync(dir, { recursive: true, force: true }); sessionDirs.delete(index); }
+        if (dir) { await rm(dir, { recursive: true, force: true }); sessionDirs.delete(index); }
         if (discardWorktree) {
           const worktree = worktrees.get(index);
           if (worktree) {
-            try { disposeDelegateWorktree(worktree); } catch { /* best effort */ }
+            try { await disposeDelegateWorktree(worktree); } catch { /* best effort */ }
             worktrees.delete(index);
           }
         }
@@ -1185,12 +1213,20 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       };
 
       let discarded = false;
+      const markStartStopped = (run: DelegateRun) => {
+        run.state = "stopped";
+        run.error = undefined;
+        run.endedAt = Date.now();
+        update();
+      };
       handles = runs.map(failedHandle);
+      const started = new Set<number>();
       const readyResolvers: Array<() => void> = [];
       const ready = runs.map(() => new Promise<void>((resolve) => readyResolvers.push(resolve)));
-      const startRuns = () => runs.forEach((run, index) => {
+      const startRuns = async () => Promise.all(runs.map(async (run, index) => {
+        try {
         if (discarded) { run.state = "stopped"; readyResolvers[index]!(); return; }
-        const start = (): DelegateHandle => {
+        const start = async (): Promise<DelegateHandle> => {
         if ((run.mode === "fork" || run.mode === "worktree") && !parentSession) {
           failBeforeStart(run, "fork/worktree mode requires a persisted parent Pi session");
           return failedHandle();
@@ -1218,14 +1254,15 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         }
         if (run.mode === "worktree") {
           try {
-            const worktree = createDelegateWorktree(ctx.cwd);
+            const worktree = await createDelegateWorktree(ctx.cwd, controllers[index]!.signal);
             worktrees.set(run.index, worktree);
             run.workspace = worktree.root;
             cwd = worktree.cwd;
             env[CHILD_WORKTREE_ENV] = worktree.root;
           } catch (error) {
-            cleanupPrivate(run.index, true);
-            failBeforeStart(run, error);
+            await cleanupPrivate(run.index, true);
+            if (discarded || stopRequested.has(index)) markStartStopped(run);
+            else failBeforeStart(run, error);
             return failedHandle();
           }
         } else if (run.mode === "direct" && baselines) {
@@ -1237,16 +1274,31 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           delegatePrompt(run.task, write, run.mode), cwd, controllers[index]!.signal, update, options.spawnProcess, hooks, run.mode !== "direct");
         };
         let handle: DelegateHandle;
-        try { handle = start(); }
-        catch (error) { failBeforeStart(run, error); handle = failedHandle(); }
+        try { handle = await start(); }
+        catch (error) {
+          if (discarded || stopRequested.has(index)) markStartStopped(run);
+          else failBeforeStart(run, error);
+          handle = failedHandle();
+        }
         handles[index] = handle;
+        started.add(index);
         readyResolvers[index]!();
-        void handle.closed.then(() => {
-          cleanupPrivate(run.index, discarded || run.mode !== "worktree");
+        void handle.closed.then(async () => {
+          await cleanupPrivate(run.index, discarded || run.mode !== "worktree");
+          update();
+        }).catch((error) => {
+          run.error ??= "subagent cleanup failed: " + cleanText(error instanceof Error ? error.message : String(error), 240);
           update();
         });
-        if (discarded) void handle.shutdown().finally(() => cleanupPrivate(run.index, true));
-      });
+        if (discarded) void handle.shutdown().finally(() => cleanupPrivate(run.index, true))
+          .catch(error => console.error("pi-jar: subagent cleanup failed", error));
+        } catch (error) {
+          failBeforeStart(run, error);
+        } finally {
+          // Even a filesystem cleanup or decoration failure must release lifecycle waiters.
+          readyResolvers[index]!();
+        }
+      }));
 
       const stopping = new Map<number, Promise<SubagentStopReport>>();
       const stopRequested = new Set<number>();
@@ -1254,10 +1306,13 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         const existing = stopping.get(index);
         if (existing) return existing;
         stopRequested.add(index);
+        // Cancel asynchronous worktree setup as well as an already-running child before waiting
+        // for ready; otherwise stop can queue behind a stalled startup operation.
+        if (!started.has(index)) controllers[index]!.abort(STOP_REASON);
         const promise = finalizeRun(index);
         stopping.set(index, promise);
         // A reconciliation conflict is retryable after the parent drift is resolved.
-        void promise.then(() => { if (worktrees.has(runs[index]!.index)) stopping.delete(index); });
+        void promise.then(() => { if (worktrees.has(runs[index]!.index)) stopping.delete(index); }, () => { stopping.delete(index); });
         return promise;
       };
       const finalizeRun = async (index: number): Promise<SubagentStopReport> => {
@@ -1272,15 +1327,15 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         let changed: string[] = [];
         const worktree = worktrees.get(run.index);
         if (worktree && !discarded) {
-          try { changed = worktreeChangedFiles(worktree); run.filesEdited = changed; }
+          try { changed = await worktreeChangedFiles(worktree, controllers[index]!.signal); run.filesEdited = changed; }
           catch (error) { run.error = "could not inspect isolated changes: " + cleanText(String(error), 240); }
           if (changed.length && !run.error) {
             try {
-              run.appliedFiles = applyDelegateWorktree(worktree, ctx.cwd, changed, options.changes?.());
+              run.appliedFiles = await applyDelegateWorktree(worktree, ctx.cwd, changed, options.changes?.(), controllers[index]!.signal);
               if (run.appliedFiles.length) {
                 try { options.changed?.(); } catch (error) { console.error("pi-jar: could not refresh parent change UI", error); }
               }
-              disposeDelegateWorktree(worktree);
+              await disposeDelegateWorktree(worktree);
               worktrees.delete(run.index);
               run.workspace = undefined;
             } catch (error) {
@@ -1288,12 +1343,13 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
               run.error = "changes not applied: " + cleanText(error instanceof Error ? error.message : String(error), 240);
             }
           } else if (!changed.length) {
-            try { disposeDelegateWorktree(worktree); } catch { /* best effort */ }
+            try { await disposeDelegateWorktree(worktree); } catch { /* best effort */ }
             worktrees.delete(run.index);
             run.workspace = undefined;
           }
         }
-        cleanupPrivate(run.index, false);
+        await cleanupPrivate(run.index, discarded);
+        if (discarded) { run.error = undefined; run.workspace = undefined; }
         run.state = run.error ? "failed" : "stopped";
         run.endedAt ??= Date.now();
         update();
@@ -1306,39 +1362,61 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       records = runs.map((run, index) => ({
         key: `delegate-${id}-${run.index}`, batch: id, run,
         stop: () => stopRun(index),
-        pause: () => discarded || stopRequested.has(index) ? Promise.resolve(false) : handles[index]!.pause(),
+        pause: async () => {
+          await ready[index];
+          return discarded || stopRequested.has(index) ? false : handles[index]!.pause();
+        },
         resume: (text) => !discarded && !stopRequested.has(index) && handles[index]!.resume(text),
         steer: (text) => !discarded && !stopRequested.has(index) && handles[index]!.steer(text),
-        ask: (text) => discarded || stopRequested.has(index) ? Promise.resolve(undefined) : handles[index]!.ask(text),
+        ask: async (text) => {
+          await ready[index];
+          return discarded || stopRequested.has(index) ? undefined : handles[index]!.ask(text);
+        },
         alive: () => handles[index]!.alive(),
         closed: () => ready[index]!.then(() => handles[index]!.closed),
         changed: () => {
           const worktree = worktrees.get(run.index);
           if (!worktree) return [...run.filesEdited];
-          try { return worktreeChangedFiles(worktree); } catch { return [...run.filesEdited]; }
+          return [...run.filesEdited]; // synchronous activity snapshots never launch subprocesses
         },
         discard: () => {
           discarded = true;
           // Cancellation is synchronous: a concurrent stop must never apply discarded edits.
           controllers[index]!.abort(STOP_REASON);
-          void ready[index]!.then(() => handles[index]!.shutdown()).finally(() => cleanupPrivate(run.index, true));
+          void ready[index]!.then(() => handles[index]!.shutdown()).finally(() => cleanupPrivate(run.index, true))
+            .catch(error => console.error("pi-jar: subagent discard failed", error));
         }
       }));
+      // Initial turns are event-driven too: the retained launch returns immediately so the
+      // moderator can act on user messages instead of remaining trapped in this tool call.
+      // The Pi RPC stream continues independently and the registry wakes the moderator on settle.
+      if (eventBusAvailable) for (const record of records) watched.set(record.key, record);
       // Transfer the reservation into queued records before notifying reentrant listeners.
       releaseReservation();
       registry.add(...records);
-      startRuns();
+      const startup = startRuns();
+      if (eventBusAvailable) {
+        void startup.then(async () => {
+          // Legacy direct writers also run off the main tool path. Remove their shared baseline
+          // directory only after all direct streams drained and their edit events were adopted.
+          await Promise.all(handles.map((handle, index) => runs[index]!.mode === "direct" ? handle.closed : Promise.resolve()));
+          if (baselines) await rm(baselines, { recursive: true, force: true });
+        }).catch((error) => console.error("pi-jar: subagent startup/cleanup failed", error));
+        signal?.removeEventListener("abort", abortAll);
+        publish();
+        toolReturned = true;
+        return { content: [{ type: "text", text: runs.map((run) => runReport(run)).join("\n\n") + "\n\nSubagent launch is asynchronous; turn reports arrive as pi-jar.subagent events. You can continue working or steer the fleet with jar_subagent." }], details: details() };
+      }
+      await startup;
       publish();
 
       try {
         await Promise.all(handles.map((handle, index) => runs[index]!.mode === "direct" ? handle.closed : handle.firstSettled));
       } finally {
         signal?.removeEventListener("abort", abortAll);
-        if (baselines) rmSync(baselines, { recursive: true, force: true });
-        for (const run of runs) {
-          if (run.mode === "direct") cleanupPrivate(run.index, true);
-          else if (run.state === "failed") cleanupPrivate(run.index, false);
-        }
+        if (baselines) await rm(baselines, { recursive: true, force: true });
+        await Promise.all(runs.map(run => run.mode === "direct" || run.state === "failed"
+          ? cleanupPrivate(run.index, run.mode === "direct") : Promise.resolve()));
         registry.notify();
         flushUpdate();
         toolReturned = true;
@@ -1386,7 +1464,25 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       if (!launched) throw new Error(result.content.map((part) => "text" in part ? part.text : "").join("\n"));
       const record = registry.get(`delegate-${launched}-1`);
       if (!record) throw new Error("Scout session was discarded");
-      if (record.run.error || record.run.state !== "idle") throw new Error(record.run.error ?? "Scout failed to settle");
+      // This launch is an internal democracy vote; its caller is already awaiting the result,
+      // so the moderator does not need a duplicate unsolicited completion notification.
+      watched.delete(record.key);
+      deleteSettled(record.key);
+      await new Promise<void>((resolve, reject) => {
+        let unsubscribe = () => {};
+        const cleanup = () => { unsubscribe(); signal?.removeEventListener("abort", abort); };
+        const check = () => {
+          if (registry.get(record.key) !== record) { cleanup(); reject(new Error("Scout session was discarded")); return; }
+          if (isRunning(record.run.state)) return;
+          cleanup();
+          if (record.run.error || record.run.state !== "idle") reject(new Error(record.run.error ?? "Scout failed to settle"));
+          else resolve();
+        };
+        const abort = () => { cleanup(); void registry.stop(record.key); reject(new Error("Scout launch aborted")); };
+        unsubscribe = registry.subscribe(check);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort(); else check();
+      });
       return snapshot(record);
     },
     async resumeScout(id, prompt, signal) {
@@ -1414,14 +1510,28 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     }
   });
 
+  let operationSequence = 0;
+  const pendingControls = new Map<string, { id: string; action: string; message?: string }>();
+  const deliverControl = (record: SubagentRecord, operation: { id: string; action: string }, result: { content: Array<{ text: string }>; details?: unknown; isError?: boolean }) => {
+    // A session switch discards the old fleet. Never wake a new session with stale handoffs.
+    if (registry.get(record.key) !== record) return;
+    try {
+      pi.sendMessage({
+        customType: SUBAGENT_MESSAGE, display: true,
+        details: { operationId: operation.id, action: operation.action, key: record.key, status: result.isError ? "failed" : "completed", report: result.details },
+        content: `[PI-JAR SUBAGENT] ${operation.action} ${operation.id} completed:\n${result.content.map(part => part.text).join("\n")}`
+      }, { triggerTurn: true, deliverAs: "followUp" });
+    } catch (error) { console.error("pi-jar: could not deliver a control event", error); }
+  };
+
   pi.registerTool({
     name: "jar_subagent",
     label: "subagent",
-    description: "Moderator control for retained subagents: peek task progress, steer a working agent, ask a brief BTW question, pause without losing context, resume the same agent, or stop it and receive a progress/change/remaining-work handoff. Stopping a worktree agent safely applies reviewable changes to the parent.",
+    description: "Non-blocking moderator control for retained subagents. peek, steer and resume return immediately. ask, pause and stop return an accepted operation receipt; the final answer or handoff arrives as a pi-jar.subagent event. Stop completion safely reconciles worktree changes; acceptance does not mean changes are applied yet.",
     promptSnippet: "Use jar_subagent as the moderator control plane. Prefer peek over rereading transcripts; reuse paused/idle agents with resume; stop finished workers to reconcile their work.",
     promptGuidelines: [
-      "peek returns only task progress (done/total, the in-progress task, activity, the next few open tasks). Do not poll it: after resume, a pi-jar.subagent message wakes you (or queues for your current run) with that progress plus the turn's report when the agent's turn ends; stop returns changed files and the full handoff.",
-      "Use steer to correct direction while an agent is working. Use ask for a short BTW question; it waits for the agent's next compact answer.",
+      "peek returns only task progress. Do not poll: initial/resumed turns and control completions send pi-jar.subagent events. Stop returns an accepted receipt first, then changed files and the full handoff in its completion event.",
+      "Use steer for active direction and ask for a brief BTW question. ask, pause and stop do not wait on the child; continue responding to the user until their completion event arrives.",
       "Pause when an agent should stop spending tokens but keep its context/workspace. Resume the same agent later instead of spawning a replacement.",
       "Stop when an agent is no longer needed. Stop aborts any active turn, retires the process, reports progress/workspace/changes/remaining work, and reconciles safe worktree changes into /diff."
     ],
@@ -1434,6 +1544,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       message: Type.Optional(Type.String({ description: "Direction, BTW question, or resume instruction." }))
     }),
     async execute(_id, params, signal) {
+      if (signal?.aborted) return { content: [{ type: "text" as const, text: "Cancelled before accepting the operation." }], details: undefined, isError: true };
       const work = (async () => {
       if (params.action === "peek") {
         const targets = params.agent ? [registry.resolve(params.agent)].filter((item): item is SubagentRecord => !!item)
@@ -1444,6 +1555,15 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       const agent = params.agent ?? "";
       const record = registry.resolve(agent);
       if (!record) return { content: [{ type: "text", text: "Subagent not found or name is ambiguous: " + agent }], isError: true };
+      const stopping = pendingControls.get(record.key + ":stop");
+      const controlling = pendingControls.get(record.key + ":control");
+      if (stopping || (controlling && params.action !== "stop")) {
+        const pending = stopping ?? controlling!;
+        if (pending.action === params.action && pending.message === params.message) {
+          return { content: [{ type: "text", text: `${pending.action} already accepted (${pending.id}); completion will arrive as an event.` }], details: { operationId: pending.id, status: "accepted", action: pending.action, key: record.key } };
+        }
+        return { content: [{ type: "text", text: `${record.run.name} has pending ${pending.action} (${pending.id}). Stop may preempt other controls; otherwise wait for its event.` }], isError: true };
+      }
       if (params.action === "steer") {
         const message = cleanBlock(params.message ?? "", MAX_STEER_CHARS);
         if (!message) return { content: [{ type: "text", text: "steer requires message." }], isError: true };
@@ -1451,18 +1571,20 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       }
       // The moderator is handling this agent directly now; its settle no longer needs a wake-up.
       if (params.action !== "resume") watched.delete(record.key);
+      const controlWork = async () => {
       if (params.action === "ask") {
         const message = cleanBlock(params.message ?? "", MAX_STEER_CHARS);
         if (!message) return { content: [{ type: "text", text: "ask requires message." }], isError: true };
         const answer = await registry.ask(record.key, message);
-        return { content: [{ type: "text", text: answer ? record.run.name + ": " + cleanBlock(answer, 2000) : "No answer arrived before the BTW timeout." }] };
+        return { content: [{ type: "text", text: answer ? record.run.name + ": " + cleanBlock(answer, 2000) : "No answer arrived before the BTW timeout or the worker stopped." }], isError: !answer };
       }
       if (params.action === "pause") {
         const paused = await registry.pause(record.key);
+        if (!paused && isRunning(record.run.state) && !pendingControls.has(record.key + ":stop")) watched.set(record.key, record);
         const text = paused ? "Paused " + record.run.name + "; context and workspace are retained."
           : record.run.state === "working" ? record.run.name + " has not settled yet; it pauses when its current turn ends."
           : "Could not pause " + record.run.name + ".";
-        return { content: [{ type: "text", text }] };
+        return { content: [{ type: "text", text }], isError: !paused };
       }
       if (params.action === "resume") {
         const resumed = registry.resume(record.key, params.message);
@@ -1471,7 +1593,26 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       }
       const report = await registry.stop(record.key);
       if (!report) return { content: [{ type: "text", text: "Subagent is already retired: " + record.run.name }] };
-      return { content: [{ type: "text", text: controlReport(report) }], details: report };
+      return { content: [{ type: "text", text: controlReport(report) }], details: report, isError: !!report.error };
+      };
+      // Internal registry APIs remain awaited for shutdown/reconciliation correctness. Only the
+      // external tool boundary is detached, so parent steering never waits on a child turn or Git.
+      if (eventBusAvailable && params.action !== "resume") {
+        if (params.action === "ask" && !params.message?.trim()) return { content: [{ type: "text", text: "ask requires message." }], isError: true };
+        const operation = { id: `subagent-op-${++operationSequence}`, action: params.action, message: params.message };
+        const pendingKey = record.key + (params.action === "stop" ? ":stop" : ":control");
+        pendingControls.set(pendingKey, operation);
+        deleteSettled(record.key);
+        void Promise.resolve().then(controlWork).then(result => {
+          if (pendingControls.get(pendingKey) === operation) pendingControls.delete(pendingKey);
+          deliverControl(record, operation, result);
+        }, error => {
+          if (pendingControls.get(pendingKey) === operation) pendingControls.delete(pendingKey);
+          deliverControl(record, operation, { content: [{ text: error instanceof Error ? error.message : String(error) }], isError: true });
+        });
+        return { content: [{ type: "text", text: `${params.action} accepted for ${record.run.name} (${operation.id}). Completion and any reconciled changes will arrive as an event; keep responding to the user, do not poll.` }], details: { operationId: operation.id, status: "accepted", action: params.action, key: record.key } };
+      }
+      return controlWork();
       })();
       // Pi waits on a tool until it resolves, so Esc must never be stuck behind a child that ignores abort.
       const result = await untilAborted(work, signal)

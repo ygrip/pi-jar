@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelRoleManager } from "./model-roles.ts";
 import { askRole, type SideUsage } from "./side-model.ts";
+import { runProcess } from "./async-process.ts";
 
 const DIFF_LIMIT = 60_000;
 
@@ -27,13 +28,11 @@ export function commitPrompt(stat: string, diff: string, log: string, hint: stri
 }
 
 /** `/jar commit [note]`: draft a message for the staged changes with the commit role, review it, commit. Never pushes. */
-export async function jarCommit(pi: ExtensionAPI, ctx: ExtensionContext, roles: ModelRoleManager, usage: SideUsage | undefined, hint = ""): Promise<void> {
+export async function jarCommit(_pi: ExtensionAPI, ctx: ExtensionContext, roles: ModelRoleManager, usage: SideUsage | undefined, hint = ""): Promise<void> {
   if (!ctx.hasUI) { ctx.ui.notify("/jar commit needs the interactive UI to review the message", "warning"); return; }
-  const git = async (...args: string[]) => {
-    const result = await pi.exec("git", args, { cwd: ctx.cwd, timeout: 20_000 });
-    if (result.code !== 0) throw new Error(`git ${args[0]}: ${(result.stderr || result.stdout).trim() || "exit " + result.code}`);
-    return result.stdout;
-  };
+  const git = async (...args: string[]) => (await runProcess(process.env.PI_JAR_GIT_PATH?.trim() || "git", args, {
+    cwd: ctx.cwd, signal: ctx.signal, timeoutMs: 20_000, maxOutputBytes: 64 * 1024 * 1024
+  })).toString("utf8");
   try {
     await git("rev-parse", "--is-inside-work-tree");
     let stat = await git("diff", "--cached", "--stat");

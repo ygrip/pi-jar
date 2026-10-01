@@ -25,27 +25,27 @@ test("read guard checks Pi's alternate apostrophe, NFD and AM/PM filename fallba
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
 });
 
-test("later-file preparation failures do not partially overwrite earlier parent files", { skip: process.getuid?.() === 0 ? "root bypasses directory permissions" : false }, () => {
+test("later-file preparation failures do not partially overwrite earlier parent files", { skip: process.getuid?.() === 0 ? "root bypasses directory permissions" : false }, async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-jar-transaction-"));
   const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { stdio: "pipe" });
-  let worktree: ReturnType<typeof createDelegateWorktree> | undefined;
+  let worktree: Awaited<ReturnType<typeof createDelegateWorktree>> | undefined;
   try {
     git("init"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.com");
     writeFileSync(join(root, "a.txt"), "original\n"); git("add", "."); git("commit", "-m", "baseline");
-    worktree = createDelegateWorktree(root);
+    worktree = await createDelegateWorktree(root);
     writeFileSync(join(worktree.root, "a.txt"), "changed\n");
     mkdirSync(join(worktree.root, "z")); writeFileSync(join(worktree.root, "z/new.txt"), "new\n");
     mkdirSync(join(root, "z")); chmodSync(join(root, "z"), 0o555);
-    assert.throws(() => applyDelegateWorktree(worktree!, root, ["a.txt", "z/new.txt"]), /EACCES|EPERM/);
+    await assert.rejects(applyDelegateWorktree(worktree!, root, ["a.txt", "z/new.txt"]), /EACCES|EPERM/);
     assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "original\n");
     assert.equal(existsSync(join(root, "z/new.txt")), false);
     assert.equal(readdirSync(root).some((name) => name.startsWith(".pi-jar-apply-")), false);
     chmodSync(join(root, "z"), 0o755);
-    assert.deepEqual(applyDelegateWorktree(worktree, root, ["a.txt", "z/new.txt"]), ["a.txt", "z/new.txt"]);
+    assert.deepEqual(await applyDelegateWorktree(worktree, root, ["a.txt", "z/new.txt"]), ["a.txt", "z/new.txt"]);
     assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "changed\n");
   } finally {
     if (existsSync(join(root, "z"))) chmodSync(join(root, "z"), 0o755);
-    if (worktree) disposeDelegateWorktree(worktree);
+    if (worktree) await disposeDelegateWorktree(worktree);
     rmSync(root, { recursive: true, force: true });
   }
 });
