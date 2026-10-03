@@ -157,31 +157,66 @@ test("custom profile preferences never overwrite legacy Default preferences", ()
   assert.equal(new ProfileStore(h.directory).active().settings.animations, true);
 }, "Writing"));
 
-test("settings disposes its screen before wizard dialogs and saves only after confirmation", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-jar-profile-wizard-ui-"));
-  const store = new ProfileStore(directory, "dark");
-  let modal = false, screens = 0, confirmations = 0;
-  const answers = ["Writing", "default=p/writer"];
+const createViaCommand = async (h: any, answers: string[]) => {
+  const screens: string[] = [];
+  h.ctx.ui.input = async () => answers.shift();
+  h.ctx.ui.select = async () => answers.shift();
+  h.ctx.ui.custom = async () => { screens.push("roles"); return undefined; };
+  await h.commands.get("profiles")("new", h.ctx);
+  return screens;
+};
+
+test("/profiles new asks name and theme, switches a fresh session to it, then opens roles", () => fixture(async (h) => {
+  const screens = await createViaCommand(h, ["Research", "custom-sunset"]);
+  const store = new ProfileStore(h.directory);
+  const created = store.list().find((profile) => profile.name === "Research");
+  assert.equal(created?.theme, "custom-sunset");
+  assert.deepEqual(created?.roles.roles, { default: "p/main" }, "roles start as a copy of the previous profile");
+  assert.equal(store.activeName, "Research");
+  assert.equal(h.ctx.ui.theme.name, "custom-sunset");
+  assert.match(h.title(), /\(Research\) My session/);
+  assert.deepEqual(screens, ["roles"], "the roles UI opens for the new profile");
+  assert.ok(h.notices.some((message: string) => /Created profile Research[\s\S]*set them now in Roles/.test(message)));
+}));
+
+test("creating a profile in a locked session keeps the session's profile and explains how to set roles", () => fixture(async (h) => {
+  h.entries.push({ type: "message", message: { role: "user", content: "Hello" } });
+  const screens = await createViaCommand(h, ["Research", "dark"]);
+  const store = new ProfileStore(h.directory);
+  assert.ok(store.list().some((profile) => profile.name === "Research"));
+  assert.equal(store.activeName, "Default");
+  assert.deepEqual(screens, [], "roles would edit the wrong profile, so they are not opened");
+  assert.ok(h.notices.some((message: string) => /fresh session with \/profiles[\s\S]*\/roles/.test(message)));
+}));
+
+test("/profiles <name> switches and unknown names are reported", () => fixture(async (h) => {
+  await h.commands.get("profiles")("writing", h.ctx);
+  assert.equal(new ProfileStore(h.directory).activeName, "Writing");
+  await h.commands.get("profiles")("Nope", h.ctx);
+  assert.ok(h.notices.some((message: string) => /Unknown profile: Nope/.test(message)));
+}));
+
+test("the settings Profiles tab only switches or creates, and creation does not reopen settings", async () => {
+  const opened: string[] = [];
+  let screens = 0;
+  const keys = [["\r"], ["\x1b[B", "\r"]];
   const ctx: any = { hasUI: true, mode: "tui", ui: {
     custom: async (factory: Function) => {
-      assert.equal(modal, false); modal = true;
       let result: unknown;
       const component = factory({ requestRender() {} }, { fg: (_c: string, text: string) => text }, {}, (value: unknown) => { result = value; });
-      component.render(80);
-      if (screens++ === 0) { for (let i = 0; i < 3; i++) component.handleInput("\t"); component.handleInput("\x1b[B"); component.handleInput("\x1b[B"); component.handleInput("\r"); }
-      else component.handleInput("\x1b");
-      modal = false; return result;
-    },
-    input: async () => { assert.equal(modal, false); return answers.shift(); },
-    select: async () => { assert.equal(modal, false); return "dark"; },
-    confirm: async (_title: string, summary: string) => { assert.equal(modal, false); assert.equal(store.list().length, 1); assert.match(summary, /default → p\/writer/); confirmations++; return true; }, notify() {}
+      const text = component.render(80).join("\n");
+      if (screens++ === 0) {
+        for (let i = 0; i < 3; i++) component.handleInput("\t");
+        const rows = component.render(80).join("\n");
+        assert.match(rows, /Switch profile…\s+Writing/);
+        assert.match(rows, /Create profile…/);
+        assert.doesNotMatch(rows, /Theme/);
+      } else assert.match(text, /PROFILES/, "the tab is remembered after a switch");
+      for (const key of keys.shift() ?? ["\x1b"]) component.handleInput(key);
+      return result;
+    }, notify() {}
   } };
-  try {
-    await openJarSettings(ctx, () => ({ ...defaultVisualSettings(), accent: "amber" }), () => {}, [], undefined, {
-      store, themes: ["dark"], roles: () => ({ version: 2, roles: {} }), create: (name, theme, settings, roles) => store.add(name, theme, settings, roles), select: async () => {}, setTheme() {}
-    });
-    assert.equal(confirmations, 1);
-    assert.equal(store.list()[1]!.settings.accent, "follow");
-    assert.equal(screens, 2);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  await openJarSettings(ctx, () => defaultVisualSettings(), () => {}, [], undefined, { activeName: () => "Writing", open: async (action) => { opened.push(action); } });
+  assert.deepEqual(opened, ["switch", "create"]);
+  assert.equal(screens, 2);
 });

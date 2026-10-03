@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ProfileStore, PROFILE_FILE } from "../src/profiles.ts";
 import { defaultVisualSettings } from "../src/settings.ts";
-import { createProfileWizard } from "../src/profile-wizard.ts";
+import { promptNewProfile } from "../src/profile-ui.ts";
 
 function temp(run: (dir: string) => void | Promise<void>) { return async () => { const dir = mkdtempSync(join(tmpdir(), "pi-jar-profile-")); try { await run(dir); } finally { rmSync(dir, { recursive: true, force: true }); } }; }
 
@@ -111,35 +111,27 @@ test("profile mutations are transactional when persistence fails", temp((dir) =>
   assert.equal(store.activeName, "Default", "failed disk write leaves active profile unchanged");
 }));
 
-test("wizard cancellation at each selection leaves store untouched; final confirmation commits", temp(async (dir) => {
+test("new profiles ask only name and theme; cancellation and invalid names leave the store untouched", temp(async (dir) => {
   const store = new ProfileStore(dir);
-  const settings = defaultVisualSettings();
+  const asked: string[] = [];
   const makeCtx = (answers: unknown[]) => ({ hasUI: true, mode: "tui", ui: {
-    input: async () => answers.shift(), select: async () => answers.shift(), confirm: async () => answers.shift(),
+    input: async (title: string) => { asked.push(title); return answers.shift(); },
+    select: async (title: string) => { asked.push(title); return answers.shift(); },
+    confirm: async () => assert.fail("creation needs no confirmation step"),
     notify() {}
   } });
-  const options = { themes: ["pi-jar-dark", "pi-jar-dark-teal"], settings, roles: { version: 2 as const, roles: { default: "openai/old" } },
-    create: (name: string, theme: string, value: typeof settings, roles: { version: 2; roles: Record<string, string> }) => store.add(name, theme, value, roles) };
-  assert.equal(await createProfileWizard(makeCtx(["New\u0001bad"]) as never, store, options), undefined);
-  assert.equal(await createProfileWizard(makeCtx(["New", undefined]) as never, store, options), undefined);
-  assert.equal(await createProfileWizard(makeCtx(["New", "pi-jar-dark-teal", undefined]) as never, store, options), undefined);
-  assert.equal(await createProfileWizard(makeCtx(["New", "Follow Pi", "", false]) as never, store, options), undefined);
+  const options = { store, themes: ["pi-jar-dark", "pi-jar-dark-teal"],
+    create: (name: string, theme: string) => store.add(name, theme, defaultVisualSettings(), { version: 2 as const, roles: { default: "openai/old" } }) };
+  assert.equal(await promptNewProfile(makeCtx([undefined]) as never, options), undefined);
+  assert.equal(await promptNewProfile(makeCtx(["New\u0001bad"]) as never, options), undefined);
+  assert.equal(await promptNewProfile(makeCtx(["default"]) as never, options), undefined, "names are unique case-insensitively");
+  assert.equal(await promptNewProfile(makeCtx(["New", undefined]) as never, options), undefined);
   assert.equal(store.list().length, 1);
-  const profile = await createProfileWizard(makeCtx(["New", "pi-jar-dark-teal", "default=openai/new", true]) as never, store,
-    { ...options, roleManager: undefined });
+  asked.length = 0;
+  const profile = await promptNewProfile(makeCtx(["  New   one ", "pi-jar-dark-teal"]) as never, options);
+  assert.deepEqual(asked.length, 2, "exactly a name and a theme question");
+  assert.equal(profile?.name, "New one");
   assert.equal(profile?.theme, "pi-jar-dark-teal");
-  assert.equal(profile?.roles.roles.default, "openai/new");
-  assert.equal(store.list().length, 2);
-  let confirmation = "";
-  const wizardAnswers = ["Nested", "reviewer=openrouter/anthropic/claude,plan=@default"];
-  const wizardCtx = { hasUI: true, mode: "tui", ui: {
-    input: async () => wizardAnswers.shift(),
-    select: async () => "Follow Pi", confirm: async (_title: string, message: string) => { confirmation = message; return true; }, notify() {}
-  } };
-  const nested = await createProfileWizard(wizardCtx as never, store, { ...options, create: (name, theme, value, roles) => store.add(name, theme, value, roles) });
-  assert.equal(nested?.theme, "follow");
-  assert.equal(nested?.roles.roles.reviewer, "openrouter/anthropic/claude");
-  assert.equal(nested?.roles.roles.plan, "@default");
-  assert.match(confirmation, /reviewer → openrouter\/anthropic\/claude/);
-  assert.match(confirmation, /Theme: Follow Pi/);
+  assert.equal((await promptNewProfile(makeCtx(["Plain", "Follow Pi"]) as never, options))?.theme, "follow");
+  assert.equal(store.list().length, 3);
 }));

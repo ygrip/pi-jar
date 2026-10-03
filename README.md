@@ -56,6 +56,7 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | `/plan [request]` | Enter plan mode (optionally sending the request). `/plan review` reopens the plan view; `/plan off` exits. |
 | `/goal <outcome>` | Start goal mode. `/goal` edits, `/goal status`, `/goal pause`, `/goal resume`, `/goal clear`. |
 | `/roles` | Role manager. `/roles set ROLE provider/model[:effort]\|@role [--project]`, `/roles clear ROLE`, `/roles <role>` activates, `/roles cycle`, `/roles list`. |
+| `/profiles` | Create or switch profiles. `/profiles new` creates (name and theme, then roles), `/profiles <name>` switches. |
 | `/advisor [focus]` | Ask the advisor for a second opinion on the current work; the answer joins the conversation. |
 | `/usage` · `/context` | Usage (cost, tokens per model, plan limits) and context-window breakdown in one tabbed panel. |
 | `/jar commit [note]` | Draft a commit message for the staged changes with the `commit` role, edit it, and commit. Offers `git add -A` when nothing is staged. |
@@ -92,7 +93,7 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 
 Profiles keep separate themes, appearance settings, and model-role configurations. **Default** preserves your existing setup.
 
-Open `/jar settings` (or **Ctrl+Alt+S**) and choose **Profiles** to create or select a custom profile, or change its theme. The wizard lets you name it, choose its theme, configure roles, and review before saving. Cancelling leaves your existing setup unchanged.
+Run `/profiles` (or `/jar settings` → **Profiles**, **Ctrl+Alt+S**) to create a profile or switch to one. `/profiles new` creates directly and `/profiles <name>` switches. Creating asks only for a name and a theme; the new profile copies the current profile's appearance and model roles. In a fresh, idle session pi-jar then switches to it and opens the roles manager so you can set its models; otherwise it tells you to switch in a fresh session and run `/roles`. Cancelling leaves your existing setup unchanged.
 
 Press **Ctrl+Shift+Tab** to cycle profiles **only in a fresh, idle session**. Once the first prompt is sent, the session's profile is locked—even after the agent finishes—and restored when you resume it. Open a new session to switch. Active agents, subagents, and plan/goal workflows also block switching. Configure the selected profile's roles through `/roles`; changing one profile does not change another. The selected profile is remembered across restarts and shown on the welcome screen and beside the composer mascot: `mascot · (Profile) session_name`. Some terminals require an extended keyboard protocol to distinguish Ctrl+Shift+Tab.
 

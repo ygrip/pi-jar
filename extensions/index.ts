@@ -19,6 +19,7 @@ import { FOOTER_FIELDS } from "../src/footer-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
 import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY, conversationStarted, pinnedProfileId } from "../src/profiles.ts";
 import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
+import { openProfiles, type ProfileAction } from "../src/profile-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
@@ -710,14 +711,19 @@ export default function piJar(pi: ExtensionAPI): void {
   };
 
   let switchingProfile = false;
-  const canSwitchProfile = (ctx: ExtensionContext) => {
+  const profileSwitchBlocked = (ctx: ExtensionContext): string | undefined => {
     if (switchingProfile || advisor.isBusy() || !ctx.isIdle?.() || working.phase !== "idle" || planMode.isEnabled() || goals?.isActive() || subagents.running() > 0) {
-      ctx.ui.notify("Finish the active agent/workflow before switching profiles", "warning"); return false;
+      return "Finish the active agent/workflow before switching profiles";
     }
     if (conversationStarted(profileEntries(ctx)) || pinnedProfileId(profileEntries(ctx)) !== undefined) {
-      ctx.ui.notify("This session's profile is locked. Open a new session to switch profiles", "warning"); return false;
+      return "This session's profile is locked. Open a new session to switch profiles";
     }
-    return true;
+    return undefined;
+  };
+  const canSwitchProfile = (ctx: ExtensionContext) => {
+    const blocked = profileSwitchBlocked(ctx);
+    if (blocked) ctx.ui.notify(blocked, "warning");
+    return !blocked;
   };
   const switchProfile = async (name: string, ctx: ExtensionContext) => {
     if (!profileStore || name === profileStore.activeName || !canSwitchProfile(ctx)) return;
@@ -754,29 +760,38 @@ export default function piJar(pi: ExtensionAPI): void {
       ctx.ui.notify(`Could not switch profile: ${(error as Error).message}`, "warning");
     } finally { switchingProfile = false; }
   };
+  const profileUi = (ctx: ExtensionContext, action?: ProfileAction) => {
+    if (!profileStore) { ctx.ui.notify("Profiles are unavailable in this session", "warning"); return Promise.resolve(); }
+    const store = profileStore;
+    return openProfiles(ctx, {
+      store, themes: ctx.ui.getAllThemes?.().map((theme) => theme.name) ?? [],
+      create: (name, theme) => store.add(name, theme, { ...visualSettings, accent: "follow" }, modelRoles.profileRoleConfig()),
+      switchBlocked: () => profileSwitchBlocked(ctx),
+      select: (name) => switchProfile(name, ctx),
+      openRoles: () => openRolesUi(ctx, modelRoles)
+    }, action);
+  };
   openSettings = async (ctx) => {
     if (settingsOpen) return;
     settingsOpen = true;
     try { await openJarSettings(ctx, () => visualSettings,
       (next) => applyVisualSettings(next, ctx), loadedAccents(ctx), piPreferences(ctx), profileStore ? {
-        store: profileStore, themes: ctx.ui.getAllThemes?.().map((theme) => theme.name) ?? [],
-        roles: () => modelRoles.profileRoleConfig(), roleManager: modelRoles,
-        create: (name, theme, settings, roles) => { const profile = profileStore!.add(name, theme, { ...settings, accent: "follow" }, roles); ctx.ui.notify(`Created profile ${name}; select it in a fresh session`, "info"); return profile; },
-        select: (name) => switchProfile(name, ctx),
-        setTheme: (name) => {
-          const previousTheme = ctx.ui.theme?.name;
-          const next = { ...visualSettings, accent: "follow" as const };
-          try { applyProfileTheme(name, ctx); profileStore!.update(profileStore!.activeName, { theme: name, settings: next }); }
-          catch (error) { if (previousTheme) applyProfileTheme(previousTheme, ctx); throw error; }
-          applyVisualSettings(next, ctx, { persist: false, accent: false });
-          if (profileStore!.active().id === "default") {
-            try { saveVisualSettings(getAgentDir(), next); }
-            catch { ctx.ui.notify("Theme saved, but legacy Default preferences could not be updated", "warning"); }
-          }
-        }
+        activeName: () => profileStore?.activeName ?? "Default",
+        open: (action) => profileUi(ctx, action)
       } : undefined); }
     finally { settingsOpen = false; }
   };
+  pi.registerCommand("profiles", {
+    description: "Create or switch pi-jar profiles: /profiles, /profiles new, /profiles <name>",
+    handler: async (args, ctx) => {
+      const target = args.trim();
+      if (!target) return profileUi(ctx);
+      if (["new", "create"].includes(target.toLowerCase())) return profileUi(ctx, "create");
+      const profile = profileStore?.list().find((item) => item.name.toLocaleLowerCase() === target.toLocaleLowerCase());
+      if (!profile) { ctx.ui.notify("Unknown profile: " + target, "warning"); return; }
+      await switchProfile(profile.name, ctx);
+    }
+  });
 
   /** Callers are lifecycle handlers that repaint once through sampleFooter. */
   const updateCost = (ctx: ExtensionContext) => {
