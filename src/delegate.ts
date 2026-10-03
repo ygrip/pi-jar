@@ -1258,6 +1258,9 @@ const peekRecord = (record: SubagentRecord): string => {
 const settledRecord = (record: SubagentRecord): string =>
   peekRecord(record) + (record.run.output ? `\nlast: ${cleanBlock(record.run.output, 1200)}` : "");
 
+/** One queued moderator notification; several coalesce into a single pi-jar.subagent message. */
+interface SubagentEvent { record: SubagentRecord; kind: "turn" | "control"; label: string; content: string; detail: Record<string, unknown> }
+
 /**
  * Every active worktree agent may still end up needing recovery, so admission reserves a recovery slot for
  * it: unresolved recovery workspaces never exceed RECOVERY_LIMIT, and none is ever deleted to make room.
@@ -1336,29 +1339,58 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       (raw as { customType?: string }).customType !== "pi-jar.moderator-context" || (active && index === latest)) };
   });
 
-  /** Native RPC drives registry state; Pi's message bus delivers frozen completion events to the moderator. */
+  /** Native RPC drives registry state. Completion events wait in our own queue, never Pi's irrevocable
+   * follow-up queue: while the moderator runs they join the next turn boundary so its final answer already
+   * reflects them, instead of re-waking it after that answer. Only events arriving while idle wake a turn. */
   const eventBusAvailable = typeof pi.sendMessage === "function";
   const watched = new Map<string, SubagentRecord>();
-  const settledQueue = new Map<string, { record: SubagentRecord; content: string; turn: number }>();
+  const pendingEvents = new Map<string, SubagentEvent>();
   const deleteSettled = (key: string) => {
-    for (const [eventKey, event] of settledQueue) if (event.record.key === key) settledQueue.delete(eventKey);
+    for (const [id, event] of pendingEvents) if (event.kind === "turn" && event.record.key === key) pendingEvents.delete(id);
   };
-  let notifyTimer: NodeJS.Timeout | undefined;
-  const flushSettled = () => {
-    notifyTimer = undefined;
-    const records = [...settledQueue.values()].filter(({ record }) => registry.get(record.key) === record);
-    settledQueue.clear();
-    if (!records.length) return;
-    try {
-      pi.sendMessage?.({
-        customType: SUBAGENT_MESSAGE, display: true, details: {
-          keys: [...new Set(records.map(({ record }) => record.key))],
-          turns: records.map(({ record, turn }) => ({ key: record.key, turn }))
-        },
-        content: ["[PI-JAR SUBAGENT] A subagent turn ended. Review, then resume, ask or stop:", ...records.map(event => event.content)].join("\n\n")
-      }, { triggerTurn: true, deliverAs: "followUp" });
-    } catch (error) { console.error("pi-jar: could not deliver a subagent event", error); }
+  let moderatorActive = false;
+  let moderatorInterrupted = false;
+  let wakeTimer: NodeJS.Timeout | undefined;
+  const takeEvents = () => {
+    clearTimeout(wakeTimer);
+    wakeTimer = undefined;
+    const events = [...pendingEvents.values()].filter(({ record }) => registry.get(record.key) === record);
+    pendingEvents.clear();
+    if (!events.length) return;
+    const summary = cleanText(`Subagents · ${events.map(event => event.label).join(" · ")}`, 160);
+    return {
+      customType: SUBAGENT_MESSAGE, display: true, details: { summary, events: events.map(event => event.detail) },
+      content: [`[PI-JAR SUBAGENT] ${summary}`, ...events.map(event => event.content), "Review, then resume, ask or stop retained agents as needed."].join("\n\n")
+    };
   };
+  const scheduleWake = () => {
+    if (moderatorActive || moderatorInterrupted || wakeTimer || !pendingEvents.size) return;
+    wakeTimer = setTimeout(() => {
+      wakeTimer = undefined;
+      if (moderatorActive || moderatorInterrupted) return;
+      const message = takeEvents();
+      if (!message) return;
+      try { pi.sendMessage?.(message, { triggerTurn: true }); }
+      catch (error) { console.error("pi-jar: could not deliver a subagent event", error); }
+    }, NOTIFY_COALESCE_MS);
+    wakeTimer.unref?.();
+  };
+  const queueEvent = (id: string, event: SubagentEvent) => { pendingEvents.set(id, event); scheduleWake(); };
+  const boundary = (event: { outcome?: string; context?: { canContinue?: boolean } }) => {
+    if (event.outcome !== "completed" || event.context?.canContinue === false) return;
+    const message = takeEvents();
+    if (message) return { entries: [{ type: "custom_message" as const, ...message }], continue: true };
+  };
+  pi.registerMessageRenderer?.<{ summary?: string }>(SUBAGENT_MESSAGE, (message, { expanded }, theme) => {
+    const text = typeof message.content === "string" ? message.content : "Subagents";
+    const summary = message.details?.summary ?? text.split("\n", 1)[0] ?? "Subagents";
+    return new Text(expanded ? text : theme.fg("accent", cleanText(summary, 160)) + theme.fg("dim", " · expand for report"), 0, 0);
+  });
+  pi.on?.("agent_start", () => { moderatorActive = true; moderatorInterrupted = false; clearTimeout(wakeTimer); wakeTimer = undefined; });
+  pi.on?.("turn_end", boundary);
+  pi.on?.("agent_before_settle", (event) => { moderatorInterrupted = event.outcome !== "completed"; return boundary(event); });
+  // An interrupted run keeps its events for the user's next prompt rather than auto-waking.
+  pi.on?.("agent_settled", () => { moderatorActive = false; scheduleWake(); });
   registry.subscribe(() => {
     if (!watched.size) return;
     for (const [key, record] of watched) {
@@ -1367,13 +1399,10 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       watched.delete(key);
       if (record.run.state !== "stopped") {
         // Freeze reports at the settled boundary. A fast resume must not overwrite a queued
-        // initial report, and multiple turns in the coalescing window must each be delivered.
-        settledQueue.set(`${key}:${record.run.resumes}`, { record, turn: record.run.resumes, content: settledRecord(record) });
+        // initial report, and multiple turns before delivery must each be delivered.
+        queueEvent(`${key}:${record.run.resumes}`, { record, kind: "turn", label: `${record.run.name} turn ended`,
+          content: settledRecord(record), detail: { key, turn: record.run.resumes } });
       }
-    }
-    if (settledQueue.size && !notifyTimer) {
-      notifyTimer = setTimeout(flushSettled, NOTIFY_COALESCE_MS);
-      notifyTimer.unref?.();
     }
   });
 
@@ -1874,13 +1903,12 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   const deliverControl = (record: SubagentRecord, operation: { id: string; action: string }, result: { content: Array<{ text: string }>; details?: unknown; isError?: boolean }) => {
     // A session switch discards the old fleet. Never wake a new session with stale handoffs.
     if (registry.get(record.key) !== record) return;
-    try {
-      pi.sendMessage({
-        customType: SUBAGENT_MESSAGE, display: true,
-        details: { operationId: operation.id, action: operation.action, key: record.key, status: result.isError ? "failed" : "completed", report: result.details },
-        content: `[PI-JAR SUBAGENT] ${operation.action} ${operation.id} completed:\n${result.content.map(part => part.text).join("\n")}`
-      }, { triggerTurn: true, deliverAs: "followUp" });
-    } catch (error) { console.error("pi-jar: could not deliver a control event", error); }
+    const status = result.isError ? "failed" : "completed";
+    // The stop handoff supersedes any queued turn report for the same agent.
+    if (operation.action === "stop") deleteSettled(record.key);
+    queueEvent(operation.id, { record, kind: "control", label: `${operation.action} ${record.run.name} ${status}`,
+      content: `${operation.action} ${operation.id} ${status}:\n${result.content.map(part => part.text).join("\n")}`,
+      detail: { operationId: operation.id, action: operation.action, key: record.key, status, report: result.details } });
   };
 
   pi.registerTool({

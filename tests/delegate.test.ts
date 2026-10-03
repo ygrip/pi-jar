@@ -771,7 +771,7 @@ test("initial and resumed subagent turns wake the moderator over RPC without blo
   t.mock.timers.tick(1000);
   await tick();
   assert.equal(host.sent.length, 1, "the initial completion is delivered asynchronously over the event bus");
-  assert.match(host.sent[0]!.message.content, /A subagent turn ended[\s\S]*initial report/);
+  assert.match(host.sent[0]!.message.content, /auth scout turn ended[\s\S]*initial report/);
   const [record] = host.registry.records();
   const resumed = await host.control.execute("r", { action: "resume", agent: record!.key, message: "dig deeper" }, undefined, undefined, quiet);
   assert.match(resumed.content[0]!.text, /Resumed auth scout/);
@@ -780,13 +780,38 @@ test("initial and resumed subagent turns wake the moderator over RPC without blo
   t.mock.timers.tick(1000);
   assert.equal(host.sent.length, 2, "one coalesced event per settled turn");
   assert.equal(host.sent[1]!.message.customType, "pi-jar.subagent");
-  assert.deepEqual(host.sent[1]!.options, { triggerTurn: true, deliverAs: "followUp" });
+  assert.deepEqual(host.sent[1]!.options, { triggerTurn: true }, "idle wake-ups never use Pi's irrevocable follow-up queue");
   assert.match(host.sent[1]!.message.content, /auth scout · idle[\s\S]*last: follow-up report/);
   await host.control.execute("s", { action: "stop", agent: record!.key }, undefined, undefined, quiet);
   await until(() => host.sent.length >= 3);
   t.mock.timers.tick(1000);
   assert.equal(host.sent.length, 3, "stop completes through its operation event, not a duplicate turn wake-up");
   assert.match(host.sent[2]!.message.content, /stop subagent-op-.*completed/);
+});
+
+test("completions during a moderator run join its settle boundary instead of re-waking it after the final answer", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fake = fakeSpawn((child) => { say(child, "initial report"); settle(child); });
+  const host = moderatorHost(fake.spawn);
+  const hook = (name: string, event: object = {}) => (host.events.get(name) as unknown as (event: object) => unknown)(event);
+  hook("agent_start");
+  await host.delegate.execute("d", { tasks: [{ task: "inspect", name: "auth scout" }] }, undefined, undefined, quiet);
+  await tick();
+  const [record] = host.registry.records();
+  await host.control.execute("s", { action: "stop", agent: record!.key }, undefined, undefined, quiet);
+  await until(() => record!.run.state === "stopped");
+  await tick();
+  t.mock.timers.tick(1000);
+  assert.equal(host.sent.length, 0, "nothing reaches Pi's follow-up queue while the moderator runs");
+  const settled = hook("agent_before_settle", { outcome: "completed" }) as { entries: Array<{ content: string; details: { summary: string } }>; continue: boolean };
+  assert.equal(settled.continue, true, "the moderator sees the events before its final answer");
+  assert.equal(settled.entries.length, 1, "events coalesce into one message");
+  assert.doesNotMatch(settled.entries[0]!.content, /turn ended/, "the stop handoff supersedes the queued turn report");
+  assert.match(settled.entries[0]!.details.summary, /stop auth scout completed/);
+  assert.equal(hook("agent_before_settle", { outcome: "completed" }), undefined, "consumed events never replay");
+  hook("agent_settled");
+  t.mock.timers.tick(1000);
+  assert.equal(host.sent.length, 0, "no wake-up after the moderator's final answer");
 });
 
 test("stop sends EOF immediately rather than waiting for an unacknowledged abort", async (t) => {
@@ -874,6 +899,7 @@ test("pause and stop return receipts even when the child ignores abort", async (
   t.mock.timers.tick(3000);
   await until(() => record!.run.state === "stopped");
   assert.equal(record!.run.state, "stopped");
+  t.mock.timers.tick(1000);
   assert.ok(host.sent.some(item => /stop subagent-op-.*completed/.test(item.message.content)), "the final handoff arrives via event");
   assert.deepEqual(fake.children[0]!.killed, [], "EOF-cooperative children exit without an unnecessary forced kill");
 });
@@ -901,6 +927,8 @@ test("BTW asks return immediately and deliver exactly one answer event", async (
   gate.emit("answer");
   await tick();
   await tick();
+  assert.equal(host.sent.length, 0, "the answer is coalesced briefly before waking the idle moderator");
+  t.mock.timers.tick(1000);
   assert.equal(host.sent.length, 1);
   assert.match(host.sent[0]!.message.content, /ask subagent-op-.*completed:[\s\S]*guard is in auth.ts/);
   t.mock.timers.tick(1000);
@@ -921,7 +949,7 @@ test("legacy direct delegates also return before their child finishes", async ()
   assert.equal(host.registry.records()[0]!.run.state, "done");
 });
 
-test("stop cancels hung worktree startup without waiting for a Git deadline", { skip: process.platform === "win32", timeout: 3000 }, async () => {
+test("stop cancels hung worktree startup without waiting for a Git deadline", { skip: process.platform === "win32", timeout: 3000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pi-jar-startup-stop-"));
   const executable = join(root, "git");
   const previous = process.env[GIT_EXECUTABLE_ENV];
@@ -937,10 +965,12 @@ test("stop cancels hung worktree startup without waiting for a Git deadline", { 
     const record = host.registry.records()[0]!;
     const receipt = await host.control.execute("s", { action: "stop", agent: record.key }, undefined, undefined, ctx);
     assert.match(receipt.content[0]!.text, /stop accepted/);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const report = await record.stop();
     assert.equal(report.state, "stopped");
     assert.equal(fake.children.length, 0);
     await tick();
+    t.mock.timers.tick(1000);
     assert.equal(host.sent.length, 1);
     assert.match(host.sent[0]!.message.content, /stop subagent-op-.*completed/);
   } finally {

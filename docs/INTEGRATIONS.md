@@ -65,7 +65,7 @@ Hidden context messages (`pi-jar.plan-context`, `pi-jar.plan-reminder`, `pi-jar.
 | `jar_delegate` | up to four parallel subagents (`tasks: [{task, name?, role?}]`, `write?`) |
 | `jar_advisor` | second opinion from the `advisor` role (`question?`, `draft?`) |
 
-`jar_shell` events arrive as a visible `pi-jar.shell` custom message that triggers (or queues) an agent turn; when a subagent turn started by `jar_subagent resume` ends, a visible `pi-jar.subagent` message does the same. `jar_delegate` runs child processes with `PI_JAR_CHILD=1`, which keeps pi-jar in the child from registering `jar_delegate` again, and publishes each running subagent through the role contract above as `pi-jar.role.delegate-<batch>-<n>`. The advisor publishes `pi-jar.role.advisor` while it is consulting, and its `/advisor` and gate answers arrive as visible `pi-jar.advisor` custom messages.
+`jar_shell` events arrive as a visible `pi-jar.shell` custom message that triggers (or queues) an agent turn; subagent turn ends and `jar_subagent` control completions arrive as one coalesced, visible `pi-jar.subagent` message at the moderator's next turn boundary, or as a wake-up when it is idle. `jar_delegate` runs child processes with `PI_JAR_CHILD=1`, which keeps pi-jar in the child from registering `jar_delegate` again, and publishes each running subagent through the role contract above as `pi-jar.role.delegate-<batch>-<n>`. The advisor publishes `pi-jar.role.advisor` while it is consulting, and its `/advisor` and gate answers arrive as visible `pi-jar.advisor` custom messages.
 
 ## Commands that overlap other packages
 
