@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ModelRoleManager } from "./model-roles.ts";
-import { askRole, type SideUsage } from "./side-model.ts";
-import { ROLE_PREFIX } from "./status.ts";
+import { askRole, type SideUsage, type SideCall } from "./side-model.ts";
+import { ROLE_PREFIX, cleanText } from "./status.ts";
 import { sessionBranch } from "./session-branch.ts";
 import { runProcess } from "./async-process.ts";
 
@@ -126,108 +126,261 @@ export interface AdvisorOptions {
   usage: SideUsage;
   /** Injectable subprocess boundary for hosts/tests; defaults to bounded asynchronous execution. */
   processRunner?: typeof runProcess;
+  /** Total context/provider deadline, including models that ignore cancellation. */
+  timeoutMs?: number;
 }
 
-/** First-class advisor: the jar_advisor tool, /advisor, and automatic gates for loops and failure streaks. */
+export interface AdvisorJob {
+  id: string;
+  state: "running" | "completed" | "failed" | "cancelled";
+  question: string;
+  startedAt: number;
+  endedAt?: number;
+  model?: string;
+  text?: string;
+  error?: string;
+}
+const MAX_ADVISOR_RUNNING = 2;
+const MAX_ADVISOR_HISTORY = 16;
+const ANSWER_LIMIT = 8_000;
+const boundedRequest = (request: AdvisorRequest): AdvisorRequest => ({
+  ...(request.question ? { question: request.question.slice(0, 2_000) } : {}),
+  ...(request.draft ? { draft: request.draft.slice(0, 8_000) } : {}),
+  ...(request.trigger ? { trigger: request.trigger.slice(0, 300) } : {})
+});
+
+/** Detached advisor requests: the main agent never waits on a provider unless it explicitly asks to wait. */
 export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, options: AdvisorOptions) {
   const stuck = new StuckDetector();
-  let busy = 0;
+  const timeoutMs = Math.max(1, Math.min(120_000, options.timeoutMs ?? 60_000));
+  type Record = AdvisorJob & { controller: AbortController; generation: number; acknowledged: boolean; delivered: boolean; finished: Promise<void> };
+  const jobs = new Map<string, Record>();
+  const consultations = new Set<symbol>();
+  const consultationControllers = new Set<AbortController>();
+  let sequence = 0, generation = 0, active = false, interrupted = false;
+  let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+  let deliveryContext: ExtensionContext | undefined;
+  const idle = () => { try { return deliveryContext?.isIdle() === true; } catch { return false; } };
 
   const status = (ctx: ExtensionContext, task?: string) => {
     if (!ctx.hasUI) return;
-    try {
-      ctx.ui.setStatus(ROLE_PREFIX + "advisor", task ? JSON.stringify({ name: "Advisor", label: "advisor", state: "working", task, expiresAt: Date.now() + 30_000 }) : undefined);
-    } catch { /* status is decoration */ }
+    try { ctx.ui.setStatus(ROLE_PREFIX + "advisor", task ? JSON.stringify({ name: "Advisor", label: "advisor", state: "working", task: cleanText(task, 160), expiresAt: Date.now() + timeoutMs + 1_000 }) : undefined); }
+    catch { /* decoration must never fail a request */ }
   };
-
-  const gitState = async (ctx: ExtensionContext, signal?: AbortSignal): Promise<string> => {
+  const toast = (ctx: ExtensionContext, text: string, failed = false) => {
+    if (!ctx.hasUI) return;
+    try { ctx.ui.notify(text, failed ? "warning" : "info"); } catch { /* non-blocking decoration */ }
+  };
+  const snapshot = (job: Record): AdvisorJob => ({ id: job.id, state: job.state, question: job.question, startedAt: job.startedAt,
+    ...(job.endedAt !== undefined ? { endedAt: job.endedAt } : {}), ...(job.model ? { model: job.model } : {}),
+    ...(job.text ? { text: job.text } : {}), ...(job.error ? { error: job.error } : {}) });
+  const get = (id: string): AdvisorJob | undefined => { const job = jobs.get(id); return job && snapshot(job); };
+  const pending = () => [...jobs.values()].filter(job => job.state !== "running" && !job.acknowledged && !job.delivered);
+  const resultText = (job: AdvisorJob) => job.state === "completed"
+    ? `◆ Advisor ${job.id} · ${job.model} · ${job.question}\n\n${job.text}`
+    : `Advisor ${job.id} · ${job.state}${job.error ? ": " + job.error : ""}`;
+  const message = (items: Record[]) => ({ type: "custom_message" as const, customType: ADVISOR_MESSAGE, display: true,
+    content: items.map(resultText).join("\n\n"), details: { ids: items.map(job => job.id), summary: `${items.length} advisor result(s)` } });
+  const drain = () => {
+    clearTimeout(deliveryTimer); deliveryTimer = undefined;
+    const items = pending();
+    if (!items.length) return undefined;
+    for (const job of items) job.delivered = true;
+    return message(items);
+  };
+  const notify = () => {
+    if (active || interrupted || !idle() || deliveryTimer || !pending().length) return;
+    const owner = generation;
+    deliveryTimer = setTimeout(() => {
+      deliveryTimer = undefined;
+      if (owner !== generation || active || interrupted || !idle()) return;
+      const items = pending();
+      if (!items.length) return;
+      const { type: _type, ...entry } = message(items);
+      try { pi.sendMessage(entry, { triggerTurn: true, deliverAs: "nextTurn" }); for (const job of items) job.delivered = true; }
+      catch { /* retain results for the next boundary or explicit get/wait */ }
+    }, 30);
+    deliveryTimer.unref?.();
+  };
+  const gitState = async (ctx: ExtensionContext, signal: AbortSignal): Promise<string> => {
     const git = (args: string[]) => (options.processRunner ?? runProcess)(process.env.PI_JAR_GIT_PATH?.trim() || "git", args, {
       cwd: ctx.cwd, signal, timeoutMs: 5_000, maxOutputBytes: GIT_LIMIT
     }).then(output => output.toString("utf8"));
     try {
-      const [status, diff] = await Promise.all([
-        git(["status", "--short", "--branch"]),
-        git(["diff", "--stat", "HEAD"])
-      ]);
-      return (status.trim() + (diff.trim() ? "\n" + diff.trim() : "")).slice(0, GIT_LIMIT);
-    } catch { return ""; } // repository state is optional context; not a git repo or git missing
+      const [state, diff] = await Promise.all([git(["status", "--short", "--branch"]), git(["diff", "--stat", "HEAD"])]);
+      return (state.trim() + (diff.trim() ? "\n" + diff.trim() : "")).slice(0, GIT_LIMIT);
+    } catch { return ""; }
   };
-
-  const consult = async (ctx: ExtensionContext, request: AdvisorRequest, signal?: AbortSignal) => {
-    busy++;
+  const consult = async (ctx: ExtensionContext, supplied: AdvisorRequest, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    if ([...consultationControllers].filter(controller => !controller.signal.aborted).length >= MAX_ADVISOR_RUNNING) throw new Error("Advisor is busy; wait for or cancel an existing request");
+    const owner = generation, token = Symbol(), controller = new AbortController();
+    const request = boundedRequest(supplied);
+    const forwardAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", forwardAbort, { once: true });
+    consultationControllers.add(controller); consultations.add(token);
     status(ctx, request.trigger ?? request.question ?? "reviewing the current direction");
+    const timer = setTimeout(() => controller.abort(new Error(`Advisor timed out after ${timeoutMs}ms`)), timeoutMs);
+    let abortListener: (() => void) | undefined;
     try {
-      const conversation = transcript(sessionBranch(ctx) as readonly Entry[]);
-      return await askRole(ctx, roles, options.usage, "advisor", ADVISOR_SYSTEM, advisorPrompt(request, conversation, await gitState(ctx, signal)), signal);
-    } finally { if (--busy === 0) status(ctx); }
+      const aborted = new Promise<never>((_resolve, reject) => {
+        abortListener = () => reject(controller.signal.reason ?? new Error("Advisor cancelled"));
+        controller.signal.addEventListener("abort", abortListener, { once: true });
+        if (controller.signal.aborted) abortListener();
+      });
+      const work = async () => {
+        // Freeze model/alias choices before asynchronous Git preparation or later role edits.
+        const primary = roles.resolve("advisor");
+        const fallbacks = [...(roles.fallbackSpecs?.("advisor") ?? [])];
+        const targets = new Map<string, () => ReturnType<ModelRoleManager["resolveSpec"]>>();
+        for (const spec of fallbacks) {
+          try { const target = roles.resolveSpec(spec); targets.set(spec, () => target); }
+          catch (error) { targets.set(spec, () => { throw error; }); }
+        }
+        const selectedRoles = { resolve: () => primary, fallbackSpecs: () => fallbacks,
+          resolveSpec: (spec: string) => targets.get(spec)!() } as unknown as ModelRoleManager;
+        const selectedContext = { model: ctx.model, modelRegistry: ctx.modelRegistry } as ExtensionContext;
+        const conversation = transcript(sessionBranch(ctx) as readonly Entry[], 12_000);
+        const git = await gitState(ctx, controller.signal);
+        controller.signal.throwIfAborted();
+        const usage = options.usage;
+        const requestUsage = usage && { add: (call: SideCall) => { if (owner === generation) usage.add(call); } };
+        const answer = await askRole(selectedContext, selectedRoles, requestUsage, "advisor", ADVISOR_SYSTEM, advisorPrompt(request, conversation, git), controller.signal);
+        return { ...answer, model: answer.model.slice(0, 200), text: answer.text.slice(0, ANSWER_LIMIT) };
+      };
+      return await Promise.race([work(), aborted]);
+    } finally {
+      clearTimeout(timer); signal?.removeEventListener("abort", forwardAbort);
+      if (abortListener) controller.signal.removeEventListener("abort", abortListener);
+      consultationControllers.delete(controller); consultations.delete(token);
+      if (owner === generation) status(ctx, consultations.size ? `${consultations.size} advisor request(s) running` : undefined);
+    }
   };
-
+  const cancel = (id: string): AdvisorJob | undefined => {
+    const job = jobs.get(id);
+    if (!job) return undefined;
+    job.acknowledged = true;
+    if (job.state === "running") { job.state = "cancelled"; job.endedAt = Date.now(); job.controller.abort(new Error("Advisor cancelled")); }
+    return snapshot(job);
+  };
+  const start = (ctx: ExtensionContext, supplied: AdvisorRequest = {}, signal?: AbortSignal): AdvisorJob => {
+    if (!options.enabled()) throw new Error("the advisor is turned off in /jar settings");
+    signal?.throwIfAborted();
+    if ([...jobs.values()].filter(job => job.state === "running").length >= MAX_ADVISOR_RUNNING) throw new Error("Advisor is busy; get, wait for, or cancel an existing request");
+    for (const [id, job] of jobs) { if (jobs.size < MAX_ADVISOR_HISTORY) break; if (job.acknowledged || job.delivered) jobs.delete(id); }
+    if (jobs.size >= MAX_ADVISOR_HISTORY) throw new Error("Collect pending advisor results before starting another request");
+    const request = boundedRequest(supplied);
+    const job: Record = { id: `a${++sequence}`, state: "running", question: cleanText(request.trigger ?? request.question ?? "general review", 200),
+      startedAt: Date.now(), generation, controller: new AbortController(), acknowledged: false, delivered: false, finished: Promise.resolve() };
+    jobs.set(job.id, job); deliveryContext = ctx;
+    const abort = () => { cancel(job.id); };
+    signal?.addEventListener("abort", abort, { once: true });
+    job.finished = Promise.resolve().then(() => consult(ctx, request, job.controller.signal)).then(answer => {
+      if (job.generation !== generation || job.state !== "running") return;
+      job.state = "completed"; job.model = answer.model; job.text = answer.text;
+    }, error => {
+      if (job.generation !== generation || job.state !== "running") return;
+      job.state = "failed"; job.error = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+    }).then(() => {
+      signal?.removeEventListener("abort", abort);
+      if (job.generation !== generation) return;
+      job.endedAt ??= Date.now();
+      if (!job.acknowledged) { toast(ctx, `Advisor ${job.id} ${job.state}; result available`, job.state !== "completed"); notify(); }
+    });
+    return snapshot(job);
+  };
+  const observe = (id: string) => {
+    const job = jobs.get(id);
+    if (!job) throw new Error("Unknown advisor request: " + id);
+    if (job.state !== "running") job.acknowledged = true;
+    return snapshot(job);
+  };
+  const wait = async (id: string, milliseconds = 1_000, signal?: AbortSignal): Promise<AdvisorJob> => {
+    const job = jobs.get(id);
+    if (!job) throw new Error("Unknown advisor request: " + id);
+    signal?.throwIfAborted();
+    if (job.state !== "running") return observe(id);
+    let timer: ReturnType<typeof setTimeout> | undefined, abort: (() => void) | undefined;
+    try {
+      await Promise.race([job.finished, new Promise<void>((resolve, reject) => {
+        timer = setTimeout(resolve, Math.max(0, Math.min(30_000, milliseconds)));
+        abort = () => reject(signal?.reason ?? new Error("Wait cancelled"));
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+      })]);
+    } finally { clearTimeout(timer); if (abort) signal?.removeEventListener("abort", abort); }
+    if (jobs.get(id) !== job) return { ...snapshot(job), state: "cancelled", error: "Session changed" };
+    return observe(id);
+  };
+  const reset = (_event?: unknown, ctx?: ExtensionContext) => {
+    generation++; clearTimeout(deliveryTimer); deliveryTimer = undefined;
+    for (const job of jobs.values()) { job.acknowledged = true; job.controller.abort(new Error("Session changed")); }
+    for (const controller of consultationControllers) controller.abort(new Error("Session changed"));
+    jobs.clear(); consultationControllers.clear(); consultations.clear(); stuck.reset(); active = false; interrupted = false; deliveryContext = ctx;
+    if (ctx) status(ctx);
+  };
   const Parameters = Type.Object({
-    question: Type.Optional(Type.String({ description: "A focused question or decision for the advisor" })),
-    draft: Type.Optional(Type.String({ description: "Your candidate plan, answer or fix for the advisor to critique" }))
+    action: Type.Optional(Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("get"), Type.Literal("wait"), Type.Literal("cancel")])),
+    id: Type.Optional(Type.String({ maxLength: 64, description: "Advisor request ID returned by start" })),
+    waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 30_000 })),
+    question: Type.Optional(Type.String({ description: "Focused question (first 2,000 characters are used)" })),
+    draft: Type.Optional(Type.String({ description: "Candidate approach (first 8,000 characters are used)" }))
   });
-
   if (typeof (pi as ExtensionAPI & { registerTool?: unknown }).registerTool === "function") pi.registerTool({
-    name: ADVISOR_TOOL,
-    label: "advisor",
-    description: "Ask the advisor (a stronger reviewer model with a fresh view of this conversation and the repo state) for a second opinion. Returns its advice.",
+    name: ADVISOR_TOOL, label: "advisor",
+    description: "Start a background second opinion and return its request ID immediately. Use status/get/wait/cancel with that ID; wait is bounded to 30 seconds.",
     promptSnippet: "Use jar_advisor for a second opinion on consequential decisions, when stuck, or before declaring hard work done.",
     promptGuidelines: [
-      "Call jar_advisor before committing to a risky or hard-to-reverse approach, after two failed attempts at the same problem, and before declaring a complex task complete.",
-      "Form your own candidate first and pass it as draft; ask a specific question. Do not call it for routine steps."
-    ],
-    parameters: Parameters,
+      "Call jar_advisor before committing to a risky approach, after two failed attempts, and before declaring complex work complete. Form a candidate first and pass it as draft.",
+      "Start returns immediately, not approval. Continue useful work; collect completed advice with get/wait before the consequential decision. A pending receipt is not a completed review.",
+      "Background completions reach the model at a safe agent boundary; they cannot interrupt an in-flight model response. Use bounded wait when no useful work remains."
+    ], parameters: Parameters,
     async execute(_id, params, signal, _onUpdate, ctx) {
-      if (!options.enabled()) throw new Error("the advisor is turned off in /jar settings");
-      const answer = await consult(ctx, { ...(params.question ? { question: params.question } : {}), ...(params.draft ? { draft: params.draft } : {}) }, signal);
-      return { content: [{ type: "text", text: answer.text }], details: { model: answer.model } };
+      const action = params.action ?? "start";
+      if (action === "status") {
+        const items = params.id ? [get(params.id)] : [...jobs.values()].map(snapshot);
+        if (items.some(job => !job)) throw new Error("Unknown advisor request: " + params.id);
+        const summaries = items.map(job => { const { text: _text, error: _error, ...summary } = job!; return summary; });
+        return { content: [{ type: "text", text: summaries.map(job => `${job.id} · ${job.state} · ${job.question}`).join("\n") || "No advisor requests" }], details: params.id ? summaries[0] : { jobs: summaries } };
+      }
+      const job = action === "start" ? start(ctx, { question: params.question, draft: params.draft }, signal)
+        : action === "wait" ? await wait(params.id ?? "", params.waitMs, signal)
+        : action === "cancel" ? cancel(params.id ?? "") : observe(params.id ?? "");
+      if (!job) throw new Error("Unknown advisor request: " + (params.id ?? ""));
+      const text = job.state === "running" ? `Advisor ${job.id} ${action === "start" ? "started" : "still running"} · running. Continue useful work; use get/wait with this ID to collect the review.` : resultText(job);
+      return { content: [{ type: "text", text }], details: job };
     }
   });
-
-  const deliver = (ctx: ExtensionContext, heading: string, text: string) => {
-    pi.sendMessage({ customType: ADVISOR_MESSAGE, content: `${heading}\n\n${text}`, display: true },
-      ctx.isIdle() ? { deliverAs: "nextTurn" } : { deliverAs: "steer" });
-  };
-
   pi.registerCommand("advisor", {
-    description: "Ask the advisor for a second opinion on the current work: /advisor [focus]",
+    description: "Start a background second opinion: /advisor [focus]",
     handler: async (args, ctx) => {
       if (!options.enabled()) { ctx.ui.notify("The advisor is off; turn it on in /jar settings → Pi", "warning"); return; }
-      const focus = args.trim();
-      ctx.ui.notify("Consulting the advisor…", "info");
-      try {
-        const answer = await consult(ctx, focus ? { question: focus } : {}, ctx.signal);
-        deliver(ctx, `◆ Advisor · ${answer.model}${focus ? " · " + focus : ""}`, answer.text);
-      } catch (error) { ctx.ui.notify("Advisor failed: " + (error instanceof Error ? error.message : String(error)), "error"); }
+      try { const job = start(ctx, { question: args.trim() }, ctx.signal); toast(ctx, `Advisor ${job.id} started in the background`); }
+      catch (error) { ctx.ui.notify("Advisor: " + (error instanceof Error ? error.message : String(error)), "warning"); }
     }
   });
-
-  pi.on("input", (event) => { if (event.source === "interactive") stuck.reset(); });
-
-  pi.on("tool_call", async (event, ctx) => {
+  pi.on("session_start", reset); pi.on("session_shutdown", reset);
+  pi.on("input", event => { if (event.source === "interactive") stuck.reset(); });
+  pi.on("before_agent_start", () => { active = true; interrupted = false; const entry = drain(); if (entry) { const { type: _type, ...message } = entry; return { message }; } });
+  pi.on("agent_start", () => { active = true; clearTimeout(deliveryTimer); deliveryTimer = undefined; });
+  const boundary = (event: { outcome: string; context?: { canContinue?: boolean } }) => {
+    if (event.outcome !== "completed" || event.context?.canContinue === false) return;
+    const entry = drain(); if (entry) return { entries: [entry], continue: true };
+  };
+  pi.on("turn_end", boundary);
+  pi.on("agent_before_settle", event => { interrupted = event.outcome !== "completed"; return boundary(event); });
+  pi.on("agent_settled", (_event, ctx) => { active = false; if (ctx) deliveryContext = ctx; notify(); });
+  pi.on("tool_call", (event, ctx) => {
     if (event.toolName === ADVISOR_TOOL || !options.enabled() || !options.gates()) return;
-    const trigger = stuck.call(callKey(event.toolName, event.input));
-    if (!trigger) return;
-    try {
-      const answer = await consult(ctx, { trigger }, ctx.signal);
-      return { block: true, reason: `Loop detected: ${trigger}. The advisor (${answer.model}) reviewed the situation:\n\n${answer.text}` };
-    } catch (error) {
-      ctx.ui.notify("Advisor gate failed: " + (error instanceof Error ? error.message : String(error)), "warning");
-      return undefined;
-    }
+    const trigger = stuck.call(callKey(event.toolName, event.input)); if (!trigger) return;
+    try { const job = start(ctx, { trigger }, ctx.signal); return { block: true, reason: `Loop detected: ${trigger}. Advisor ${job.id} is reviewing in the background. Change approach and collect its result with jar_advisor get/wait.` }; }
+    catch (error) { toast(ctx, "Advisor gate: " + (error instanceof Error ? error.message : String(error)), true); }
   });
-
-  pi.on("tool_result", async (event, ctx) => {
+  pi.on("tool_result", (event, ctx) => {
     if (event.toolName === ADVISOR_TOOL || !options.enabled() || !options.gates()) return;
-    const trigger = stuck.result(event.isError, event.toolName);
-    if (!trigger) return;
-    try {
-      const answer = await consult(ctx, { trigger }, ctx.signal);
-      deliver(ctx, `◆ Advisor · ${answer.model} · ${trigger}`, answer.text);
-    } catch (error) {
-      ctx.ui.notify("Advisor gate failed: " + (error instanceof Error ? error.message : String(error)), "warning");
-    }
+    const trigger = stuck.result(event.isError, event.toolName); if (!trigger) return;
+    try { start(ctx, { trigger }, ctx.signal); }
+    catch (error) { toast(ctx, "Advisor gate: " + (error instanceof Error ? error.message : String(error)), true); }
   });
-
-  return { consult, stuck };
+  return { consult, stuck, start, get, wait, cancel, isBusy: () => consultations.size > 0 || [...jobs.values()].some(job => job.state === "running"), dispose: reset };
 }

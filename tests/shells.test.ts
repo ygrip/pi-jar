@@ -68,7 +68,7 @@ test("jar_shell tool starts, lists, reads and kills", async () => {
     const started = await run({ action: "start", command: "echo hi; sleep 30", name: "hello", watch: "hi" });
     assert.match(started.content[0].text, /Started s1 · hello · running/);
     assert.equal("lines" in started.details.jobs[0], false, "tool details never duplicate retained shell logs");
-    assert.match(started.content[0].text, /woken when it matches or exits/);
+    assert.match(started.content[0].text, /next safe turn boundary.*use wait now/);
     await waitFor(() => manager.output("s1").includes("hi"));
     assert.match((await run({ action: "output", id: "s1" })).content[0].text, /hi/);
     assert.match((await run({ action: "list" })).content[0].text, /s1 · hello · running/);

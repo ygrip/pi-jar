@@ -171,15 +171,18 @@ export function delegateArgs(model: string | undefined, thinking: string | undef
     : session.source ? ["--fork", session.source, "--session-dir", session.sessionDir]
     : ["--session-dir", session.sessionDir];
   const extensions = extensionFlags(argv);
+  const tools = session?.tools ?? toolOverride ?? (!write ? READ_ONLY_TOOLS : undefined);
+  const ownExtension = fileURLToPath(new URL("../extensions/index.ts", import.meta.url));
+  // Default read-only children need only core file tools and pi-jar. Avoid importing every
+  // personal extension (and opening unused MCP/provider connections) for each scout.
+  // Explicit extension flags and optional inherited tools retain the parent's full setup.
+  const lean = !write && extensions.length === 0 && tools?.every(tool => (READ_ONLY_TOOLS as readonly string[]).includes(tool));
+  if (lean) extensions.push("--no-extensions", "--extension", ownExtension);
   // Worktree cwd/session forks (resumed ones too) do not inherit project extension discovery from the parent.
-  if (session?.source) {
-    const ownExtension = fileURLToPath(new URL("../extensions/index.ts", import.meta.url));
-    if (!extensions.includes(ownExtension)) extensions.push("--extension", ownExtension);
-  }
+  else if (session?.source && !extensions.includes(ownExtension)) extensions.push("--extension", ownExtension);
   const args = ["--mode", "rpc", ...sessionArgs, ...extensions];
   if (model) args.push("--model", model);
   if (thinking) args.push("--thinking", thinking);
-  const tools = session?.tools ?? toolOverride ?? (!write ? READ_ONLY_TOOLS : undefined);
   if (tools) args.push("--tools", tools.join(","));
   return args;
 }
@@ -846,12 +849,11 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
       // Hibernated: there is no process to stop, so the agent simply ends here.
       if (!proc) { finish("done"); return; }
       if (run.state === "working" && !proc.hibernating) {
-        const waiting = waitSettled();
         send({ type: "clear_queue" });
-        if (send({ type: "abort" })) {
-          if (!await settlesWithin(waiting, 3000) && !finished) hardStop();
-        } else hardStop();
+        if (!send({ type: "abort" })) hardStop();
       }
+      // EOF follows the queued abort in the same pipe. Pi can now dispose immediately;
+      // do not spend an abort grace and then another full process-exit grace serially.
       const stdin = proc.child.stdin;
       if (stdin && !stdin.writableEnded) stdin.end();
       const killer = setTimeout(() => { if (proc.child.exitCode === null) hardStop(); }, 3000);

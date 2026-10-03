@@ -176,6 +176,58 @@ test("a model picked by the user during a temporary role is kept on restore", wi
 }));
 
 
+test("custom profile role config reloads from isolated global and project files", withAgentDir(async () => {
+  const project = mkdtempSync(join(tmpdir(), "pi-jar-profile-restart-"));
+  try {
+    const h = harness();
+    h.manager.load(project, { version: 2, roles: { default: "p/initial" } }, "profile-abc12345");
+    h.manager.update("default", "p/global-custom", "global");
+    h.manager.update("plan", "p/project-custom", "project");
+    const restarted = harness();
+    restarted.manager.load(project, { version: 2, roles: { default: "p/stale-seed" } }, "profile-abc12345");
+    assert.equal(restarted.manager.get("default")?.model, "global-custom");
+    assert.equal(restarted.manager.get("plan")?.model, "project-custom");
+  } finally { rmSync(project, { recursive: true, force: true }); }
+}));
+
+test("stale temporary restore after profile switch preserves new profile active role", withAgentDir(async () => {
+  const h = harness();
+  h.manager.update("advisor", "p/auditor");
+  const restore = await h.manager.activateTemporary("advisor", h.ctx);
+  h.manager.invalidateTemporaryRestores();
+  h.manager.update("default", "p/new-profile");
+  await h.manager.activate("default", h.ctx, true);
+  assert.equal(h.manager.activeRole(), "default");
+  const modelCount = h.models.length;
+  await restore();
+  assert.equal(h.models.length, modelCount, "stale restore does not reset prior model");
+  assert.equal(h.manager.activeRole(), "default", "stale restore does not clear new role status");
+}));
+
+test("role storage refuses unsafe profile IDs", withAgentDir(async (directory) => {
+  const h = harness();
+  assert.throws(() => h.manager.load(directory, { version: 2, roles: {} }, "../escape"), /Invalid profile ID/);
+}));
+
+test("profile project role files are isolated while Default uses legacy project file", withAgentDir(async () => {
+  const project = mkdtempSync(join(tmpdir(), "pi-jar-profile-project-"));
+  try {
+    mkdirSync(join(project, ".pi", "pi-jar-profiles"), { recursive: true });
+    writeFileSync(join(project, ".pi", "pi-jar-roles.json"), JSON.stringify({ version: 2, roles: { plan: "p/default" } }));
+    writeFileSync(join(project, ".pi", "pi-jar-profiles", "profile-a1-roles.json"), JSON.stringify({ version: 2, roles: { plan: "p/a" } }));
+    const h = harness();
+    h.manager.load(project, { version: 2, roles: {} }, "default");
+    assert.equal(h.manager.get("plan")?.model, "default");
+    h.manager.load(project, { version: 2, roles: {} }, "profile-a1");
+    assert.equal(h.manager.get("plan")?.model, "a");
+    h.manager.load(project, { version: 2, roles: {} }, "profile-b2");
+    assert.equal(h.manager.get("plan"), undefined);
+    h.manager.update("plan", "p/b", "project");
+    assert.ok(readFileSync(join(project, ".pi", "pi-jar-profiles", "profile-b2-roles.json"), "utf8").includes("p/b"));
+    assert.equal(h.manager.activeProfileId(), "profile-b2");
+  } finally { rmSync(project, { recursive: true, force: true }); }
+}));
+
 test("role activation falls back to the next configured model when the primary is unavailable", withAgentDir(async () => {
   const h = harness();
   h.manager.update("scout", "p/expensive:low");

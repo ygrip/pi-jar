@@ -23,6 +23,8 @@ export interface JarVisualSettings {
   advisor: boolean;
   /** Consult the advisor automatically when the agent repeats a tool call or keeps failing. */
   advisorGates: boolean;
+  /** Opt-in provider-context pruning of reasoning from completed earlier user turns. */
+  contextDiet: boolean;
   /** Glyph set for footer, composer and views: unicode, Nerd Font icons, or plain ascii. */
   icons: IconSet;
   footer: FooterSettings;
@@ -37,7 +39,7 @@ export function isMaxSubagents(value: unknown): value is MaxSubagents {
 
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 4, advisor: true, advisorGates: true, icons: "unicode", footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 4, advisor: true, advisorGates: true, contextDiet: false, icons: "unicode", footer: { ...footer } };
 }
 
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
@@ -70,6 +72,7 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     maxSubagents: isMaxSubagents(value.maxSubagents) ? value.maxSubagents : fallback.maxSubagents,
     advisor: typeof value.advisor === "boolean" ? value.advisor : fallback.advisor,
     advisorGates: typeof value.advisorGates === "boolean" ? value.advisorGates : fallback.advisorGates,
+    contextDiet: typeof value.contextDiet === "boolean" ? value.contextDiet : fallback.contextDiet,
     icons: ICON_SETS.some((set) => set === value.icons) ? value.icons as IconSet : fallback.icons,
     footer: Object.fromEntries(FOOTER_FIELDS.map((field) => [field,
       typeof footer[field] === "boolean" ? footer[field] : fallback.footer[field]])) as FooterSettings

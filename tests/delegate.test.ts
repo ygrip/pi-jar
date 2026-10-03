@@ -40,8 +40,8 @@ test("subagents run in RPC mode with the parent's extensions, read-only tools pl
   assert.ok(READ_ONLY_TOOLS.includes("jar_todo"));
   assert.ok(!delegateArgs(undefined, undefined, true, ["node", "cli"]).includes("--tools"), "legacy write mode keeps the default tools");
   const fork = delegateArgs("p/m", undefined, false, ["node", "cli"], { source: "/tmp/parent.jsonl", sessionDir: "/tmp/forks" });
-  assert.deepEqual(fork.slice(0, 7), ["--mode", "rpc", "--fork", "/tmp/parent.jsonl", "--session-dir", "/tmp/forks", "--extension"]);
-  assert.ok(fork[7]!.endsWith("/extensions/index.ts"), "forks explicitly load pi-jar even without parent CLI extension flags");
+  assert.deepEqual(fork.slice(0, 8), ["--mode", "rpc", "--fork", "/tmp/parent.jsonl", "--session-dir", "/tmp/forks", "--no-extensions", "--extension"]);
+  assert.ok(fork[8]!.endsWith("/extensions/index.ts"), "lean forks explicitly load pi-jar even without parent CLI extension flags");
   assert.ok(!fork.includes("--no-session"));
   assert.equal(fork.at(-1), READ_ONLY_TOOLS.join(","));
   const worktree = delegateArgs("p/m", undefined, true, ["node", "cli"], {
@@ -70,6 +70,20 @@ test("subagents run in RPC mode with the parent's extensions, read-only tools pl
     registerDelegate({ registerTool() { registered = true; } } as never, roles({}), new DelegateRegistry());
     assert.equal(registered, false, "children do not get jar_delegate");
   } finally { delete process.env[CHILD_ENV]; }
+});
+
+test("default scouts load only pi-jar while optional tools and explicit parent extensions remain available", () => {
+  const plain = ["node", "cli"];
+  const scout = delegateArgs(undefined, undefined, false, plain);
+  assert.ok(scout.includes("--no-extensions"));
+  assert.ok(scout[scout.indexOf("--extension") + 1]!.endsWith("/extensions/index.ts"));
+  const optional = delegateArgs(undefined, undefined, false, plain, undefined, ["read", "web_search"]);
+  assert.ok(!optional.includes("--no-extensions"), "optional plugin tools retain auto-discovered extensions");
+  const explicit = delegateArgs(undefined, undefined, false, [...plain, "-e", "/custom.ts"]);
+  assert.ok(!explicit.includes("--no-extensions"));
+  assert.ok(explicit.includes("/custom.ts"));
+  const writer = delegateArgs(undefined, undefined, true, plain, { source: "/parent.jsonl", sessionDir: "/child", tools: WORKTREE_TOOLS });
+  assert.ok(!writer.includes("--no-extensions"), "writers keep multi_file_edit and other required plugins");
 });
 
 test("explicit active web tools and filtered parent inheritance produce per-child allowlists", async () => {
@@ -775,6 +789,39 @@ test("initial and resumed subagent turns wake the moderator over RPC without blo
   assert.match(host.sent[2]!.message.content, /stop subagent-op-.*completed/);
 });
 
+test("stop sends EOF immediately rather than waiting for an unacknowledged abort", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fake = fakeSpawn(() => {});
+  const host = moderatorHost(fake.spawn);
+  await host.delegate.execute("d", { tasks: [{ task: "inspect" }] }, undefined, undefined, quiet);
+  await tick();
+  const child = fake.children[0]!;
+  child.stdin.removeAllListeners("command"); // A busy extension does not acknowledge abort.
+  const stopping = host.registry.stop(host.registry.records()[0]!.key);
+  await tick();
+  assert.equal(child.stdin.writableEnded, true, "EOF is sent in the same shutdown phase as abort");
+  await stopping;
+  assert.equal(child.killed.length, 0, "a child honoring EOF exits without a forced grace timeout");
+});
+
+test("stop has one process-exit deadline when the child ignores both abort and EOF", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fake = fakeSpawn(() => {});
+  const host = moderatorHost(fake.spawn);
+  await host.delegate.execute("d", { tasks: [{ task: "inspect" }] }, undefined, undefined, quiet);
+  await tick();
+  const child = fake.children[0]!;
+  child.stdin.removeAllListeners("command");
+  child.stdin.removeAllListeners("finish");
+  const stopping = host.registry.stop(host.registry.records()[0]!.key);
+  await tick();
+  t.mock.timers.tick(2999);
+  assert.equal(child.killed.length, 0);
+  t.mock.timers.tick(1);
+  await stopping;
+  assert.ok(child.killed.includes("SIGTERM"), "one 3s budget, not consecutive abort and exit budgets");
+});
+
 test("stop never hangs when a grandchild keeps the child's stdio open after exit", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const fake = fakeSpawn((child) => { say(child, "done"); settle(child); });
@@ -828,7 +875,7 @@ test("pause and stop return receipts even when the child ignores abort", async (
   await until(() => record!.run.state === "stopped");
   assert.equal(record!.run.state, "stopped");
   assert.ok(host.sent.some(item => /stop subagent-op-.*completed/.test(item.message.content)), "the final handoff arrives via event");
-  assert.deepEqual(fake.children[0]!.killed, ["SIGTERM"]);
+  assert.deepEqual(fake.children[0]!.killed, [], "EOF-cooperative children exit without an unnecessary forced kill");
 });
 
 test("BTW asks return immediately and deliver exactly one answer event", async (t) => {

@@ -30,7 +30,7 @@ export interface SideAnswer { text: string; model: string }
  * Ask the model assigned to `role` (or the current model) a one-shot question outside the
  * conversation. Tries configured fallbacks in order on failure; cancellation never retries.
  */
-export async function askRole(ctx: ExtensionContext, roles: ModelRoleManager, usage: SideUsage | undefined, role: string,
+export async function askRole(ctx: ExtensionContext, roles: ModelRoleManager, usage: Pick<SideUsage, "add"> | undefined, role: string,
   systemPrompt: string, prompt: string, signal?: AbortSignal): Promise<SideAnswer> {
   const fallbacks = roles.fallbackSpecs?.(role) ?? [];
   const failures: string[] = [];
@@ -52,6 +52,8 @@ export async function askRole(ctx: ExtensionContext, roles: ModelRoleManager, us
       const result = await ctx.modelRegistry.streamSimple(model,
         { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
         { ...(reasoning ? { reasoning } : {}), ...(signal ? { signal } : {}) }).result();
+      // Callers with detached work can supply a session-generation-safe usage sink.
+      // Returned attempts (including cancelled attempts) still account for actual usage.
       const cost = result.usage?.cost?.total;
       usage?.add({ role, model: name, input: result.usage?.input ?? 0, output: result.usage?.output ?? 0, cacheRead: result.usage?.cacheRead ?? 0,
         cacheWrite: result.usage?.cacheWrite ?? 0, cost: Number.isFinite(cost) ? cost! : 0, at: Date.now() });

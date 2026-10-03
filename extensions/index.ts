@@ -1,5 +1,5 @@
 import { getAgentDir, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
@@ -17,12 +17,14 @@ import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
 import { GoalLoop } from "../src/goal-loop.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
+import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY, conversationStarted, pinnedProfileId } from "../src/profiles.ts";
 import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
 import { jarCommit } from "../src/commit.ts";
 import { registerAdvisor } from "../src/advisor.ts";
+import { registerContextDiet } from "../src/context-diet.ts";
 import { registerInfoPanels } from "../src/info-panels.ts";
 import { SideUsage } from "../src/side-model.ts";
 import { PlanMode } from "../src/plan.ts";
@@ -97,6 +99,7 @@ export default function piJar(pi: ExtensionAPI): void {
   installCompactBuiltinTools(pi);
   let demo = false;
   let visualSettings = defaultVisualSettings();
+  let profileStore: ProfileStore | undefined;
   let animations = visualSettings.animations;
   let enabled = visualSettings.ui;
   let disposeFooter: (() => void) | undefined;
@@ -303,10 +306,52 @@ export default function piJar(pi: ExtensionAPI): void {
   registerAskTool(pi);
   const modelRoles = new ModelRoleManager(pi);
   const sideUsage = new SideUsage();
-  registerAdvisor(pi, modelRoles, { enabled: () => visualSettings.advisor, gates: () => visualSettings.advisorGates, usage: sideUsage });
+  registerContextDiet(pi, () => visualSettings.contextDiet === true);
+  const advisor = registerAdvisor(pi, modelRoles, { enabled: () => !delegatedChild && visualSettings.advisor, gates: () => !delegatedChild && visualSettings.advisorGates, usage: sideUsage });
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
-  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild });
+  let followingTheme: string | undefined;
+  const profileEntries = (ctx: ExtensionContext): readonly unknown[] => {
+    try { return ctx.sessionManager.getEntries?.() ?? sessionBranch(ctx); } catch { return sessionBranch(ctx); }
+  };
+  const applyProfileTheme = (name: string, ctx: ExtensionContext) => {
+    if (!ctx.hasUI || ctx.mode !== "tui" || typeof ctx.ui.setTheme !== "function") return;
+    const target = name === "follow" ? followingTheme ?? "system" : name;
+    if (!ctx.ui.getTheme?.(target)) throw new Error(`Theme ${target} is not loaded`);
+    const result = ctx.ui.setTheme(target);
+    if (result && !result.success) throw new Error(result.error ?? `Could not apply theme ${target}`);
+  };
+  const initializeProfiles = (ctx: ExtensionContext) => {
+    const previousTheme = ctx.ui.theme?.name;
+    followingTheme ??= previousTheme ?? "system";
+    try {
+      if (!existsSync(join(getAgentDir(), PROFILE_FILE))
+        && (!ctx.hasUI || ctx.mode !== "tui" || typeof ctx.ui.getAllThemes !== "function")) {
+        profileStore = undefined; visualSettings = loadVisualSettings(getAgentDir()); return undefined;
+      }
+      modelRoles.load(ctx.cwd);
+      const legacyAccent = loadVisualSettings(getAgentDir()).accent;
+      const legacyTheme = accentTheme(legacyAccent);
+      const initialTheme = legacyAccent !== "follow" && ctx.ui.getTheme?.(legacyTheme) ? legacyTheme : previousTheme ?? "system";
+      const store = new ProfileStore(getAgentDir(), initialTheme, modelRoles.profileRoleConfig());
+      const entries = profileEntries(ctx);
+      const id = pinnedProfileId(entries) ?? (conversationStarted(entries) ? "default" : store.active().id);
+      const profile = store.list().find((item) => item.id === id);
+      if (!profile) throw new Error("This session's profile is no longer available");
+      applyProfileTheme(profile.theme, ctx);
+      if (store.activeName !== profile.name) store.activate(profile.name);
+      profileStore = store;
+      visualSettings = profile.settings;
+      composer.setProfile(profile.name);
+      return { roles: profile.roles, profileId: profile.id };
+    } catch (error) {
+      if (previousTheme) { try { applyProfileTheme(previousTheme, ctx); } catch {} }
+      profileStore = undefined; visualSettings = loadVisualSettings(getAgentDir()); composer.setProfile("Default");
+      ctx.ui.notify(`Could not load profiles: ${(error as Error).message}`, "warning");
+      return undefined;
+    }
+  };
+  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild, beforeSessionStart: initializeProfiles });
   let delegateController: DelegateController | undefined;
   registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges,
     discussionEnv: (key, name) => discussion?.childEnv(key, name),
@@ -478,7 +523,7 @@ export default function piJar(pi: ExtensionAPI): void {
           const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, Date.now()) : undefined;
           const open = todos?.all().filter((item) => !item.done) ?? [];
           const lines = welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), {
-            ...info, settingsClickable: tui.mode !== "regular", roles: live.roles,
+            ...info, model: ctx.model?.id, profile: profileStore?.activeName ?? "Default", settingsClickable: tui.mode !== "regular", roles: live.roles,
             quota: quota?.week?.used ?? quota?.fiveHour?.used,
             effort: ctx.model?.reasoning === false ? "off" : pi.getThinkingLevel?.(),
             ...(modelRoles.activeRole() ? { activeRole: modelRoles.activeRole()! } : {}),
@@ -612,11 +657,26 @@ export default function piJar(pi: ExtensionAPI): void {
     }
   };
 
-  const applyVisualSettings = (next: JarVisualSettings, ctx: ExtensionContext) => {
+  const persistVisualPreferences = (next: JarVisualSettings, ctx: ExtensionContext, theme?: string) => {
+    if (profileStore) {
+      try { profileStore.update(profileStore.activeName, { settings: next, ...(theme ? { theme } : {}) }); }
+      catch (error) { ctx.ui.notify("Profile preferences changed for this session but could not be saved: " + (error as Error).message, "warning"); return; }
+    }
+    if (!profileStore || profileStore.active().id === "default") {
+      try { saveVisualSettings(getAgentDir(), next); }
+      catch { ctx.ui.notify("Visual preferences changed for this session but could not be saved", "warning"); }
+    }
+  };
+  const accentTheme = (accent: JarVisualSettings["accent"]) => accent === "follow" ? "follow" : accent === "default" ? "pi-jar-dark" : `pi-jar-dark-${accent}`;
+  const applyVisualSettings = (next: JarVisualSettings, ctx: ExtensionContext, options: { persist?: boolean; accent?: boolean } = {}) => {
     const wasEnabled = enabled;
     const hadMotion = animations;
+    const accentChanged = next.accent !== visualSettings.accent;
     const quotaShown = !!footerTui && footerSettings.quota;
-    if (next.accent !== visualSettings.accent && next.accent !== "follow" && !selectAccent(ctx, next.accent)) {
+    if (options.accent !== false && accentChanged && next.accent === "follow") {
+      try { applyProfileTheme("follow", ctx); } catch (error) { ctx.ui.notify(String(error), "warning"); return; }
+    }
+    if (options.accent !== false && accentChanged && next.accent !== "follow" && !selectAccent(ctx, next.accent)) {
       ctx.ui.notify(`Accent ${next.accent} is not loaded`, "warning");
       return;
     }
@@ -646,15 +706,75 @@ export default function piJar(pi: ExtensionAPI): void {
     welcomeTui?.requestRender();
     // Quota shown again (field or UI back on): hiding it stopped lookups and dropped the cache.
     if (!quotaShown) refreshQuota(ctx);
-    try { saveVisualSettings(getAgentDir(), next); }
-    catch { ctx.ui.notify("Visual preferences changed for this session but could not be saved", "warning"); }
+    if (options.persist !== false) persistVisualPreferences(next, ctx, accentChanged ? accentTheme(next.accent) : undefined);
   };
 
+  let switchingProfile = false;
+  const canSwitchProfile = (ctx: ExtensionContext) => {
+    if (switchingProfile || advisor.isBusy() || !ctx.isIdle?.() || working.phase !== "idle" || planMode.isEnabled() || goals?.isActive() || subagents.running() > 0) {
+      ctx.ui.notify("Finish the active agent/workflow before switching profiles", "warning"); return false;
+    }
+    if (conversationStarted(profileEntries(ctx)) || pinnedProfileId(profileEntries(ctx)) !== undefined) {
+      ctx.ui.notify("This session's profile is locked. Open a new session to switch profiles", "warning"); return false;
+    }
+    return true;
+  };
+  const switchProfile = async (name: string, ctx: ExtensionContext) => {
+    if (!profileStore || name === profileStore.activeName || !canSwitchProfile(ctx)) return;
+    const store = profileStore;
+    const previous = store.active();
+    const previousTheme = ctx.ui.theme?.name;
+    const previousModel = ctx.model;
+    const previousRole = modelRoles.activeRole();
+    const previousThinking = pi.getThinkingLevel();
+    const next = store.list().find((profile) => profile.name === name);
+    if (!next) { ctx.ui.notify("Unknown profile: " + name, "warning"); return; }
+    switchingProfile = true;
+    try {
+      applyProfileTheme(next.theme, ctx);
+      store.activate(name);
+      modelRoles.invalidateTemporaryRestores();
+      modelRoles.load(ctx.cwd, next.roles, next.id);
+      composer.setProfile(next.name);
+      applyVisualSettings(next.settings, ctx, { persist: false, accent: false });
+      if (!await modelRoles.activate("default", ctx, true)) ctx.ui.notify("Profile loaded, but its default model is unavailable; keeping the current model", "warning");
+      repaint("profile"); welcomeTui?.requestRender();
+      ctx.ui.notify(`Profile: ${next.name}`, "info");
+    } catch (error) {
+      try { if (store.activeName !== previous.name) store.activate(previous.name); } catch {}
+      if (previousTheme) { try { applyProfileTheme(previousTheme, ctx); } catch {} }
+      modelRoles.load(ctx.cwd, previous.roles, previous.id);
+      try {
+        if (previousModel && ctx.model !== previousModel && !await pi.setModel(previousModel)) throw new Error("Previous model is unavailable");
+        pi.setThinkingLevel(previousThinking);
+        modelRoles.restoreActiveRole(previousRole, ctx);
+      } catch { ctx.ui.notify("Could not restore the previous model after the failed profile switch", "warning"); }
+      composer.setProfile(previous.name);
+      applyVisualSettings(previous.settings, ctx, { persist: false, accent: false });
+      ctx.ui.notify(`Could not switch profile: ${(error as Error).message}`, "warning");
+    } finally { switchingProfile = false; }
+  };
   openSettings = async (ctx) => {
     if (settingsOpen) return;
     settingsOpen = true;
     try { await openJarSettings(ctx, () => visualSettings,
-      (next) => applyVisualSettings(next, ctx), loadedAccents(ctx), piPreferences(ctx)); }
+      (next) => applyVisualSettings(next, ctx), loadedAccents(ctx), piPreferences(ctx), profileStore ? {
+        store: profileStore, themes: ctx.ui.getAllThemes?.().map((theme) => theme.name) ?? [],
+        roles: () => modelRoles.profileRoleConfig(), roleManager: modelRoles,
+        create: (name, theme, settings, roles) => { const profile = profileStore!.add(name, theme, { ...settings, accent: "follow" }, roles); ctx.ui.notify(`Created profile ${name}; select it in a fresh session`, "info"); return profile; },
+        select: (name) => switchProfile(name, ctx),
+        setTheme: (name) => {
+          const previousTheme = ctx.ui.theme?.name;
+          const next = { ...visualSettings, accent: "follow" as const };
+          try { applyProfileTheme(name, ctx); profileStore!.update(profileStore!.activeName, { theme: name, settings: next }); }
+          catch (error) { if (previousTheme) applyProfileTheme(previousTheme, ctx); throw error; }
+          applyVisualSettings(next, ctx, { persist: false, accent: false });
+          if (profileStore!.active().id === "default") {
+            try { saveVisualSettings(getAgentDir(), next); }
+            catch { ctx.ui.notify("Theme saved, but legacy Default preferences could not be updated", "warning"); }
+          }
+        }
+      } : undefined); }
     finally { settingsOpen = false; }
   };
 
@@ -675,7 +795,8 @@ export default function piJar(pi: ExtensionAPI): void {
   };
   pi.on("session_start", (_event, ctx) => {
     sideUsage.clear();
-    visualSettings = loadVisualSettings(getAgentDir());
+    if (!profileStore) initializeProfiles(ctx);
+    composer.setProfile(profileStore?.activeName ?? "Default");
     setIconSet(visualSettings.icons);
     animations = visualSettings.animations;
     enabled = visualSettings.ui;
@@ -743,7 +864,7 @@ export default function piJar(pi: ExtensionAPI): void {
     composer.setMascot(visualSettings.mascot);
     if (visualSettings.composer && enabled) composer.enable(ctx);
     suggest.sync();
-    if (visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
+    if (!profileStore && visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
     if (branch.length >= LARGE_SESSION_ENTRIES) {
       try {
         const prefs = piPreferences(ctx)?.get();
@@ -778,11 +899,20 @@ export default function piJar(pi: ExtensionAPI): void {
     welcomeTui.requestRender();
   };
   pi.on("input", (event, ctx) => {
+    if (profileStore && !conversationStarted(profileEntries(ctx))) {
+      const id = profileStore.active().id;
+      if (pinnedProfileId(profileEntries(ctx)) !== id) pi.appendEntry?.(PROFILE_ENTRY, { version: 1, id });
+    }
     if (event.source !== "interactive") return;
     dismissWelcome(ctx);
     if (!todosAcknowledged && todos?.all().every((item) => item.done)) { todosAcknowledged = true; updateTaskWidget(ctx); }
   });
-  pi.on("agent_start", (_event, ctx) => { dismissWelcome(ctx); working.start(); applyWorking(ctx); refreshQuota(ctx); });
+  pi.on("agent_start", (_event, ctx) => {
+    if (profileStore && pinnedProfileId(profileEntries(ctx)) !== profileStore.active().id) {
+      pi.appendEntry?.(PROFILE_ENTRY, { version: 1, id: profileStore.active().id });
+    }
+    dismissWelcome(ctx); working.start(); applyWorking(ctx); refreshQuota(ctx);
+  });
   pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
   pi.on("message_end", (event, ctx) => {
     // Every message (user, assistant, tool result) moves the context window, and a tool-heavy turn
@@ -880,6 +1010,15 @@ export default function piJar(pi: ExtensionAPI): void {
       } catch (error) { ctx.ui.notify("pi-jar: earlier sessions unavailable: " + String(error), "warning"); }
       const picked = await openPromptSearch(ctx, collectPrompts(sessionBranch(ctx), earlier));
       if (picked !== undefined) ctx.ui.setEditorText(picked);
+    }
+  });
+  pi.registerShortcut?.(Key.ctrlShift("tab"), {
+    description: "Switch pi-jar profile",
+    handler: async (ctx) => {
+      if (!ctx.hasUI || ctx.mode !== "tui" || !profileStore || settingsOpen) return;
+      const profiles = profileStore.list();
+      const index = profiles.findIndex((profile) => profile.name === profileStore!.activeName);
+      if (profiles.length > 1) await switchProfile(profiles[(index + 1) % profiles.length]!.name, ctx);
     }
   });
   pi.registerShortcut?.(Key.ctrlAlt("m"), {
@@ -997,8 +1136,7 @@ export default function piJar(pi: ExtensionAPI): void {
         const applied = selectAccent(ctx, selected);
         if (applied) {
           visualSettings = { ...visualSettings, accent: selected as JarVisualSettings["accent"] };
-          try { saveVisualSettings(getAgentDir(), visualSettings); }
-          catch { ctx.ui.notify("Accent changed for this session but could not be saved", "warning"); }
+          persistVisualPreferences(visualSettings, ctx, accentTheme(visualSettings.accent));
           applyWorking(ctx);
         }
         const valid = selected === "default" || ACCENT_NAMES.some((name) => name === selected);

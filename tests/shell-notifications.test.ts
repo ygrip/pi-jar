@@ -12,7 +12,7 @@ function fixture(t: TestContext) {
   const events: ShellEvent[] = [], jobs: ShellJob[] = [], sent: any[] = [];
   const hooks = new Map<string, Function>();
   const manager = {
-    takeNotifications: () => events.splice(0), pendingNotifications: () => events.length,
+    takeNotifications: () => events.splice(0), pendingNotifications: () => events.length, notificationSnapshot: () => [...events],
     restoreNotifications: (items: ShellEvent[]) => events.unshift(...items),
     summaries: () => jobs, verificationPending: () => jobs.filter(j => !j.complete && j.purpose !== "service")
   };
@@ -21,7 +21,7 @@ function fixture(t: TestContext) {
     registerMessageRenderer() {}, sendMessage: (message: unknown, options: unknown) => sent.push({ message, options })
   } as never, () => manager as never);
   t.after(() => controller.dispose());
-  return { events, jobs, sent, controller, hook: (name: string, event: unknown = {}) => hooks.get(name)?.(event) };
+  return { events, jobs, sent, controller, hook: (name: string, event: unknown = {}, ctx?: unknown) => hooks.get(name)?.(event, ctx) };
 }
 const completed = { outcome: "completed", context: { canContinue: true } };
 
@@ -50,6 +50,35 @@ test("active boundaries drain events once, rather than queuing follow-ups", t =>
   assert.equal(result.continue, true); assert.match(result.entries[0].content, /s1/);
   assert.equal(f.hook("agent_before_settle", completed), undefined);
   f.hook("agent_settled"); t.mock.timers.tick(1000); assert.equal(f.sent.length, 0);
+});
+
+test("completion UI feedback arrives during an in-flight model response without consuming its notification", t => {
+  const f = fixture(t);
+  const feedback: string[] = [];
+  f.hook("agent_start", {}, { hasUI: true, ui: { notify: (text: string) => feedback.push(text) } });
+  f.events.push({ kind: "exit", job: job("s1") }); f.controller.notify();
+  t.mock.timers.tick(300);
+  assert.equal(feedback.length, 1);
+  assert.match(feedback[0]!, /s1.*safe turn boundary/);
+  assert.doesNotMatch(feedback[0]!, /PRIVATE LOG/);
+  assert.equal(f.sent.length, 0, "never enqueue an irrevocable mid-response follow-up");
+  assert.equal(f.events.length, 1, "model can still acknowledge the previewed event");
+  f.controller.notify(); t.mock.timers.tick(300);
+  assert.equal(feedback.length, 1, "preview is coalesced and shown once");
+  const boundary = f.hook("turn_end", completed);
+  assert.match(boundary.entries[0].content, /s1/);
+} );
+
+test("acknowledgement and session replacement cancel pending UI completion previews", t => {
+  const f = fixture(t);
+  const feedback: string[] = [];
+  f.hook("agent_start", {}, { hasUI: true, ui: { notify: (text: string) => feedback.push(text) } });
+  f.events.push({ kind: "exit", job: job("s1") }); f.controller.notify();
+  f.events.splice(0); t.mock.timers.tick(300);
+  assert.equal(feedback.length, 0);
+  f.events.push({ kind: "exit", job: job("s2") }); f.controller.notify();
+  f.hook("session_start"); t.mock.timers.tick(300);
+  assert.equal(feedback.length, 0);
 });
 
 test("acknowledged events do not produce obsolete idle wakeups", t => {

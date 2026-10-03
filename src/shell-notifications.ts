@@ -1,4 +1,4 @@
-import type { ExtensionAPI, CustomMessageEntryDraft } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, CustomMessageEntryDraft } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { cleanText } from "./status.ts";
 import { describe, SHELL_MESSAGE, type ShellEvent, type ShellManager } from "./shells.ts";
@@ -34,14 +34,40 @@ export function registerShellNotifications(pi: ExtensionAPI, manager: () => Shel
   let interrupted = false;
   let deliveryFailures = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
+  let context: ExtensionContext | undefined;
+  const shown = new Set<string>();
+  const eventKey = (event: ShellEvent) => `${event.kind}:${event.job.id}`;
   const warned = new Set<string>();
-  const cancelTimer = () => { clearTimeout(timer); timer = undefined; };
+  const cancelTimer = () => { clearTimeout(timer); timer = undefined; clearTimeout(feedbackTimer); feedbackTimer = undefined; };
   const take = () => {
     cancelTimer();
     const events = manager()?.takeNotifications() ?? [];
+    shown.clear();
     return events.length ? shellNotification(events) : undefined;
   };
   const notify = () => {
+    // UI feedback must not wait for the remote model to finish reasoning. Keep model transport
+    // boundary-safe and acknowledgeable: this preview does not consume or enqueue a follow-up.
+    if (active && !interrupted && context?.hasUI && !feedbackTimer && manager()?.pendingNotifications()) {
+      const owner = manager(), ctx = context;
+      feedbackTimer = setTimeout(() => {
+        feedbackTimer = undefined;
+        if (!active || interrupted || owner !== manager() || ctx !== context) return;
+        const snapshot = owner?.notificationSnapshot() ?? [];
+        const known = new Set(snapshot.map(eventKey));
+        for (const key of shown) if (!known.has(key)) shown.delete(key);
+        const events = snapshot.filter(event => !shown.has(eventKey(event)));
+        if (!events.length) return;
+        const summary = shellNotification(events).details as ShellNotificationDetails;
+        const text = `${summary.summary}: ${events.slice(0, 3).map(event => describe(event.job)).join("; ")}. Model delivery waits for a safe turn boundary.`;
+        try {
+          ctx.ui.notify(cleanText(text, 420), events.some(event => event.job.exitCode !== 0 && event.kind === "exit") ? "warning" : "info");
+          for (const event of events) shown.add(eventKey(event));
+        } catch (error) { console.error("pi-jar: could not show shell completion", error); }
+      }, 300);
+      feedbackTimer.unref?.();
+    }
     if (active || interrupted || timer || !manager()?.pendingNotifications()) return;
     const owner = manager();
     timer = setTimeout(() => {
@@ -59,16 +85,17 @@ export function registerShellNotifications(pi: ExtensionAPI, manager: () => Shel
     }, 300);
     timer.unref?.();
   };
-  const reset = () => { cancelTimer(); active = false; interrupted = false; deliveryFailures = 0; warned.clear(); };
+  const reset = () => { cancelTimer(); active = false; interrupted = false; context = undefined; deliveryFailures = 0; warned.clear(); shown.clear(); };
 
   pi.registerMessageRenderer?.<ShellNotificationDetails>(SHELL_MESSAGE, (message, { expanded }, theme) => {
     const text = typeof message.content === "string" ? message.content : "Background shells";
     const summary = message.details?.summary ?? text.split("\n", 1)[0] ?? "Background shells";
     return new Text(expanded ? text : theme.fg("accent", cleanText(summary, 160)) + theme.fg("dim", " · expand for status"), 0, 0);
   });
-  pi.on?.("session_start", reset);
+  pi.on?.("session_start", (_event, ctx) => { reset(); context = ctx; });
   pi.on?.("session_shutdown", reset);
-  pi.on?.("before_agent_start", () => {
+  pi.on?.("before_agent_start", (_event, ctx) => {
+    context = ctx;
     active = true;
     interrupted = false;
     const entry = take();
@@ -76,7 +103,7 @@ export function registerShellNotifications(pi: ExtensionAPI, manager: () => Shel
     const { type: _type, ...message } = entry;
     return { message };
   });
-  pi.on?.("agent_start", () => { active = true; cancelTimer(); });
+  pi.on?.("agent_start", (_event, ctx) => { context = ctx; active = true; cancelTimer(); });
   pi.on?.("turn_end", event => {
     if (event.outcome !== "completed" || event.context?.canContinue === false) return;
     const entry = take();

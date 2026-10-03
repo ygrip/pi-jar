@@ -202,24 +202,44 @@ export async function createDelegateWorktree(cwd: string, signal?: AbortSignal):
     // and stage in bounded batches rather than two git processes per repository file.
     const entries: { rel: string; mode: string; oid: string }[] = [];
     const batched: { entry: (typeof entries)[number]; path: string; size: number }[] = [];
+    // Small bounded batches overlap independent file I/O without loading an entire repository
+    // into memory. All writes settle before failure cleanup removes the disposable worktree.
+    const pending: { rel: string; stat: Stats }[] = [];
+    let pendingBytes = 0;
+    const flush = async () => {
+      const chunk = pending.splice(0);
+      pendingBytes = 0;
+      const results = await Promise.allSettled(chunk.map(async ({ rel, stat }) => {
+        signal?.throwIfAborted();
+        const source = resolve(repoRoot, rel);
+        const bytes = stat.isSymbolicLink() ? Buffer.from(await readlink(source)) : await readFile(source);
+        signal?.throwIfAborted();
+        await writeSnapshot(root, rel, bytes, stat);
+        const entry = { rel, mode: stat.isSymbolicLink() ? "120000" : (stat.mode & 0o111) ? "100755" : "100644", oid: "" };
+        // stdin-paths follows symlinks and is line-based: hash those exceptional paths by bytes.
+        const path = resolve(root, rel);
+        if (stat.isSymbolicLink() || path.includes("\n")) entry.oid = (await gitText(root, ["hash-object", "-w", "--no-filters", "--stdin"], bytes, signal)).trim();
+        return { entry, path, size: bytes.length };
+      }));
+      const failure = results.find(result => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+      for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+        entries.push(result.value.entry);
+        if (!result.value.entry.oid) batched.push(result.value);
+      }
+    };
     for (const rel of paths) {
+      signal?.throwIfAborted();
       if (!safeFilePath(repoRoot, rel)) throw new Error("unsafe snapshot path: " + rel);
-      const source = resolve(repoRoot, rel);
-      const stat = statIfPresent(source);
+      const stat = statIfPresent(resolve(repoRoot, rel));
       if (!stat) continue;
       if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error("unsupported snapshot file: " + rel);
-      const bytes = stat.isSymbolicLink() ? Buffer.from(await readlink(source)) : await readFile(source);
-      signal?.throwIfAborted();
-      await writeSnapshot(root, rel, bytes, stat);
-      const entry = { rel, mode: stat.isSymbolicLink() ? "120000" : (stat.mode & 0o111) ? "100755" : "100644", oid: "" };
-      entries.push(entry);
-      // The private copy holds exactly the bytes read above. Hashing it by path would follow a
-      // symlink, and --stdin-paths is line-based, so those entries hash their bytes directly.
-      const path = resolve(root, rel);
-      if (stat.isSymbolicLink() || path.includes("\n")) {
-        entry.oid = (await gitText(root, ["hash-object", "-w", "--no-filters", "--stdin"], bytes, signal)).trim();
-      } else batched.push({ entry, path, size: bytes.length });
+      if (pending.length && (pending.length >= 4 || pendingBytes + stat.size > 32 * 1024 * 1024)) await flush();
+      pending.push({ rel, stat });
+      pendingBytes += stat.size;
     }
+    if (pending.length) await flush();
     const oids = await hashPaths(root, batched, true, signal);
     batched.forEach((item, index) => { item.entry.oid = oids[index]!; });
     if (entries.length) {

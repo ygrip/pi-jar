@@ -1,6 +1,6 @@
 # pi-jar
 
-A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earendil-works/pi). pi-jar turns the terminal into a more expressive agent workspace with a living pixel-fire welcome, an adaptive composer, first-class **plan**, **goal** and **role** workflows, tracked tasks, reviewable changes, background shells and parallel subagents.
+A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earendil-works/pi). pi-jar turns the terminal into a more expressive agent workspace with a living pixel-fire welcome, an adaptive composer, switchable **profiles**, first-class **plan**, **goal** and **role** workflows, tracked tasks, reviewable changes, background shells and parallel subagents.
 
 > Works with the current `@earendil-works/*` Pi API. Pi's core packages are peer dependencies (`"*"`), so pi-jar always runs against the Pi you have installed; it is tested against the latest release (0.87.x).
 
@@ -24,7 +24,7 @@ The showcase is captured from a real pi-jar terminal session: the torch-style `�
 | **Commit** | `/jar commit [note]` drafts a message for the staged changes with the `commit` role, lets you edit it, then commits (never pushes). |
 | **Tasks & questions** | A Claude/omp-style `jar_todo` checklist with subtasks and per-task progress that the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
 | **Change review** | Every file the agent or its editing subagents change is remembered as it was; `/diff` (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) shows changed files (each counted once) next to a colored diff, with accept or revert per file or all at once. |
-| **Background shells** | `jar_shell` runs dev servers, watchers and long tests in the background; the agent is woken when a watch pattern matches or the process exits, so it never polls. Running shells get a footer row; click it (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd>) to tail or kill them. |
+| **Background shells** | `jar_shell` runs dev servers, watchers and long tests in the background; watch/exit events wake an idle agent or reach it at the next safe turn boundary. Completion status appears immediately in the UI even during model reasoning. Running shells get a footer row; click it (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd>) to tail or kill them. |
 | **Subagents** | The main agent becomes a moderator over a configurable retained pool (2, 4, 6, 8 or 16; default 4). `jar_delegate` starts `scout`, `fork` or sandboxed `worktree` agents and returns immediately, so the main agent can keep responding to user steering; Pi RPC event-bus messages deliver initial and resumed turn completions without polling. `jar_subagent` peeks, steers, asks BTW questions, pauses, resumes and stops them. Workers can exchange bounded structured Q/A through `jar_discuss`; worktree changes stay isolated until stop, then safely enter `/diff`. |
 | **Sessions & history** | Recent sessions (with their goal and plan) on the welcome card, one click from resuming; <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> searches earlier prompts; pasted images show as chips under the composer. |
 | **Footer & themes** | Responsive footer (model, effort, session, cwd, context, RAM, cost, quota, goal, roles, branch, live subagents and shells) with unicode, [Nerd Font](https://www.nerdfonts.com) or ascii icons, and seven dark themes. |
@@ -79,6 +79,7 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | Shortcut | Action |
 | --- | --- |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> | Open pi-jar settings |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd> | Cycle profiles (theme and model roles) |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd> | Subagents and background shells (activity view) |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd> | Refresh the welcome (new message and flame), or show it again |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> | Toggle plan mode |
@@ -86,6 +87,14 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> | Review agent changes (`/diff`) |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> | Search earlier prompts into the composer |
 | <kbd>Tab</kbd> / <kbd>→</kbd> in an empty composer | Accept the dim suggestion into the input (it is not sent) |
+
+## Profiles
+
+Profiles keep separate themes, appearance settings, and model-role configurations. **Default** preserves your existing setup.
+
+Open `/jar settings` (or **Ctrl+Alt+S**) and choose **Profiles** to create or select a custom profile, or change its theme. The wizard lets you name it, choose its theme, configure roles, and review before saving. Cancelling leaves your existing setup unchanged.
+
+Press **Ctrl+Shift+Tab** to cycle profiles **only in a fresh, idle session**. Once the first prompt is sent, the session's profile is locked—even after the agent finishes—and restored when you resume it. Open a new session to switch. Active agents, subagents, and plan/goal workflows also block switching. Configure the selected profile's roles through `/roles`; changing one profile does not change another. The selected profile is remembered across restarts and shown on the welcome screen and beside the composer mascot: `mascot · (Profile) session_name`. Some terminals require an extended keyboard protocol to distinguish Ctrl+Shift+Tab.
 
 ## Welcome screen
 
@@ -115,7 +124,7 @@ The welcome stays until your first prompt, then dissolves (or hides immediately 
   | proud | `(★ᴗ★)` | a goal was completed |
   | poked | `(^o^)` | you clicked it |
 
-  The title also shows Pi's session name (or a stable readable alias like `silver-lantern`). Toggle the mascot in settings; `/jar composer off` restores Pi's editor with your draft intact.
+  The title also shows the active profile in parentheses, then Pi's session name (or a stable readable alias like `silver-lantern`): `mascot · (Default) silver-lantern`. Toggle the mascot in settings; `/jar composer off` restores Pi's editor with your draft intact.
 
 ## Plan mode
 
@@ -213,7 +222,7 @@ Roles map a purpose to a model. They live in `~/.pi/agent/pi-jar-roles.json` (Pi
 
 The advisor is a second model (the `advisor` role; the current model if unassigned) that sees a fresh view of the recent conversation plus `git status` and a diff stat, but cannot run tools.
 
-- **`jar_advisor({ question?, draft? })`** — the agent is told to use it before risky or hard-to-reverse choices, after two failed attempts, and before declaring complex work done; it passes its own candidate as `draft`. Available in plan mode too.
+- **`jar_advisor({ question?, draft? })`** — starts a background second opinion and immediately returns a request ID. Use `action: "status"`, `"get"`, bounded `"wait"` (at most 30 seconds), or `"cancel"` with that ID; a pending receipt is **not** reviewed approval. Advice arrives at a safe model boundary or wakes an idle agent, with immediate UI completion feedback. Requests have a 60-second deadline and bounded context; `/advisor` and automatic stuck-work gates are non-blocking too. Get completed advice before consequential decisions. Available in plan mode too.
 - **`/advisor [focus]`** — ask on demand; the answer is added to the conversation (visible) for the agent's next turn.
 - **Gates** — when the agent makes the same tool call three times within its last eight calls, the call is blocked and the advisor's review is returned instead; after three failing tool results in a row, the advice is steered into the running turn. At most two automatic consultations per prompt.
 - Settings → Pi toggles the advisor and the gates. Advisor calls are counted in `/usage`. The footer and welcome show it as a working teammate while it thinks.
@@ -256,7 +265,8 @@ This is a pi-jar enhancement: [pi-advisor](https://github.com/philipbrembeck/pi-
   Use `parent` with `append` to add a genuinely new subtask to active work; `start`, `done`, `open`, `edit`, `list`, `add` and `delete` remain available.
 - **`jar_ask`** — structured questions: numbered options with descriptions, single or multi-select, *Type your own answer* (multi-line, paste-friendly) and *Chat about this* to discuss before choosing.
 - **`/diff`** — review what the agent (and its editing subagents) changed since the first edit to each file: files with `+/−` counts on the left, a full-path header and numbered, colored diff on the right. Changed lines get a colored rail and tinted background, replaced lines highlight the changed words, code is syntax-highlighted for known languages, and collapsed regions are labeled `┄ N unchanged lines ┄`. `/` filters files; `t` switches unified and aligned side-by-side views (unified below 70 columns), `←`/`→` (or `[`/`]`) change the context from 0 lines to the whole file, `w` wraps long lines, and `n`/`p`, `Home`/`End` navigate. Large changes offer summary or explicit windowed review (`v`), with clearly labeled coarse fallback and existing safety limits—not arbitrary-file streaming. See [diff review](docs/DIFF-REVIEW.md). `a` accept (keep, stop tracking), `r` then `y` revert (restore the original, or remove a file it created), `A`/`R` for all. The footer shows `± N files · /diff` while anything is unreviewed; each file counts once no matter who edited it. Only `edit`/`write` changes inside the project are tracked; shell-made changes are not.
-- **`jar_shell`** — `start` (optional `name`, `watch` regex, `notify`, task/service `purpose`), `list`, `peek`, bounded `wait`, `output`, `kill`. ANSI-stripped logs have per-job caps and a 4 MiB aggregate budget; surfaced finished jobs compact to a 32 KiB tail. Live jobs retain useful tails and are never killed to reclaim logs. Watch/exit notifications are compact and coalesced; reads acknowledge observed events. Each running shell gets a footer row and an activity view (`/jar shells`) with `x` kill and `f` follow. All shells stop when the session ends.
+- **Context diet (opt-in)** — `/jar settings` → **Pi** → **Context diet (prior-turn reasoning)**. Saved independently per profile; OFF by default. Removes eligible thinking blocks from completed earlier user turns only in outgoing context, never from stored history. Current reasoning signatures, user requests, tool arguments/results, and workflow state remain intact; ambiguous tool chains are left unchanged. Opaque signature character counts are diagnostics, not token savings. Existing SoL-Pi observation packing remains responsible for tool-result projection.
+- **`jar_shell`** — `start` (optional `name`, `watch` regex, `notify`, task/service `purpose`), `list`, `peek`, bounded `wait`, `output`, `kill`. ANSI-stripped logs have per-job caps and a 4 MiB aggregate budget; surfaced finished jobs compact to a 32 KiB tail. Live jobs retain useful tails and are never killed to reclaim logs. Watch/exit notifications are compact and coalesced; reads acknowledge observed events. Active model responses cannot be interrupted by a completion event: the UI previews status without consuming it, and model delivery waits for a safe boundary. When no useful work remains, use bounded `wait` for the relevant finite jobs rather than waiting for an automatic wake-up. Each running shell gets a footer row and an activity view (`/jar shells`) with `x` kill and `f` follow. All shells stop when the session ends.
 - **`jar_delegate`** — spawns retained, session-scoped subagents up to **Max subagents** in `/jar settings` (2, 4, 6, 8 or 16; default 4). Idle, paused and hibernated agents count toward this pool; over-cap batches are rejected. `scout` is fresh/read-only, `fork` inherits conversation read-only, and `worktree` forks context into a path-guarded Git worktree. Settled retained agents close their Pi process after 30 seconds of quiet while keeping their private session and workspace; `resume`/`ask` relaunch that same session. Launch returns before startup or the first turn completes, including legacy one-shot `write: true` mode.
 - **`jar_subagent`** — `peek` reports progress, including the workspace path and changed files for recovery records; `steer` redirects a running worker; `resume` relaunches an idle/paused/hibernated agent. `ask`, `pause` and `stop` return accepted receipts immediately; answers and final handoffs arrive as `pi-jar.subagent` events. `stop` reconciles safe worktree changes; conflicts remain private and can be retried with `stop` after resolving parent drift. `discard` removes an unresolved recovery worktree without applying it. At most four active/recovery worktrees are admitted; resolve or discard one before starting another. Session shutdown reports paths of any preserved worktrees. Controls do not poll the child.
 - **Subagent capabilities** — each task can set `tools` or `inheritTools: true`; known-tool mode filters and child guards remain in force. See [tool capabilities](docs/SUBAGENT-TOOLS.md).

@@ -139,7 +139,12 @@ function writeConfig(file: string, config: RoleConfig): void {
   }
 }
 
-export const projectRoleFile = (cwd: string) => join(cwd, ".pi", ROLE_FILE);
+function profileRolePath(directory: string, profileId = "default"): string {
+  if (!/^[a-z0-9-]+$/.test(profileId)) throw new Error("Invalid profile ID");
+  return profileId === "default" ? join(directory, ROLE_FILE) : join(directory, "pi-jar-profiles", `${profileId}-roles.json`);
+}
+export const profileRoleFile = (directory: string, profileId?: string) => profileRolePath(directory, profileId);
+export const projectRoleFile = (cwd: string, profileId?: string) => profileRolePath(join(cwd, ".pi"), profileId);
 
 export function describeRole(row: RoleRow): string {
   const target = row.error ? "⚠ " + row.error
@@ -152,6 +157,7 @@ export class ModelRoleManager {
   private global: RoleConfig = readConfig(join(getAgentDir(), ROLE_FILE));
   private project: RoleConfig = { version: 2, roles: {} };
   private cwd: string | undefined;
+  private profileId = "default";
   private active: string | undefined;
   private readonly pi: ExtensionAPI;
   /** True while pi-jar itself is switching models, so its own changes are not seen as manual. */
@@ -166,11 +172,21 @@ export class ModelRoleManager {
   }
 
   /** Reload global and project files; project assignments override global ones per role. */
-  load(cwd?: string): void {
-    this.global = readConfig(join(getAgentDir(), ROLE_FILE));
+  load(cwd?: string, profileRoles?: RoleConfig, profileId = "default"): void {
+    const profileFile = profileRoleFile(getAgentDir(), profileId);
+    this.global = profileRoles && !existsSync(profileFile) ? parseRoleConfig(profileRoles) : readConfig(profileFile);
     this.cwd = cwd;
-    this.project = cwd ? readConfig(projectRoleFile(cwd)) : { version: 2, roles: {} };
+    this.profileId = profileId;
+    this.project = cwd ? readConfig(projectRoleFile(cwd, profileId)) : { version: 2, roles: {} };
   }
+  activeProfileId(): string { return this.profileId; }
+  /** Restore the label only, after a failed profile transaction restored model and effort. */
+  restoreActiveRole(role: string | undefined, ctx: ExtensionContext): void {
+    if (role !== undefined && !isRoleName(role)) throw new Error("Invalid role name");
+    this.active = role;
+    this.status(ctx);
+  }
+  profileRoleConfig(): RoleConfig { return structuredClone(this.global); }
 
   private merged(): Record<string, string> { return { ...this.global.roles, ...this.project.roles }; }
   activeRole(): string | undefined { return this.active; }
@@ -288,7 +304,7 @@ export class ModelRoleManager {
     const epoch = this.manualEpoch;
     return async () => {
       // A model or effort the user picked during the workflow wins over the saved one.
-      if (this.manualEpoch !== epoch) { this.active = undefined; this.status(ctx); return; }
+      if (this.manualEpoch !== epoch) return;
       this.applying = true;
       try { if (previousModel) await this.pi.setModel(previousModel); this.pi.setThinkingLevel(previousThinking); }
       finally { this.applying = false; }
@@ -310,6 +326,9 @@ export class ModelRoleManager {
     return await this.activate(next, ctx) ? next : undefined;
   }
 
+  /** Invalidate temporary role restorations after a profile change. */
+  invalidateTemporaryRestores(): void { this.manualEpoch++; this.active = undefined; }
+
   /** Assign (or clear with undefined) a role in the chosen scope. */
   update(role: string, spec: string | undefined, scope: RoleScope = this.scopeOf(role) ?? "global"): void {
     if (!isRoleName(role)) throw new Error("Invalid role name: " + role);
@@ -320,7 +339,7 @@ export class ModelRoleManager {
     const roles = { ...target.roles };
     if (normalized) roles[role] = normalized; else delete roles[role];
     const next: RoleConfig = { ...target, version: 2, roles };
-    writeConfig(scope === "project" ? projectRoleFile(this.cwd!) : join(getAgentDir(), ROLE_FILE), next);
+    writeConfig(scope === "project" ? projectRoleFile(this.cwd!, this.profileId) : profileRoleFile(getAgentDir(), this.profileId), next);
     if (scope === "project") this.project = next; else this.global = next;
   }
 
@@ -346,11 +365,11 @@ export class ModelRoleManager {
     if (scope === "project" && !this.cwd) throw new Error("Project roles need a working directory");
     const target = scope === "project" ? this.project : this.global;
     const next: RoleConfig = { ...target, fallbacks: { ...target.fallbacks, [role]: [...new Set(normalized)] } };
-    writeConfig(scope === "project" ? projectRoleFile(this.cwd!) : join(getAgentDir(), ROLE_FILE), next);
+    writeConfig(scope === "project" ? projectRoleFile(this.cwd!, this.profileId) : profileRoleFile(getAgentDir(), this.profileId), next);
     if (scope === "project") this.project = next; else this.global = next;
   }
 
-  register(openUi?: (ctx: ExtensionContext) => Promise<void>, options: { activateDefault?: () => boolean } = {}): void {
+  register(openUi?: (ctx: ExtensionContext) => Promise<void>, options: { activateDefault?: () => boolean; beforeSessionStart?: (ctx: ExtensionContext) => { roles?: RoleConfig; profileId?: string } | undefined } = {}): void {
     const manual = (_event: unknown, ctx: ExtensionContext) => {
       if (this.applying) return;
       this.manualEpoch++;
@@ -359,7 +378,8 @@ export class ModelRoleManager {
     this.pi.on("model_select", manual);
     this.pi.on("thinking_level_select", manual);
     this.pi.on("session_start", async (_event, ctx) => {
-      this.load(ctx.cwd);
+      const profile = options.beforeSessionStart?.(ctx);
+      this.load(ctx.cwd, profile?.roles, profile?.profileId);
       this.active = undefined;
       // Delegated children already received their role model/effort via CLI arguments.
       if (options.activateDefault?.() !== false && this.resolveCandidates("default").length) await this.activate("default", ctx, true);

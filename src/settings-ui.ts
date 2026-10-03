@@ -3,6 +3,9 @@ import { Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } fr
 import { FOOTER_FIELDS, type FooterField } from "./footer-settings.ts";
 import { ICON_SETS } from "./icons.ts";
 import { GOAL_ROUND_CHOICES, MAX_SUBAGENT_CHOICES, type JarAccent, type JarVisualSettings } from "./settings.ts";
+import { createProfileWizard } from "./profile-wizard.ts";
+import type { JarProfile, ProfileStore } from "./profiles.ts";
+import type { RoleConfig, ModelRoleManager } from "./model-roles.ts";
 
 const LABELS: Record<FooterField, string> = {
   model: "Model", effort: "Model effort", sessionName: "Session name", cwd: "Working directory",
@@ -10,8 +13,7 @@ const LABELS: Record<FooterField, string> = {
   extras: "Extension statuses", branch: "Git branch"
 };
 
-type Page = "appearance" | "footer" | "pi";
-const PAGES: Page[] = ["appearance", "footer", "pi"];
+type Page = "appearance" | "footer" | "pi" | "profiles";
 
 /** Pi-level preferences pi-jar can toggle (written to Pi's own settings). */
 export interface PiPreferences {
@@ -26,18 +28,22 @@ export async function openJarSettings(
   current: () => JarVisualSettings,
   update: (settings: JarVisualSettings) => void,
   availableAccents: readonly string[],
-  pi?: PiPreferences
+  pi?: PiPreferences,
+  profiles?: { store: ProfileStore; themes: readonly string[]; roles: () => RoleConfig; roleManager?: ModelRoleManager; create: (name: string, theme: string, settings: JarVisualSettings, roles: RoleConfig) => JarProfile; select(name: string): Promise<void>; setTheme(name: string): void }
 ): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
-  await ctx.ui.custom<void>((tui, theme, _keys, done) => {
-    let page: Page = "appearance";
+  const PAGES: Page[] = profiles ? ["appearance", "footer", "pi", "profiles"] : ["appearance", "footer", "pi"];
+  let lastPage: Page = "appearance";
+  while (true) {
+  const action = await ctx.ui.custom<"create" | "switch" | "theme" | undefined>((tui, theme, _keys, done) => {
+    let page: Page = lastPage;
     let selected = 0;
     let width = 64;
     const accents: JarAccent[] = ["follow", ...availableAccents.filter((name): name is JarAccent =>
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
     let choosing: "goalRounds" | "maxSubagents" | undefined;
     const choices = () => choosing === "maxSubagents" ? MAX_SUBAGENT_CHOICES : GOAL_ROUND_CHOICES;
-    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 6 : 7;
+    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 7 : page === "profiles" ? 3 : 7;
     const finishChoice = () => { selected = choosing === "maxSubagents" ? 3 : 2; choosing = undefined; };
     const piError = (error: unknown) => ctx.ui.notify("Could not change Pi setting: " + (error as Error).message, "error");
     const explainPool = () => choosing === "maxSubagents" || (page === "pi" && !choosing && selected === 3);
@@ -50,6 +56,10 @@ export async function openJarSettings(
         if (choosing === "maxSubagents") update({ ...state, maxSubagents: MAX_SUBAGENT_CHOICES[index]! });
         else update({ ...state, goalRounds: GOAL_ROUND_CHOICES[index]! });
         finishChoice();
+      } else if (page === "profiles") {
+        lastPage = page;
+        done(index === 0 ? "switch" : index === 1 ? "theme" : "create");
+        return;
       } else if (page === "footer") {
         const field = FOOTER_FIELDS[index];
         if (field) update({ ...state, footer: { ...state.footer, [field]: !state.footer[field] } });
@@ -66,6 +76,7 @@ export async function openJarSettings(
         }
         else if (index === 4) update({ ...state, advisor: !state.advisor });
         else if (index === 5) update({ ...state, advisorGates: !state.advisorGates });
+        else if (index === 6) update({ ...state, contextDiet: !state.contextDiet });
       } else if (index === 0) {
         const at = Math.max(0, accents.indexOf(state.accent));
         update({ ...state, accent: accents[(at + 1) % accents.length]! });
@@ -90,7 +101,7 @@ export async function openJarSettings(
       invalidate() {},
       handleInput(data: string) {
         if (matchesKey(data, Key.escape) || data === "q") {
-          if (choosing) { finishChoice(); tui.requestRender(); } else done();
+          if (choosing) { finishChoice(); tui.requestRender(); } else done(undefined);
           return;
         }
         if (choosing && (matchesKey(data, Key.tab) || matchesKey(data, Key.right)
@@ -112,19 +123,20 @@ export async function openJarSettings(
           tui.requestRender(); return { handled: true };
         }
         if (event.type !== "click" || event.button !== "left") return;
-        if (event.y === 0 && event.x >= width - 4) { done(); return { handled: true }; }
+        if (event.y === 0 && event.x >= width - 4) { done(undefined); return { handled: true }; }
         if (event.y === 1) {
           choosing = undefined;
           if (event.x >= 2 && event.x < Math.min(width - 2, 19)) { page = "appearance"; selected = 0; }
           else if (event.x >= 19 && event.x < Math.min(width - 2, 32)) { page = "footer"; selected = 0; }
-          else if (event.x >= 32 && event.x < width - 2) { page = "pi"; selected = 0; }
+          else if (event.x >= 32 && event.x < Math.min(width - 2, 41)) { page = "pi"; selected = 0; }
+          else if (profiles && event.x >= 41 && event.x < width - 2) { page = "profiles"; selected = 0; }
           else return;
           tui.requestRender(); return { handled: true, focus: true };
         }
         if (event.y >= 5 && event.y < 5 + visibleCount() && event.x >= 2 && event.x < width - 2) {
           selected = firstVisible() + event.y - 5; apply(selected); return { handled: true, focus: true };
         }
-        if (event.y === 5 + visibleCount() && event.x >= 2 && event.x < width - 2) { done(); return { handled: true }; }
+        if (event.y === 5 + visibleCount() && event.x >= 2 && event.x < width - 2) { done(undefined); return { handled: true }; }
       },
       render(available: number): string[] {
         width = Math.max(8, available);
@@ -136,7 +148,8 @@ export async function openJarSettings(
           + "─".repeat(Math.max(0, width - 4 - visibleWidth(title))) + "×╮");
         const tabs = line(theme.fg(page === "appearance" ? "accent" : "muted", "[ Appearance ]")
           + "   " + theme.fg(page === "footer" ? "accent" : "muted", "[ Footer ]")
-          + "   " + theme.fg(page === "pi" ? "accent" : "muted", "[ Pi ]"));
+          + "   " + theme.fg(page === "pi" ? "accent" : "muted", "[ Pi ]")
+          + (profiles ? "   " + theme.fg(page === "profiles" ? "accent" : "muted", "[ Profiles ]") : ""));
         const prefs = pi?.get();
         const divider = theme.fg("dim", "├" + "─".repeat(Math.max(0, width - 2)) + "┤");
         const allRows = choosing
@@ -149,7 +162,12 @@ export async function openJarSettings(
             row(2, "Goal auto rounds", String(state.goalRounds), true),
             row(3, "Max subagents (retained live pool)", String(state.maxSubagents), true),
             row(4, "Advisor (jar_advisor, /advisor)", state.advisor ? "ON" : "OFF", state.advisor),
-            row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates)
+            row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates),
+          row(6, "Context diet (prior-turn reasoning)", state.contextDiet ? "ON" : "OFF", state.contextDiet)
+          ] : page === "profiles" ? [
+            row(0, "Active profile", profiles!.store.activeName, true),
+            row(1, "Theme", profiles!.store.active().theme, true),
+            row(2, "Create profile…", "OPEN", true)
           ] : [
             row(0, "Accent", state.accent === "follow" ? "FOLLOW PI" : state.accent.toUpperCase(), true),
             row(1, "Motion", state.animations ? "ON" : "OFF", state.animations),
@@ -163,11 +181,12 @@ export async function openJarSettings(
         const rows = allRows.slice(start, start + pageSize());
         return [top, tabs, divider,
           line(theme.fg("accent", choosing === "maxSubagents" ? " MAX SUBAGENTS · RETAINED LIVE POOL"
-            : choosing === "goalRounds" ? " GOAL AUTO ROUNDS" : page === "footer" ? " FOOTER VISIBILITY" : page === "pi" ? " PI & WORKFLOWS" : " APPEARANCE & MOTION")),
+            : choosing === "goalRounds" ? " GOAL AUTO ROUNDS" : page === "footer" ? " FOOTER VISIBILITY" : page === "pi" ? " PI & WORKFLOWS" : page === "profiles" ? " PROFILES" : " APPEARANCE & MOTION")),
           line(theme.fg("dim", explainPool() ? " Live pool includes idle/paused subagents"
             : choosing ? " Select a value; Enter/click to save, Esc to cancel"
             : page === "footer" ? ` Footer fields ${start + 1}–${start + rows.length}/${fields()}`
-            : page === "pi" ? " Fullscreen mode enables clicks and copy-on-select" : " Accent cycles through loaded themes")),
+            : page === "pi" ? " Fullscreen mode enables clicks and copy-on-select"
+            : page === "profiles" ? " Switch only in a fresh, idle session" : " Accent cycles through loaded themes")),
           ...rows,
           line(theme.fg("dim", choosing ? " ↑↓: choose · Enter/click: save · Esc: cancel"
             : " Tab: section · ↑↓: choose · Enter/click: change · Esc")),
@@ -176,4 +195,17 @@ export async function openJarSettings(
       }
     };
   });
+  if (!action || !profiles) return;
+  try {
+    if (action === "create") {
+      await createProfileWizard(ctx, profiles.store, { themes: profiles.themes, settings: { ...current(), accent: "follow" }, roles: profiles.roles(), roleManager: profiles.roleManager, create: profiles.create });
+    } else if (action === "switch") {
+      const name = await ctx.ui.select("Choose a profile", profiles.store.list().map((profile) => profile.name));
+      if (name) await profiles.select(name);
+    } else {
+      const name = await ctx.ui.select("Profile theme", ["Follow Pi", ...profiles.themes.filter((name) => name !== "follow")]);
+      if (name) profiles.setTheme(name === "Follow Pi" ? "follow" : name);
+    }
+  } catch (error) { ctx.ui.notify("Could not change profile: " + (error as Error).message, "error"); }
+  }
 }

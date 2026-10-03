@@ -125,6 +125,8 @@ export class ShellManager {
     for (const event of events) if (this.jobs.has(event.job.id) && !this.pending.has(event.job.id)) this.pending.set(event.job.id, event);
   }
   pendingNotifications(): number { return this.pending.size; }
+  /** Non-consuming status snapshots for immediate UI feedback; never copy or expose log lines. */
+  notificationSnapshot(): ShellEvent[] { return [...this.pending.values()].map(event => ({ ...event, job: { ...event.job, lines: [] } })); }
   verificationPending(): Array<Omit<ShellJob, "lines">> {
     return [...this.jobs.values()].filter(entry => !entry.finished && entry.job.purpose !== "service").map(({ job }) => {
       const { lines: _lines, ...summary } = job;
@@ -438,6 +440,7 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
     promptGuidelines: [
       "Use jar_shell start for servers, watchers and slow commands; set watch to a regex for the line you are waiting for (e.g. \"listening|ready|error\").",
       "Do not poll: work while commands run, then use wait with explicit ids for relevant checks before the final summary. A bounded wait returns pending jobs honestly; never claim success without their exit codes. Do not wait for services/watchers. output, peek, list and wait acknowledge observed events, preventing stale replay.",
+      "Completion events cannot interrupt an in-flight model response. If no useful work remains, call wait for the relevant finite jobs immediately instead of thinking or waiting for an automatic wake-up.",
       "Notifications contain coalesced status, not log dumps. Inspect output only for relevant diagnostics. Mark never-ending jobs purpose: service and kill shells you no longer need."
     ],
     parameters: Parameters,
@@ -453,7 +456,7 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
           case "start": {
             const job = manager.start({ command: params.command ?? "", cwd: ctx.cwd, ...(params.name ? { name: params.name } : {}), ...(params.watch ? { watch: params.watch } : {}),
               ...(params.notify !== undefined ? { notify: params.notify } : {}), ...(params.purpose ? { purpose: params.purpose } : {}) });
-            return reply(`Started ${describe(job)} (pid ${job.pid ?? "?"}). ${job.notify ? "You will be woken when it " + (job.watch ? "matches or " : "") + "exits." : "Notifications are off; check it with output."}`);
+            return reply(`Started ${describe(job)} (pid ${job.pid ?? "?"}). ${job.notify ? "Completion reaches the model at the next safe turn boundary (or wakes it when idle). If no other useful work remains, use wait now." : "Notifications are off; check it with output."}`);
           }
           case "output": {
             if (!params.id) return reply("output needs an id.");

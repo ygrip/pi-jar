@@ -89,7 +89,7 @@ test("advisor tool, /advisor and the loop gate consult the advisor role", async 
   };
   const roles = { resolve: (role: string) => role === "advisor" ? { provider: "p", model: "opus", thinking: "high", via: ["advisor"] } : undefined };
   const usage = new SideUsage();
-  registerAdvisor(pi as never, roles as never, { enabled: () => enabled, gates: () => true, usage,
+  const advisor = registerAdvisor(pi as never, roles as never, { enabled: () => enabled, gates: () => true, usage,
     processRunner: async (_command, _args, options) => {
       assert.equal(options?.timeoutMs, 5000, "advisor Git reads are bounded");
       return Buffer.from("## main\n M a.ts");
@@ -109,23 +109,32 @@ test("advisor tool, /advisor and the loop gate consult the advisor role", async 
     }
   };
   const result = await tools.get("jar_advisor").execute("1", { question: "Is this right?", draft: "patch" }, undefined, undefined, ctx);
-  assert.equal(result.content[0].text, "Revise: check the token expiry.");
+  assert.equal(result.details.state, "running");
+  assert.match(result.content[0].text, /Advisor a1 started/);
+  const collected = await tools.get("jar_advisor").execute("wait", { action: "wait", id: result.details.id }, undefined, undefined, ctx);
+  assert.match(collected.content[0].text, /Revise: check the token expiry/);
   assert.equal(asked[0]!.model, "opus:high");
   assert.match(asked[0]!.prompt, /Is this right\?[\s\S]*patch[\s\S]*## main[\s\S]*fix login/);
 
+  events.get("agent_start")!({}, ctx);
   await commands.get("advisor")!("auth flow", ctx);
-  assert.equal(sent[0].message.customType, "pi-jar.advisor");
-  assert.match(sent[0].message.content, /◆ Advisor · p\/opus · auth flow[\s\S]*token expiry/);
-  assert.deepEqual(sent[0].options, { deliverAs: "nextTurn" });
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.equal(advisor.get("a2")?.state, "completed");
+  const boundary = events.get("turn_end")!({ outcome: "completed", context: { canContinue: true } }, ctx);
+  assert.equal(boundary.entries[0].customType, "pi-jar.advisor");
+  assert.match(boundary.entries[0].content, /◆ Advisor a2 · p\/opus · auth flow[\s\S]*token expiry/);
+  assert.equal(sent.length, 0, "active results are delivered once at a safe boundary, not an irrevocable follow-up");
 
   const call = { toolName: "bash", input: { command: "npm test" } };
-  assert.equal(await events.get("tool_call")!(call, ctx), undefined);
-  assert.equal(await events.get("tool_call")!(call, ctx), undefined);
-  const gate = await events.get("tool_call")!(call, ctx);
+  assert.equal(events.get("tool_call")!(call, ctx), undefined);
+  assert.equal(events.get("tool_call")!(call, ctx), undefined);
+  const gate = events.get("tool_call")!(call, ctx);
   assert.equal(gate.block, true);
-  assert.match(gate.reason, /Loop detected[\s\S]*token expiry/);
+  assert.match(gate.reason, /Loop detected[\s\S]*Advisor a3 is reviewing in the background/);
+  assert.equal((await advisor.wait("a3")).state, "completed");
   assert.equal(usage.all().length, 3);
 
   enabled = false;
   await assert.rejects(tools.get("jar_advisor").execute("2", {}, undefined, undefined, ctx), /turned off/);
+  advisor.dispose();
 });

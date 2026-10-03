@@ -418,7 +418,7 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.equal(draft, "keep this draft");
   const decorated = current?.({}, theme, {}) as { render(width: number): string[]; setText(text: string): void };
   assert.ok(titleRow(decorated.render(80)).includes("(•ᴗ•)"));
-  assert.ok(titleRow(decorated.render(80)).includes("session Welcome polish"));
+  assert.ok(titleRow(decorated.render(80)).includes("(Default) Welcome polish"));
   assert.match(plainLines(decorated.render(80))[0]!, /^ {3,5}[▴▲∙*·ˇ★]/, "flame tips perch above the face");
   decorated.setText("editing");
   style.disable(ctx as never);
@@ -482,10 +482,10 @@ test("composer face tracks observed phases, refreshes session title, honors moti
   const editor = current?.(tui, theme, {}) as { render(width: number): string[] };
   const title = () => titleRow(editor.render(40));
   assert.ok(title().includes("(•ᴗ•)") || title().includes("(-ᴗ-)"));
-  assert.ok(title().includes("session Welcome polish"));
+  assert.ok(title().includes("(Default) Welcome polish"));
   sessionName = "Flame pass";
   style.refreshSession(ctx as never);
-  assert.ok(title().includes("session Flame pass"));
+  assert.ok(title().includes("(Default) Flame pass"));
   style.setActivity("generating", true);
   const generatingRedraws = redraws;
   await new Promise((resolve) => setTimeout(resolve, 700));

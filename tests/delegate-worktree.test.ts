@@ -59,6 +59,29 @@ test("delegate worktree snapshots dirty and untracked parent state, then applies
   }
 });
 
+test("bounded concurrent snapshots preserve every nested file's bytes and executable mode", async () => {
+  const { root } = initRepo();
+  let worktree: Awaited<ReturnType<typeof createDelegateWorktree>> | undefined;
+  try {
+    const files: string[] = [];
+    for (let index = 0; index < 37; index++) {
+      const directory = `group-${index % 3}`;
+      mkdirSync(join(root, directory), { recursive: true });
+      const path = `${directory}/item-${index}.txt`;
+      files.push(path);
+      writeFileSync(join(root, path), `snapshot ${index}\n`);
+    }
+    chmodSync(join(root, files[15]!), 0o755);
+    worktree = await createDelegateWorktree(root);
+    for (const [index, path] of files.entries()) assert.equal(readFileSync(join(worktree.root, path), "utf8"), `snapshot ${index}\n`);
+    assert.equal(lstatSync(join(worktree.root, files[15]!)).mode & 0o777, 0o755);
+    assert.deepEqual(await worktreeChangedFiles(worktree), []);
+  } finally {
+    if (worktree) await disposeDelegateWorktree(worktree);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("delegate worktree refuses to overwrite a parent file that changed after the snapshot", async () => {
   const { root } = initRepo();
   const worktree = await createDelegateWorktree(root);

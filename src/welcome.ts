@@ -1,4 +1,4 @@
-import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { FLAME_RAMP, FLAME_WIDTH, flameFrame, rgb, supportsTruecolor } from "./flame.ts";
 import { cleanText } from "./status.ts";
 import { iconSet, withIcon } from "./icons.ts";
@@ -10,6 +10,8 @@ export interface WelcomeInfo {
   model?: string;
   effort?: string;
   activeRole?: string;
+  /** Active configuration profile, shown even before a session is named. */
+  profile?: string;
   project?: string;
   context?: string;
   cost?: string;
@@ -189,6 +191,8 @@ function card(width: number, fg: Paint, info: WelcomeInfo): string[] {
     cell(center(fg("dim", "— welcome to ") + fg("accent", "pi-jar") + fg("dim", " —"), inner)),
     cell(""),
     divider,
+    ...wrapTextWithAnsi(cleanText(info.profile ?? "Default", 32) || "Default", Math.max(1, inner - labelWidth))
+      .map((line, index) => cell(index ? fg("dim", " ".repeat(labelWidth)) + fg("accent", line) : label("PROFILE", line, "accent"))),
     cell(label("PROJECT", withIcon("folder", info.project || "unavailable") + " · " + git, info.dirty ? "warning" : "muted")),
     cell(label("SESSION", [info.context ?? "ctx ?", quota, info.cost ?? ""].filter(Boolean).join(" · "))),
     divider,
@@ -262,6 +266,7 @@ function renderWelcome(width: number, frame: number, fg: Paint, info: WelcomeInf
       ...flame.slice(4).map((line) => fit(sliceByColumn(line, start, Math.min(width, FLAME_WIDTH)))),
       ...PI_COMPACT.map((line) => fit(fg("accent", line))),
       fit(fg("accent", "pi-jar")),
+      fit(fg("accent", "Profile: " + (cleanText(info.profile ?? "Default", 32) || "Default"))),
       ...wrap(cleanText(info.message ?? HOPEFUL_WELCOME_MESSAGES[0], 100), width).map((line) => fit("\x1b[1m" + fg("warning", line) + "\x1b[22m")),
       fit(fg(info.settingsClickable === false ? "dim" : "accent", info.settingsClickable === false ? "ctrl+alt+s settings" : "[ ⚙ Settings ]")),
       ""

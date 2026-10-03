@@ -5,6 +5,7 @@ import type { SuggestionState } from "./suggest.ts";
 import type { WorkingPhase } from "./working.ts";
 import { imageChip, imageInfo, imagePaths } from "./attachments.ts";
 import { RowCache } from "./row-cache.ts";
+import { cleanText } from "./status.ts";
 // Aliased: roundedInput has a parameter named `icon`.
 import { icon as glyph, type IconKey } from "./icons.ts";
 
@@ -65,6 +66,8 @@ function bottomBorderIndex(lines: readonly string[], visibleRows?: number): numb
 const overflowLabel = (line: string | undefined) => /[↑↓]\s*\d+\s*more/.exec(stripTerminalSequences(line ?? ""))?.[0];
 
 export interface RoundedInputOptions {
+  /** Active profile shown between the mascot and human session title. */
+  profile?: string;
   /** Dim inline suggestion shown after the cursor when the draft is empty. */
   ghost?: string;
   /** Dim key hints in the bottom border. */
@@ -96,12 +99,15 @@ export function roundedInput(lines: string[], width: number, focused: boolean, t
   const border = focused && focusPaint ? focusPaint : theme.borderColor;
   const dim = options.dim ?? ((text: string) => text);
   // Painter samples catch a theme change behind the same function.
-  const key = [width, icon, session, options.ghost ?? "", options.hint ?? "", options.paintedIcon ?? "", options.visibleRows ?? "",
+  const profile = options.profile === undefined ? undefined : cleanText(options.profile, 32) || "Default";
+  const key = [width, icon, session, profile ?? "", options.ghost ?? "", options.hint ?? "", options.paintedIcon ?? "", options.visibleRows ?? "",
     options.below ?? "", glyph("tab"), border("─"), dim("─")].join("\0");
   if (lastFrame?.key === key && lastFrame.border === border && lastFrame.dim === options.dim && sameLines(lastFrame.lines, lines)) return lastFrame.framed.slice();
   const bottom = bottomBorderIndex(lines, options.visibleRows);
   const inner = width - 2;
-  const meta = session ? `${icon} · session ${session}` : icon;
+  const meta = profile !== undefined
+    ? `${icon} · (${profile})${session ? " " + cleanText(session, 120) : ""}`
+    : session ? `${icon} · session ${session}` : icon;
   const title = truncateToWidth(` ${meta} `, width - 3);
   const paintedTitle = options.paintedIcon && title.includes(icon) ? title.replace(icon, options.paintedIcon) : title;
   const above = overflowLabel(lines[0]);
@@ -143,6 +149,7 @@ export interface ComposerDecor {
   /** Flame-tip row above the frame, or undefined when there is no room. */
   tip(width: number): string | undefined;
   session(): string;
+  profile?(): string;
   ghost(): string | undefined;
   hint(): string | undefined;
   accept(): string | undefined;
@@ -200,7 +207,7 @@ class RoundedEditor extends CustomEditor {
     const paintedIcon = this.decor.paintedIcon();
     const framed = roundedInput(inner, width, this.focused, this.colors, this.paint, icon, session, {
       ...(ghost ? { ghost } : {}), ...(hint ? { hint } : {}), ...(paintedIcon ? { paintedIcon } : {}),
-      ...(visibleRows != null ? { visibleRows } : {}), dim: this.decor.dim,
+      ...(visibleRows != null ? { visibleRows } : {}), profile: this.decor.profile?.(), dim: this.decor.dim,
       ...(below ? { below } : {})
     });
     const tip = width >= 8 ? this.decor.tip(width) : undefined;
@@ -272,7 +279,7 @@ class ThemedEditor implements EditorComponent {
     const session = this.decor.session();
     const paintedIcon = this.decor.paintedIcon();
     const framed = roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, icon, session, {
-      ...(ghost ? { ghost } : {}), ...(paintedIcon ? { paintedIcon } : {}), dim: this.decor.dim,
+      ...(ghost ? { ghost } : {}), ...(paintedIcon ? { paintedIcon } : {}), profile: this.decor.profile?.(), dim: this.decor.dim,
       ...(below ? { below } : {})
     });
     const tip = width >= 8 ? this.decor.tip(width) : undefined;
@@ -303,6 +310,7 @@ export class ComposerStyle {
   private animations = true;
   private mascotOn = true;
   private session = "";
+  private profile = "Default";
   private cwd = process.cwd();
   private lastKey = "";
   private readonly mascot = new Mascot();
@@ -327,6 +335,7 @@ export class ComposerStyle {
       return " ".repeat(3) + paintTip(tip, mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined);
     },
     session: () => this.session,
+    profile: () => this.profile,
     ghost: () => this.suggestions?.text,
     hint: () => this.suggestions?.text
       ? `${keyHint("tab", "accept")} · ${keyHint("enter", "send")} · ${keyHint("shiftEnter", "newline")}`
@@ -356,6 +365,14 @@ export class ComposerStyle {
     this.unsubscribe?.();
     this.suggestions = state;
     this.unsubscribe = state.onChange(() => { if (this.enabled) this.tui?.requestRender(); });
+  }
+
+  /** Update the title without replacing the editor or losing its draft/history. */
+  setProfile(name: string): void {
+    const next = cleanText(name, 32) || "Default";
+    if (next === this.profile) return;
+    this.profile = next;
+    if (this.enabled) this.tui?.requestRender();
   }
 
   setMascot(on: boolean): void {
