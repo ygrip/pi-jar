@@ -16,7 +16,8 @@ export function conversationStarted(entries: readonly unknown[]): boolean {
     || (entry.type === "message" && isPlainObject(entry.message) && entry.message.role === "user")));
 }
 export function pinnedProfileId(entries: readonly unknown[]): string | undefined {
-  for (const entry of [...entries].reverse()) {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
     if (isPlainObject(entry) && entry.type === "custom" && entry.customType === PROFILE_ENTRY
       && isPlainObject(entry.data) && entry.data.version === 1 && typeof entry.data.id === "string") return entry.data.id;
   }

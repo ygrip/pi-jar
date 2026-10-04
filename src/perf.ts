@@ -185,6 +185,9 @@ export class RenderScheduler {
 
 /** Mid-turn context recomputation happens at most this often; boundaries refresh at once. */
 export const CONTEXT_SAMPLE_MS = 750;
+/** Costly samples widen the window to keep mid-turn sampling near a 1% duty cycle, up to this cap. */
+export const CONTEXT_SAMPLE_MAX_MS = 5000;
+const CONTEXT_SAMPLE_DUTY = 100;
 export interface ContextUsageLike { percent?: number | null }
 export interface ContextSamplingStats {
   label: string;
@@ -197,6 +200,8 @@ export interface ContextSamplingStats {
   /** Median over the latest samples. */
   medianMs?: number;
   lastSampleAgeMs?: number;
+  /** Current mid-turn throttle window, widened from the median sample cost. */
+  windowMs: number;
   dirty: boolean;
   pending: boolean;
 }
@@ -253,18 +258,29 @@ export class ContextSampler {
       const before = this.current;
       this.sample();
       if (this.current !== before) this.changed();
-    }, Math.max(0, (this.lastSampleAt ?? Number.NEGATIVE_INFINITY) + this.throttleMs - this.now()));
+    }, Math.max(0, (this.lastSampleAt ?? Number.NEGATIVE_INFINITY) + this.windowMs() - this.now()));
     this.timer.unref?.();
   }
 
   stats(): ContextSamplingStats {
-    const sorted = [...this.durations].sort((a, b) => a - b);
+    const median = this.medianMs();
     return {
       label: this.current, ...this.counts,
-      ...(sorted.length ? { medianMs: sorted[Math.floor(sorted.length / 2)]! } : {}),
+      ...(median !== undefined ? { medianMs: median } : {}),
       ...(this.lastSampleAt !== undefined ? { lastSampleAgeMs: this.now() - this.lastSampleAt } : {}),
-      dirty: this.stale, pending: this.timer !== undefined
+      windowMs: this.windowMs(), dirty: this.stale, pending: this.timer !== undefined
     };
+  }
+
+  private medianMs(): number | undefined {
+    if (!this.durations.length) return undefined;
+    return [...this.durations].sort((a, b) => a - b)[Math.floor(this.durations.length / 2)]!;
+  }
+
+  /** Cost-adaptive: large sessions whose usage walk is slow sample less often mid-turn. */
+  private windowMs(): number {
+    const cost = (this.medianMs() ?? 0) * CONTEXT_SAMPLE_DUTY;
+    return Math.max(this.throttleMs, Math.min(CONTEXT_SAMPLE_MAX_MS, Math.round(cost)));
   }
 
   /** Session shutdown: no timer, and no reference to the old session's context. */
@@ -386,6 +402,7 @@ export function formatPerf(snapshot: PerfSnapshot): string {
     ["dirty marks", count(sampling.marks)],
     ["total time", ms(sampling.totalMs)],
     ["max time", ms(sampling.maxMs) + (sampling.medianMs !== undefined ? ` (median ${ms(sampling.medianMs)})` : "")],
+    ["window", ms(sampling.windowMs) + " mid-turn"],
     ["last sample age", sampling.lastSampleAgeMs !== undefined ? age(sampling.lastSampleAgeMs) : "never"],
     ["pending", sampling.pending ? "sample scheduled" : sampling.dirty ? "yes" : "no"]
   ]);

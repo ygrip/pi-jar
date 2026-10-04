@@ -1,6 +1,6 @@
 {
   "name": "pi-jar",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A warm, role-aware Pi terminal workspace with switchable profiles, animated UI, plan and goal workflows, tasks, change review, model roles, background shells and subagents.",
   "type": "module",
   "license": "MIT",

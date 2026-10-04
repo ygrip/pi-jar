@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ContextSampler, formatPerf, LARGE_SESSION_ENTRIES, processRss, RENDER_TIERS, RenderScheduler, renderTier, type RenderKind } from "../src/perf.ts";
+import { CONTEXT_SAMPLE_MAX_MS, CONTEXT_SAMPLE_MS, ContextSampler, formatPerf, LARGE_SESSION_ENTRIES, processRss, RENDER_TIERS, RenderScheduler, renderTier, type RenderKind } from "../src/perf.ts";
 
 /** 100 synchronous deltas, then 100 more spread one per 10 ms over a second, then a long quiet tail. */
 function backgroundWorkload(tick: (ms: number) => void, entries: number) {
@@ -172,6 +172,26 @@ test("context usage is cached, sampled once per window during message bursts, re
   assert.equal(calls, 3, "no sample after shutdown");
 });
 
+test("context sampling widens its mid-turn window with the measured sample cost", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  let calls = 0;
+  // A large session: each usage walk costs ~20 ms of real time.
+  const slow = () => { calls++; const until = performance.now() + 20; while (performance.now() < until) { /* busy */ } return { percent: 50 }; };
+  const sampler = new ContextSampler(() => {});
+  assert.equal(sampler.stats().windowMs, CONTEXT_SAMPLE_MS, "no measurement keeps the base window");
+  sampler.refresh(slow);
+  const window = sampler.stats().windowMs;
+  assert.ok(window >= 2000 && window <= CONTEXT_SAMPLE_MAX_MS, `window ${window} follows ~1% duty cycle`);
+  sampler.markDirty(slow);
+  t.mock.timers.tick(1500);
+  assert.equal(calls, 1, "a costly session does not resample at the base 750 ms cadence");
+  t.mock.timers.tick(CONTEXT_SAMPLE_MAX_MS);
+  assert.equal(calls, 2, "the widened window still samples within the cap");
+  sampler.refresh(slow);
+  assert.equal(calls, 3, "boundaries refresh immediately regardless of cost");
+  sampler.dispose();
+});
+
 test("/jar perf formats every section from on-demand stats", () => {
   const text = formatPerf({
     entries: 1142, context: "ctx 78%", rssBytes: 612 * 1048576, now: 100_000,
@@ -183,7 +203,7 @@ test("/jar perf formats every section from on-demand stats", () => {
       scheduler.dispose();
       return stats;
     })(),
-    sampling: { label: "ctx 78%", calls: 12, errors: 0, marks: 340, totalMs: 4.5, maxMs: 1.25, medianMs: 0.3, lastSampleAgeMs: 3200, dirty: false, pending: false },
+    sampling: { label: "ctx 78%", calls: 12, errors: 0, marks: 340, totalMs: 4.5, maxMs: 1.25, medianMs: 0.3, lastSampleAgeMs: 3200, windowMs: 750, dirty: false, pending: false },
     subagents: { retained: 4, live: 2, hibernated: 2, recovery: 1, recoveryLimit: 4, pids: [101, 202] },
     childRssBytes: 300 * 1048576,
     shells: { live: 2, finished: 8, retainedChars: 2_400_000, budgetChars: 8_000_000, services: 1, oldestLiveStartedAt: 40_000,
