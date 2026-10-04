@@ -1,0 +1,23 @@
+docs/EFFICIENCY_PLAN.md
+  705ede6baed55f17 1,3-6,8-39,41-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "8a2554047180c3651c7ddcee852dc0e117849df4",
+  "prompts": {
+    "705ede6baed55f17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d57c9b8b-03c7-46b4-a0ed-c133b6d281b9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 39,
+      "total_deletions": 103,
+      "accepted_lines": 39,
+      "overriden_lines": 0
+    }
+  }
+}
