@@ -1,0 +1,23 @@
+src/workflow-context.ts
+  705ede6baed55f17 1-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "1120d00d587a8cbf57f83689b0a63f2524709608",
+  "prompts": {
+    "705ede6baed55f17": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d57c9b8b-03c7-46b4-a0ed-c133b6d281b9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 37,
+      "total_deletions": 0,
+      "accepted_lines": 37,
+      "overriden_lines": 0
+    }
+  }
+}
