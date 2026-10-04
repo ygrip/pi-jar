@@ -26,6 +26,19 @@ export class SideUsage {
 
 export interface SideAnswer { text: string; model: string }
 
+/** Roles already told, this process, that they ran on the current (main) model. */
+const unsetRoleNotices = new Set<string>();
+
+/** An unassigned side role silently costs main-model prices; say so once per role. */
+function noteCurrentModel(ctx: ExtensionContext, role: string, model: string): void {
+  if (unsetRoleNotices.has(role)) return;
+  unsetRoleNotices.add(role);
+  try {
+    ctx.ui?.notify(`${role} role is unset, so it used the current model (${model}). `
+      + `Assign a cheaper one with /roles set ${role} PROVIDER/MODEL.`, "info");
+  } catch { /* the notice is advisory */ }
+}
+
 /**
  * Ask the model assigned to `role` (or the current model) a one-shot question outside the
  * conversation. Tries configured fallbacks in order on failure; cancellation never retries.
@@ -71,6 +84,7 @@ export async function askRole(ctx: ExtensionContext, roles: ModelRoleManager, us
       }
       text = text.trim();
       if (!text) throw new Error(`${name} returned an empty answer`);
+      if (!assigned) noteCurrentModel(ctx, role, name);
       return { text, model: name };
     } catch (error) {
       signal?.throwIfAborted();

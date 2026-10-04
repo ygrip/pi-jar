@@ -11,6 +11,7 @@ import { extractApproachSteps, isSafePlanCommand, PLAN_TEMPLATE, planTextFromSte
 import { cleanText } from "./status.ts";
 import { sessionBranch } from "./session-branch.ts";
 import { type TodoStore } from "./tasks.ts";
+import { projectWorkflowMessages } from "./workflow-context.ts";
 
 export const PLAN_ENTRY = "pi-jar.plan";
 export const PLAN_SUBMIT_TOOL = "jar_plan_submit";
@@ -417,30 +418,14 @@ export class PlanMode {
       return { message: { customType: "pi-jar.plan-context", content: this.context(), display: false } };
     });
 
-    // Keep plan-only prompt messages bounded. When plan mode is active, retain only the newest
-    // context and newest reminder; when it is off, remove all stale plan prompt messages. Context
-    // rewrites apply to a single LLM call, so this runs on every call.
+    // Plan context is identical every turn: send its first copy only, keeping the cached prefix
+    // stable. Reminders stay in place while active; leaving plan mode drops all of them.
     this.pi.on("context", async (event) => {
-      let latestContext = -1;
-      let latestReminder = -1;
-      let needsPrune = false;
-      for (let index = event.messages.length - 1; index >= 0; index--) {
-        const type = (event.messages[index] as { customType?: string }).customType;
-        if (type === "pi-jar.plan-context") {
-          if (!this.enabled || latestContext >= 0) needsPrune = true;
-          else latestContext = index;
-        } else if (type === "pi-jar.plan-reminder") {
-          if (!this.enabled || latestReminder >= 0) needsPrune = true;
-          else latestReminder = index;
-        }
-      }
-      if (!needsPrune) return;
-      return { messages: event.messages.filter((raw, index) => {
-        const type = (raw as { customType?: string }).customType;
-        if (type === "pi-jar.plan-context") return this.enabled && index === latestContext;
-        if (type === "pi-jar.plan-reminder") return this.enabled && index === latestReminder;
-        return true;
-      }) };
+      const messages = projectWorkflowMessages(event.messages, {
+        "pi-jar.plan-context": { keep: this.enabled, dedupe: true },
+        "pi-jar.plan-reminder": { keep: this.enabled }
+      });
+      if (messages) return { messages };
     });
 
     this.pi.on("input", (event) => {

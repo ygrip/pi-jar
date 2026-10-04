@@ -239,7 +239,7 @@ export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, optio
         }
         const selectedRoles = { resolve: () => primary, fallbackSpecs: () => fallbacks,
           resolveSpec: (spec: string) => targets.get(spec)!() } as unknown as ModelRoleManager;
-        const selectedContext = { model: ctx.model, modelRegistry: ctx.modelRegistry } as ExtensionContext;
+        const selectedContext = { model: ctx.model, modelRegistry: ctx.modelRegistry, ui: ctx.ui } as ExtensionContext;
         const conversation = transcript(sessionBranch(ctx) as readonly Entry[], 12_000);
         const git = await gitState(ctx, controller.signal);
         controller.signal.throwIfAborted();

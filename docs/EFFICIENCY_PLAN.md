@@ -18,6 +18,22 @@ Keep long sessions fast and cheap without losing stored history or changing what
 
 `pinnedProfileId` walks the branch backwards in place instead of allocating `[...entries].reverse()`. `conversationStarted` already exits at the first user message, so it needed no change; neither runs per frame, so no incremental cache was added.
 
+### Cache-stable workflow prompts (follow-up)
+
+Plan and goal prompts used to be pruned to the newest copy on every call. Removing an earlier copy changes the conversation prefix, so each new turn (or goal round) re-sent the whole previous run uncached. `src/workflow-context.ts` now projects them so that every keep/drop decision depends only on earlier messages: identical plan/goal context is sent once, sent reminders and continuations stay in place, and leaving the mode drops them all once. It runs on Pi's message list before provider conversion, so it helps every provider that caches by prefix (Anthropic explicit breakpoints, OpenAI/DeepSeek/Gemini automatic prefix caching, Bedrock). Appending the context at the tail was rejected: pi-ai places the Anthropic cache breakpoint on the last message, so a moving tail would defeat the cache entirely.
+
+### Unset side roles are visible (follow-up)
+
+`askRole` notifies once per role when an unassigned role (advisor, commit, …) ran on the current main model, with the `/roles set` command to fix it. Behaviour is unchanged.
+
+### Bounded synchronous subagent results (follow-up)
+
+A synchronous `jar_delegate` result shares a 16k-character report budget across its runs (at least 2k each) instead of up to 12k per run. Truncated reports name `jar_subagent report <key>`, a new read-only action returning the full stored report. Event messages were already capped at 1.2k.
+
+### Cheaper subagent subscriber (follow-up)
+
+The footer's per-tick registry listener reads `DelegateRegistry.stateSignature()` straight from the map instead of `records()` (a second sweep, a sort and two arrays per 50 ms tick).
+
 ## Already covered — dropped
 
 | Item | Why |
@@ -33,10 +49,11 @@ Keep long sessions fast and cheap without losing stored history or changing what
 | 1. Single Context Projector | The four `context` hooks (child automation filter, diet, plan, goal) are each one `customType` scan that allocates only when something is stale — negligible next to request serialization. Merging them couples independent modules for no measurable gain. Revisit only if `/jar perf` shows context hooks in a profile. |
 | 2. Context Diet v2 (`stripper` model, `DietSnapshot`) | A model-written summary replaces exact history with a lossy one, adds a side call per compression and duplicates Pi's own compaction. Needs its own design (fidelity, resumability, cache-hit impact) before code. |
 | 3. Diet-aware delegation | Depends on item 2. Today `scout` already starts fresh and `fork` is an explicit mode; changing the defaults alters subagent results. |
-| 4. Strict utility roles | Side calls without a role use the current model by design (`askRole`); making them fail or go deterministic breaks advisor and commit messages for users without roles. Needs a product decision, e.g. a warning in `/roles` when a utility role is unset. |
-| 10. Compact workflow history | Plan/goal context messages are already pruned from provider context on every call; compacting them would rewrite persisted session history, which this plan rules out. |
+| 4. Strict utility roles | Side calls without a role use the current model by design (`askRole`); making them fail or go deterministic breaks advisor and commit messages for users without roles. Addressed instead by the one-time notice above. |
+| 10. Compact workflow history | Rewriting persisted session history is ruled out; provider context is handled by the cache-stable projection above. |
 
 ## Success criteria
 
 - Mid-turn context sampling cost stays bounded (~1% duty cycle) as sessions grow; visible in `/jar perf`.
-- No change to what the model receives or what the session stores.
+- Plan/goal sessions keep prefix-cache hits across turns and rounds on every provider.
+- Stored session history is unchanged.

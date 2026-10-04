@@ -5,6 +5,7 @@ import type { Goal, GoalStore } from "./goals.ts";
 import type { ModelRoleManager } from "./model-roles.ts";
 import { isSafePlanCommand } from "./plan-utils.ts";
 import type { Todo, TodoStore } from "./tasks.ts";
+import { projectWorkflowMessages } from "./workflow-context.ts";
 
 export const GOAL_TOOL = "jar_goal";
 export const DEFAULT_GOAL_ROUNDS = 8;
@@ -267,31 +268,16 @@ export class GoalLoop {
       return { message: { customType: CONTEXT_TYPE, content: this.context(goal), display: false } };
     });
 
-    // Keep only the newest goal context and continuation. Context rewrites apply to a single LLM
-    // call, so prune on every call; scan in place and allocate only when something is stale.
+    // Never drop an already-sent goal prompt mid-history while the goal runs: that would re-bill the
+    // previous run uncached. Repeated identical context is sent once; a finished goal drops all.
     this.pi.on("context", async (event) => {
       const goal = this.goal();
       const active = !!goal && goal.status !== "complete";
-      let latestContext = -1;
-      let latestContinuation = -1;
-      let needsPrune = false;
-      for (let index = event.messages.length - 1; index >= 0; index--) {
-        const type = (event.messages[index] as { customType?: string }).customType;
-        if (type === CONTEXT_TYPE) {
-          if (!active || latestContext >= 0) needsPrune = true;
-          else latestContext = index;
-        } else if (type === CONTINUATION_TYPE) {
-          if (!active || latestContinuation >= 0) needsPrune = true;
-          else latestContinuation = index;
-        }
-      }
-      if (!needsPrune) return;
-      return { messages: event.messages.filter((raw, index) => {
-        const type = (raw as { customType?: string }).customType;
-        if (type === CONTEXT_TYPE) return active && index === latestContext;
-        if (type === CONTINUATION_TYPE) return active && index === latestContinuation;
-        return true;
-      }) };
+      const messages = projectWorkflowMessages(event.messages, {
+        [CONTEXT_TYPE]: { keep: active, dedupe: true },
+        [CONTINUATION_TYPE]: { keep: active }
+      });
+      if (messages) return { messages };
     });
 
     this.pi.on("agent_before_settle", async (event, ctx) => {

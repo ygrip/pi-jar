@@ -62,3 +62,18 @@ test("cancellation never starts a fallback", async () => {
   await assert.rejects(thrown.run(), { name: "AbortError" });
   assert.deepEqual(thrown.calls, ["primary"]);
 });
+
+test("an unset side role says once that it ran on the current model, for any provider", async () => {
+  const notices: string[] = [];
+  const ctx = {
+    model: { provider: "openai", id: "gpt-main" },
+    ui: { notify: (message: string) => notices.push(message) },
+    modelRegistry: { find: () => undefined, streamSimple: () => ({ result: async () => ({ stopReason: "stop", content: [{ type: "text", text: "msg" }] }) }) }
+  };
+  const roles = { resolve: () => undefined, fallbackSpecs: () => [] };
+  for (let call = 0; call < 3; call++) {
+    assert.deepEqual(await askRole(ctx as never, roles as never, undefined, "commit-test", "system", "question"), { text: "msg", model: "openai/gpt-main" });
+  }
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]!, /commit-test role is unset.*openai\/gpt-main.*\/roles set commit-test/);
+});

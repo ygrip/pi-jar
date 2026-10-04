@@ -1024,3 +1024,31 @@ test("coalesced events preserve initial reports across an immediate resume", asy
   assert.match(host.sent[0]!.message.content, /original report[\s\S]*second report/);
   await host.registry.stop(record.key);
 });
+
+test("a synchronous result shares one report budget; jar_subagent report returns the full text", async () => {
+  const registry = new DelegateRegistry();
+  const tools = new Map<string, Tool>();
+  const long = (tag: string) => tag + ":" + "x".repeat(6000) + ":end";
+  const fake = fakeSpawn((child, prompt) => { say(child, long(prompt.includes("alpha") ? "alpha" : prompt.includes("beta") ? "beta" : prompt.includes("gamma") ? "gamma" : "delta")); settle(child); });
+  registerDelegate({ registerTool(definition: Tool) { tools.set(definition.name, definition); } } as never,
+    roles({ scout: { provider: "p", model: "cheap" } }), registry, { spawnProcess: fake.spawn as never, maxSubagents: () => 4 } as never);
+  const result = await tools.get("jar_delegate")!.execute("d", { tasks: ["alpha", "beta", "gamma", "delta"].map(task => ({ task, name: task })) },
+    undefined, undefined, { ...quiet, model: { provider: "p", id: "current" }, modelRegistry: { getAvailable: () => [{ provider: "p", id: "cheap" }] } });
+  const text = result.content[0]!.text as string;
+  assert.doesNotMatch(text, /:end/, "reports are truncated to the shared budget");
+  assert.ok(text.length < 16_000 + 4 * 1200, `result stays near its budget (${text.length})`);
+  assert.equal((text.match(/report truncated; jar_subagent report /g) ?? []).length, 4);
+  const record = registry.records().find(item => item.run.name === "beta")!;
+  const full = await tools.get("jar_subagent")!.execute("r", { action: "report", agent: record.key }, undefined, undefined, quiet);
+  assert.match(full.content[0]!.text, /beta:x{6000}:end/);
+});
+
+test("registry state signature changes only with the key/state set", () => {
+  const registry = new DelegateRegistry();
+  const run = { state: "working" } as { state: string };
+  registry.add({ key: "a", run } as never);
+  const before = registry.stateSignature();
+  assert.equal(registry.stateSignature(), before, "stream ticks without a state change keep the signature");
+  run.state = "idle";
+  assert.notEqual(registry.stateSignature(), before);
+});

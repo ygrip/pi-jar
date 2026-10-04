@@ -192,21 +192,21 @@ test("hidden plan context names the plan directory and required template", async
   assert.match(injected.message.content, /jar_plan_submit/);
 });
 
-test("plan context pruning keeps only newest transient messages", async () => {
+test("plan context projection sends identical context once and keeps sent reminders in place", async () => {
   const h = harness();
   await h.commands.get("plan")!("", h.ctx);
   const context = h.events.get("context")!;
   const messages = [
     { customType: "keep", content: "normal" },
-    { customType: "pi-jar.plan-context", content: "old context" },
-    { customType: "pi-jar.plan-reminder", content: "old reminder" },
-    { customType: "pi-jar.plan-context", content: "new context" },
-    { customType: "pi-jar.plan-reminder", content: "new reminder" }
+    { customType: "pi-jar.plan-context", content: "context" },
+    { customType: "pi-jar.plan-reminder", content: "reminder" },
+    { customType: "pi-jar.plan-context", content: "context" },
+    { customType: "pi-jar.plan-reminder", content: "reminder" }
   ];
-  // Pi re-sends the full persisted history before each LLM call; every call must prune it.
+  // Pi re-sends the full persisted history before each LLM call; the projection must be identical each time.
   for (let call = 1; call <= 2; call++) {
     const active = await context({ messages }, h.ctx);
-    assert.deepEqual(active?.messages.map((item: { content: string }) => item.content), ["normal", "new context", "new reminder"], `call ${call}`);
+    assert.deepEqual(active?.messages.map((item: { content: string }) => item.content), ["normal", "context", "reminder", "reminder"], `call ${call}`);
   }
   await h.commands.get("plan")!("stop", h.ctx);
   const inactive = await context({ messages }, h.ctx);

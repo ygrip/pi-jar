@@ -41,6 +41,9 @@ const allowedInMode = (mode: DelegateExecutionMode, name: string) => !RECURSIVE_
 export type DelegateMode = "scout" | "fork" | "worktree";
 type DelegateExecutionMode = DelegateMode | "direct";
 const MAX_OUTPUT_CHARS = 12_000;
+/** Shared budget for the reports one synchronous jar_delegate result returns; the rest stays one jar_subagent report away. */
+const MAX_RESULT_REPORT_CHARS = 16_000;
+const MIN_RUN_REPORT_CHARS = 2000;
 /** A working child that sends no RPC event for this long is treated as hung and killed. */
 const IDLE_TIMEOUT_MS = 10 * 60_000;
 /** After exit, grandchildren (MCP servers, shells) can hold the stdio pipes open; stop waiting for close. */
@@ -1090,6 +1093,12 @@ export class DelegateRegistry {
     for (const record of records) this.entries.set(record.key, { record });
     this.notify();
   }
+  /** Key/state of every record in insertion order: a cheap change test for per-tick listeners (no sweep, sort or copies). */
+  stateSignature(): string {
+    let signature = "";
+    for (const [key, { record }] of this.entries) signature += key + ":" + record.run.state + " ";
+    return signature;
+  }
   notify(): void {
     this.sweep();
     for (const listener of this.listeners) {
@@ -1124,7 +1133,7 @@ const fileList = (files: readonly string[], limit: number) => files.slice(0, lim
 const todoLine = (todo: Todo) => `${todo.parentId ? "    " : "  "}${todo.status === "completed" ? "[x]" : todo.status === "in_progress" ? "[~]" : "[ ]"} ${todo.title}`;
 
 /** What the parent agent reads back: the run's facts (time, tools, files, tasks, failures), then its own report. */
-export function runReport(run: DelegateRun, now = Date.now()): string {
+export function runReport(run: DelegateRun, now = Date.now(), outputLimit = MAX_OUTPUT_CHARS, key?: string): string {
   const counts = Object.entries(run.toolCounts).sort((a, b) => b[1] - a[1]).map(([name, count]) => `${name}×${count}`).join(", ");
   const facts = [
     run.startedAt !== undefined ? `took ${duration((run.endedAt ?? now) - run.startedAt)}` : "never started",
@@ -1143,7 +1152,10 @@ export function runReport(run: DelegateRun, now = Date.now()): string {
   }
   const failures = run.transcript.filter((entry): entry is ToolEntry => entry.kind === "tool" && entry.status === "error").slice(-5);
   if (failures.length) lines.push(`- failed tool calls: ${failures.map((entry) => cleanText(`${entry.name} ${entry.hint}`, 80)).join("; ")}`);
-  lines.push("", run.output || "(no report)");
+  const output = run.output.length > outputLimit
+    ? run.output.slice(0, outputLimit) + `\n… [report truncated; jar_subagent report ${key ?? run.name} returns the full text]`
+    : run.output;
+  lines.push("", output || "(no report)");
   return lines.join("\n");
 }
 
@@ -1809,7 +1821,9 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         flushUpdate();
         toolReturned = true;
       }
-      return { content: [{ type: "text", text: runs.map((run) => runReport(run)).join("\n\n") }], details: details(),
+      const outputLimit = Math.max(MIN_RUN_REPORT_CHARS, Math.floor(MAX_RESULT_REPORT_CHARS / Math.max(1, runs.length)));
+      const keys = new Map(records.map(({ key, run }) => [run, key]));
+      return { content: [{ type: "text", text: runs.map((run) => runReport(run, Date.now(), outputLimit, keys.get(run))).join("\n\n") }], details: details(),
         ...(runs.some((run) => run.state === "failed") ? { isError: true } : {}) };
       } finally { releaseReservation(); }
     },
@@ -1917,7 +1931,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     description: "Non-blocking moderator control for retained subagents. peek, steer, resume and discard return immediately. ask, pause and stop return an accepted operation receipt; the final answer or handoff arrives as a pi-jar.subagent event. Settled agents hibernate (process closed, context and workspace kept); resume and ask relaunch them transparently. Stop completion safely reconciles worktree changes; acceptance does not mean changes are applied yet. discard removes an unresolved worktree recovery workspace without applying it.",
     promptSnippet: "Use jar_subagent as the moderator control plane. Prefer peek over rereading transcripts; reuse paused/idle/hibernated agents with resume; stop finished workers to reconcile their work.",
     promptGuidelines: [
-      "peek returns only task progress, plus workspace and changed files for unresolved worktree recovery records. Do not poll: initial/resumed turns and control completions send pi-jar.subagent events. Stop returns an accepted receipt first, then changed files and the full handoff in its completion event.",
+      "peek returns only task progress, plus workspace and changed files for unresolved worktree recovery records. report returns an agent's latest full report when a result or event shows only part of it. Do not poll: initial/resumed turns and control completions send pi-jar.subagent events. Stop returns an accepted receipt first, then changed files and the full handoff in its completion event.",
       "Use steer for active direction and ask for a brief BTW question. ask, pause and stop do not wait on the child; continue responding to the user until their completion event arrives.",
       "Pause when an agent should stop spending tokens but keep its context/workspace. Resume the same agent later instead of spawning a replacement; a hibernated agent resumes exactly like an idle one.",
       "Stop when an agent is no longer needed. Stop aborts any active turn, retires the process, reports progress/workspace/changes/remaining work, and reconciles safe worktree changes into /diff. On a failed/conflicted worktree recovery record, stop retries reconciliation; discard it only when its changes are not wanted."
@@ -1925,7 +1939,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("peek"), Type.Literal("steer"), Type.Literal("ask"),
-        Type.Literal("pause"), Type.Literal("resume"), Type.Literal("stop"), Type.Literal("discard")
+        Type.Literal("pause"), Type.Literal("resume"), Type.Literal("stop"), Type.Literal("discard"), Type.Literal("report")
       ]),
       agent: Type.Optional(Type.String({ description: "Subagent key or unique name. Omit only for peek to show all retained agents." })),
       message: Type.Optional(Type.String({ description: "Direction, BTW question, or resume instruction." }))
@@ -1942,6 +1956,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       const agent = params.agent ?? "";
       const record = registry.resolve(agent);
       if (!record) return { content: [{ type: "text", text: "Subagent not found or name is ambiguous: " + agent }], isError: true };
+      if (params.action === "report") return { content: [{ type: "text", text: runReport(record.run) }] };
       const stopping = pendingControls.get(record.key + ":stop");
       const controlling = pendingControls.get(record.key + ":control");
       if (stopping || (controlling && params.action !== "stop")) {

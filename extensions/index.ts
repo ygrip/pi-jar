@@ -231,7 +231,7 @@ export default function piJar(pi: ExtensionAPI): void {
   let subagentSignature = "";
   subagents.subscribe(() => {
     if (!footerTui) return;
-    const signature = subagents.records().map(({ key, run }) => `${key}:${run.state}`).join(" ");
+    const signature = subagents.stateSignature();
     repaint("subagents", signature === subagentSignature ? "background" : "transition");
     subagentSignature = signature;
   });

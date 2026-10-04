@@ -88,22 +88,31 @@ test("goal command starts the loop; edits are blocked until a task is open", asy
   assert.match(injected.message.content, /ACTIVE GOAL[\s\S]*Ship the hello command[\s\S]*\[ \] Register command/);
 });
 
-test("stale goal prompts are pruned on every LLM call of a run, not only the first", async () => {
+test("goal prompts keep a stable prefix on every LLM call: repeats dropped, sent copies kept, all dropped once complete", async () => {
   const h = harness();
   await h.commands.get("goal")!("Ship it", h.ctx);
   const context = h.events.get("context")!;
   const messages = [
-    { customType: "pi-jar.goal-context", content: "old context" },
-    { customType: "pi-jar.goal-continuation", content: "old round" },
+    { customType: "pi-jar.goal-context", content: "context A" },
+    { customType: "pi-jar.goal-continuation", content: "round 1" },
     { role: "user", content: "normal" },
-    { customType: "pi-jar.goal-context", content: "new context" },
-    { customType: "pi-jar.goal-continuation", content: "new round" }
+    { customType: "pi-jar.goal-context", content: "context A" },
+    { customType: "pi-jar.goal-context", content: "context B" },
+    { customType: "pi-jar.goal-continuation", content: "round 2" }
   ];
   // Pi re-sends the full persisted history to the context hook before each LLM call.
   for (let call = 1; call <= 3; call++) {
     const pruned = await context({ messages }, h.ctx);
-    assert.deepEqual(pruned?.messages.map((item: { content: string }) => item.content), ["normal", "new context", "new round"], `call ${call}`);
+    assert.deepEqual(pruned?.messages.map((item: { content: string }) => item.content),
+      ["context A", "round 1", "normal", "context B", "round 2"], `call ${call}`);
   }
+  // Appending later messages never changes how earlier ones project (cache-stable prefix).
+  const longer = await context({ messages: [...messages, { customType: "pi-jar.goal-context", content: "context B" }] }, h.ctx);
+  assert.deepEqual(longer?.messages.map((item: { content: string }) => item.content), ["context A", "round 1", "normal", "context B", "round 2"]);
+  assert.equal(await context({ messages: [{ role: "user", content: "only" }] }, h.ctx), undefined, "no allocation when nothing changes");
+  h.goals.setStatus("complete", { evidence: "done" });
+  const done = await context({ messages }, h.ctx);
+  assert.deepEqual(done?.messages.map((item: { content: string }) => item.content), ["normal"]);
 });
 
 test("goal mutation guard blocks worktree finalization, not stopping read-only or unknown agents", async () => {

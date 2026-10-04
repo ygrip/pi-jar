@@ -68,7 +68,7 @@ State (`pi-jar.plan` entries, v2: `enabled`, `steps`, `text`, `path`, `title`) f
 - **Task gate:** with no open task, `write`/`edit` are blocked, and so are shell commands that are not on the read-only allowlist during the implement phase. During the audit, edits are blocked but verification commands are allowed.
 - **Roles per round:** implement rounds run on the `implement` role and the audit round on `advisor` (each only if assigned). The previous model and effort are restored when the run settles.
 - **Completion:** `jar_goal complete` requires the audit phase, no open tasks, and non-empty evidence. It ends the turn, records the evidence, and Ember shows `(★ᴗ★)`.
-- **Context hygiene:** only the newest goal context and continuation messages are kept in the prompt.
+- **Context hygiene:** repeated identical goal context is sent once, and goal prompts already sent are never removed from the middle of the prompt while the goal runs, so any provider's prefix cache (Anthropic, OpenAI, Gemini, Bedrock, …) keeps hitting. A completed goal drops them all.
 
 Goal events (`pi-jar.goal`, v2: `set`, `status`, `round`) are append-only session entries; v1 `set`/`clear` still replay.
 
