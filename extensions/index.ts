@@ -310,7 +310,9 @@ export default function piJar(pi: ExtensionAPI): void {
   registerContextDiet(pi, () => visualSettings.contextDiet === true);
   const advisor = registerAdvisor(pi, modelRoles, { enabled: () => !delegatedChild && visualSettings.advisor, gates: () => !delegatedChild && visualSettings.advisorGates, usage: sideUsage });
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
-    quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()) });
+    quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()),
+    quotaFailure: (ctx) => quotaCache?.failure(ctx.model?.provider, Date.now()),
+    refreshQuota: (ctx) => { quotaCache?.refresh(ctx.model?.provider, welcomeStatuses(), Date.now()); } });
   let followingTheme: string | undefined;
   const profileEntries = (ctx: ExtensionContext): readonly unknown[] => {
     try { return ctx.sessionManager.getEntries?.() ?? sessionBranch(ctx); } catch { return sessionBranch(ctx); }

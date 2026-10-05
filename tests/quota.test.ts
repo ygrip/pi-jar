@@ -68,7 +68,7 @@ test("provider lookups deduplicate while one is pending; stats report pending an
   cache.stop();
 });
 
-test("failed lookups are hidden and back off exponentially instead of hot-looping", async () => {
+test("failed lookups keep their reason and back off exponentially instead of hot-looping", async () => {
   let calls = 0;
   let failing = true;
   let changes = 0;
@@ -80,21 +80,24 @@ test("failed lookups are hidden and back off exponentially instead of hot-loopin
   cache.enabled = true;
   let now = 0;
   const attempt = async () => { const started = cache.refresh("anthropic", new Map(), now); await tick(); return started; };
+  assert.equal(cache.failure("anthropic", now), undefined, "never tried is not a failure");
   assert.equal(await attempt(), true);
+  assert.deepEqual(cache.failure("anthropic", now), { error: "network down", retryInMs: QUOTA_TTL_MS }, "the panel shows why instead of loading forever");
   for (let retry = 0; retry < 20; retry++) {
     assert.equal(cache.get("anthropic", new Map(), now), undefined);
     assert.equal(await attempt(), false);
   }
-  assert.equal(calls, 1, "a rejected lookup is negative-cached like an empty one");
+  assert.equal(calls, 1, "a rejected lookup is negative-cached");
   // Consecutive failures double the retry delay from the TTL up to the cap.
   for (const delay of [QUOTA_TTL_MS, 2 * QUOTA_TTL_MS, 4 * QUOTA_TTL_MS, QUOTA_MAX_BACKOFF_MS, QUOTA_MAX_BACKOFF_MS]) {
     now += delay - 1;
     assert.equal(await attempt(), false, "still backing off");
     now += 1;
+    assert.equal(cache.failure("anthropic", now), undefined, "an elapsed backoff is no longer reported");
     assert.equal(await attempt(), true);
   }
   assert.equal(calls, 6);
-  assert.equal(changes, 0, "a failure changes nothing a render shows");
+  assert.equal(changes, 6, "each failure repaints so an open panel leaves the loading state");
   assert.equal(cache.stats(now).failures, 6);
   assert.equal(cache.stats(now).providers[0]?.failures, 6);
   failing = false;
@@ -139,11 +142,28 @@ test("read-only provider fetch accepts only resolved OAuth and valid percentages
   }) as typeof fetch;
   try {
     const signal = new AbortController().signal;
-    assert.equal(await fetchQuota("openai-codex", async () => ({ auth: { apiKey: token }, source: "API key" }), signal), undefined);
+    await assert.rejects(fetchQuota("openai-codex", async () => ({ auth: { apiKey: token }, source: "API key" }), signal), /subscription login/);
     assert.equal(calls, 0);
     assert.deepEqual(await fetchQuota("openai-codex", async () => ({ auth: { apiKey: token }, source: "OAuth" }), signal), { fiveHour: { used: 16 }, week: { used: 23 } });
     assert.equal(calls, 1);
     assert.deepEqual(await fetchQuota("openai-codex", async () => ({ auth: { apiKey: token }, source: "OAuth" }), signal), { week: { used: 85 } },
       "a weekly primary window must not be labelled as the 5h session window");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("anthropic fetch reads utilization as a percentage and reports rate limiting", async () => {
+  const originalFetch = globalThis.fetch;
+  let status = 200;
+  globalThis.fetch = (async (url: unknown) => {
+    assert.equal(url, "https://api.anthropic.com/api/oauth/usage");
+    // Real response shape: utilization is a percentage, so 1.0 is 1%, not 100%.
+    return { ok: status === 200, status, json: async () => ({ five_hour: { utilization: 1.0, resets_at: "2026-10-05T09:49:59.973231+00:00" }, seven_day: { utilization: 37.0, resets_at: null } }) } as Response;
+  }) as typeof fetch;
+  const auth = async () => ({ auth: { apiKey: "token" }, source: "OAuth" });
+  try {
+    const signal = new AbortController().signal;
+    assert.deepEqual(await fetchQuota("anthropic", auth, signal), { fiveHour: { used: 1, resetsAt: Date.parse("2026-10-05T09:49:59.973231+00:00") }, week: { used: 37 } });
+    status = 429;
+    await assert.rejects(fetchQuota("anthropic", auth, signal), /rate limited/);
   } finally { globalThis.fetch = originalFetch; }
 });

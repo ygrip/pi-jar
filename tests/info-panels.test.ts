@@ -35,6 +35,9 @@ test("usage totals the session per model, adds side calls and shows limit bars",
   assert.ok(lines.every((line) => visibleWidth(line) <= 80));
   assert.match(usageLines({ stats, provider: "openai", quotaEnabled: true, now }, 80, plain).join("\n"), /available for anthropic and openai-codex/);
   assert.match(usageLines({ stats, provider: "anthropic", quotaEnabled: false, now }, 80, plain).join("\n"), /\/jar quota on/);
+  const failed = usageLines({ stats, provider: "anthropic", quotaEnabled: true, now, quotaFailure: { error: "rate limited by the provider (HTTP 429)", retryInMs: 600_000 } }, 80, plain).join("\n");
+  assert.match(failed, /Limits unavailable: rate limited by the provider \(HTTP 429\)\. Retrying in 10m\./);
+  assert.doesNotMatch(failed, /Loading/);
 });
 
 test("context breakdown splits categories, scales to the reported total and draws a 10×10 grid", () => {

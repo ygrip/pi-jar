@@ -73,7 +73,7 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | `/jar ask [question]` | Answer a question in a dialog and insert the answer into the editor. |
 | `/jar accent [preset]` · `/jar footer` · `/jar icons [unicode\|nerd\|ascii]` | Switch a loaded accent theme; toggle footer fields; pick the icon set. |
 | `/jar composer on\|off` · `/jar animations on\|off` · `/jar ui on\|off` | Toggle the composer, motion, or all pi-jar UI. |
-| `/jar quota on\|off` | Session-only, read-only quota lookups for supported OAuth providers. Lookups start on session boundaries (startup, prompts, model changes), never from a render: at most one per provider every 5 minutes, and failures back off up to 30 minutes. |
+| `/jar quota on\|off` | Session-only, read-only quota lookups for supported OAuth providers. Lookups start on session boundaries (startup, prompts, model changes) and when `/usage` opens, never from a render: at most one per provider every 5 minutes, and failures back off up to 30 minutes. |
 | `/jar hub` | Open an installed task or subagent manager command. |
 | `/jar demo` · `/jar reset` | Labeled sample roles in the footer / back to live data. |
 
@@ -252,7 +252,7 @@ This is a pi-jar enhancement: [pi-advisor](https://github.com/philipbrembeck/pi-
 
 `/usage` and `/context` open one tabbed panel (<kbd>Tab</kbd> switches, <kbd>Esc</kbd> closes):
 
-- **Usage** — total cost, duration, prompts and responses, tokens (input, output, cache read/write); a per-model breakdown including advisor and commit calls; and, for Anthropic and OpenAI Codex subscriptions, 5-hour and weekly limit bars with reset times (lookups follow `/jar quota on|off`).
+- **Usage** — total cost, duration, prompts and responses, tokens (input, output, cache read/write); a per-model breakdown including advisor and commit calls; and, for Anthropic and OpenAI Codex subscriptions, 5-hour and weekly limit bars with reset times (lookups follow `/jar quota on|off`). A failed lookup shows its reason (for example the provider's HTTP 429 rate limit) and when it retries, instead of loading indefinitely.
 - **Context** — a 10×10 grid (each cell ≈ 1% of the window) beside a legend: system prompt, tools, context files, skills, compaction summary, user and assistant messages, tool results, extension messages, free space and the autocompact buffer. Parts are estimated at ~4 characters per token and scaled to the provider-reported total when one is known; context files, skills and tools are listed individually below.
 
 ## Tasks, questions and history
