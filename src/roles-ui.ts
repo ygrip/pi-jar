@@ -1,7 +1,7 @@
 import type { ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, stripTerminalSequences, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { promptText } from "./dialogs.ts";
-import { isRoleName, normalizeSpec, THINKING, type ModelRoleManager, type RoleRow } from "./model-roles.ts";
+import { isRoleName, normalizeSpec, premiumRoleWarnings, THINKING, type ModelRoleManager, type RoleRow } from "./model-roles.ts";
 import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
 
 type RoleAction = "model" | "fallback" | "alias" | "thinking" | "scope" | "activate" | "clear" | "new" | "delete";
@@ -44,6 +44,8 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
     let layout = { top: 1, rows: 0, leftWidth: 0, bodyX: 2, footerTop: 0 };
     let width = 80;
     const rows = () => roles.list();
+    // Read once per screen: every action closes the screen, and reopening it re-checks against the current model.
+    const warnings = premiumRoleWarnings(roles, ctx);
     const finish = (action: RoleAction) => done({ action, index: selected });
     return {
       invalidate() {},
@@ -98,7 +100,7 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
         const header = narrow ? [theme.fg("accent", `‹ ${selected + 1}/${list.length} ${row.role} ›`)] : [];
         const actions = optionList(theme, ACTIONS.map((item) => item.label), -1, ACTIONS.map((item) => item.hint))
           .map((line, at) => ACTIONS[at]!.action === "delete" && !row.custom ? theme.fg("dim", stripTerminalSequences(line)) : line);
-        const body = [...header, ...info];
+        const body = [...header, ...warnings.map((text) => theme.fg("warning", text)), ...info];
         const split = splitFrame(theme, width, "pi-jar · roles", narrow ? [] : left, body, [
           ...actions,
           theme.fg("dim", "↑↓ choose role · press a key or click an action · Esc close")

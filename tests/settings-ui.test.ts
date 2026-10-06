@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { defaultVisualSettings, MAX_SUBAGENT_CHOICES } from "../src/settings.ts";
+import { defaultVisualSettings, MAX_SUBAGENT_CHOICES, type JarVisualSettings } from "../src/settings.ts";
 import { openJarSettings } from "../src/settings-ui.ts";
 
 type Pane = {
@@ -9,9 +9,10 @@ type Pane = {
   handleInput(data: string): void;
   handleMouse(event: unknown): unknown;
 };
-
+/** Picker tests start from a pool of 4 and gates on so lowering/toggling paths are exercised regardless of defaults. */
+const startState = (): JarVisualSettings => ({ ...defaultVisualSettings(), maxSubagents: 4, advisorGates: true });
 test("max subagents picker requires deliberate selection and explains retained pool semantics", async () => {
-  let state = defaultVisualSettings();
+  let state = startState();
   let saves = 0;
   let closed = false;
   const ctx = { hasUI: true, mode: "tui", ui: {
@@ -61,7 +62,7 @@ test("max subagents picker requires deliberate selection and explains retained p
 test("max subagents choice scrolling keeps mouse targets aligned in short terminals", async () => {
   const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
   Object.defineProperty(process.stdout, "rows", { configurable: true, value: 13 });
-  let state = defaultVisualSettings();
+  let state = startState();
   try {
     const ctx = { hasUI: true, mode: "tui", ui: {
       custom: async (factory: Function) => {
@@ -88,7 +89,7 @@ test("max subagents choice scrolling keeps mouse targets aligned in short termin
 });
 
 test("goal rounds shares the explicit picker and cancels without persisting", async () => {
-  let state = defaultVisualSettings();
+  let state = startState();
   let saves = 0;
   const ctx = { hasUI: true, mode: "tui", ui: {
     custom: async (factory: Function) => {

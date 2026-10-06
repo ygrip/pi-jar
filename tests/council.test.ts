@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { conductDemocracy, parseBallot, registerDemocracy, tallyBallots, validateDemocracy, type DemocracyRequest } from "../src/democracy.ts";
+import { conductCouncil, parseBallot, registerCouncil, tallyBallots, validateCouncil, type CouncilRequest } from "../src/council.ts";
 import type { DelegateController, SubagentReport } from "../src/delegate.ts";
 
 const options = [{ id: "a", label: "Fix the state machine", evidence: "Addresses observed race; moderate change scope" },
   { id: "b", label: "Replace the protocol", evidence: "Larger rewrite; removes protocol ambiguity" }];
-const request: DemocracyRequest = { complexity: "super-complex", issue: "Persistent lifecycle race across processes",
+const request: CouncilRequest = { complexity: "super-complex", issue: "Persistent lifecycle race across processes",
   justification: "Three interacting process lifecycles with inconclusive fixes", failedApproaches: ["Retry serialized writes: race persisted", "Timer workaround: still reproduced"], options, voters: 4 };
 const report = (id = "s1", output = "", state: SubagentReport["state"] = "idle"): SubagentReport =>
   ({ id, key: id, name: id, task: "inspect lifecycle", mode: "scout", state, output });
@@ -29,12 +29,12 @@ function fakeController(choices: (string | Error)[], existing: SubagentReport[] 
   return { controller, calls, stopped };
 }
 
-test("democracy rejects routine decisions, missing persistence evidence and duplicate options/nominations", () => {
-  validateDemocracy(request);
+test("council rejects routine decisions, missing persistence evidence and duplicate options/nominations", () => {
+  validateCouncil(request);
   for (const invalid of [{ ...request, complexity: "complex" }, { ...request, justification: " " },
     { ...request, failedApproaches: ["one"] }, { ...request, failedApproaches: ["one", "one"] },
     { ...request, options: [options[0], options[0]] }, { ...request, agents: ["s1", "s1"] }]) {
-    assert.throws(() => validateDemocracy(invalid as DemocracyRequest));
+    assert.throws(() => validateCouncil(invalid as CouncilRequest));
   }
 });
 
@@ -60,7 +60,7 @@ test("ballots reject malformed, stale, duplicated, errored or unknown choices", 
 
 test("orchestration reuses relevant fresh scouts, spawns remaining voters and records failures without guessing", async () => {
   const { controller, calls, stopped } = fakeController(["a", "a", "b", new Error("provider unavailable")], [report()]);
-  const result = await conductDemocracy(controller, { ...request, agents: ["s1"] }, 4);
+  const result = await conductCouncil(controller, { ...request, agents: ["s1"] }, 4);
   assert.equal(calls[0], "s1");
   assert.equal(calls.length, 4);
   assert.equal(result.ballots.length, 3);
@@ -77,7 +77,7 @@ test("a ballot deadline turns hung voters into recorded failures instead of an e
   let spawned = 0;
   controller.spawnScout = (task, signal) => ++spawned <= 2 ? answered(task, signal)
     : new Promise((_resolve, reject) => signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
-  const round = conductDemocracy(controller, { ...request, voters: 3 }, 4, undefined, 1000);
+  const round = conductCouncil(controller, { ...request, voters: 3 }, 4, undefined, 1000);
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(1000);
@@ -92,20 +92,20 @@ test("cap, busy/non-scout nominees and aborted calls reject before spawning", as
   for (const existing of [[report("s1", "", "working")], [{ ...report(), mode: "fork" as const }],
     [report(), report("other"), report("third")]]) {
     const { controller, calls } = fakeController([], existing);
-    await assert.rejects(conductDemocracy(controller, { ...request, agents: ["s1"] }, 4));
+    await assert.rejects(conductCouncil(controller, { ...request, agents: ["s1"] }, 4));
     assert.equal(calls.length, 0);
   }
   const { controller, calls } = fakeController([]);
-  await assert.rejects(conductDemocracy(controller, request, 2));
+  await assert.rejects(conductCouncil(controller, request, 2));
   const abort = new AbortController(); abort.abort();
-  await assert.rejects(conductDemocracy(controller, request, 4, abort.signal));
+  await assert.rejects(conductCouncil(controller, request, 4, abort.signal));
   assert.equal(calls.length, 0);
 });
 
 test("noninteractive tie is pending user choice and voting never executes a winning option", async () => {
   let tool: any;
   const { controller } = fakeController(["a", "a", "b", "b"]);
-  registerDemocracy({ registerTool: (definition: unknown) => { tool = definition; } } as never, () => controller, () => 4);
+  registerCouncil({ registerTool: (definition: unknown) => { tool = definition; } } as never, () => controller, () => 4);
   const result = await tool.execute("vote", request, undefined, undefined, { hasUI: false, mode: "rpc" });
   assert.equal(result.details.status, "needs-user");
   assert.equal(result.details.winner, undefined);
@@ -119,7 +119,7 @@ test("only one round at a time and lock resets after errors", async () => {
   const { controller } = fakeController(["a", "a", "a", "b"]);
   const spawn = controller.spawnScout;
   controller.spawnScout = async (...args) => { await blocked; return spawn(...args); };
-  registerDemocracy({ registerTool: (definition: unknown) => { tool = definition; } } as never, () => controller, () => 4);
+  registerCouncil({ registerTool: (definition: unknown) => { tool = definition; } } as never, () => controller, () => 4);
   const first = tool.execute("one", request, undefined, undefined, { hasUI: false });
   assert.equal((await tool.execute("two", request, undefined, undefined, {})).isError, true);
   release();
@@ -132,14 +132,14 @@ test("escaped oversized evidence rejects before any resumed or fresh voter launc
   const { controller, calls } = fakeController([], [report()]);
   const oversized = { ...request, issue: '"'.repeat(4000), justification: '"'.repeat(2000),
     failedApproaches: Array.from({ length: 8 }, (_, index) => '"'.repeat(1999) + index), agents: ["s1"] };
-  await assert.rejects(conductDemocracy(controller, oversized, 4), /too large/);
+  await assert.rejects(conductCouncil(controller, oversized, 4), /too large/);
   assert.equal(calls.length, 0);
 });
 
 test("a failed tie-selection TUI preserves the completed ballot evidence", async () => {
   let tool: any;
   const { controller } = fakeController(["a", "a", "b", "b"]);
-  registerDemocracy({ registerTool: (definition: unknown) => { tool = definition; } } as never, () => controller, () => 4);
+  registerCouncil({ registerTool: (definition: unknown) => { tool = definition; } } as never, () => controller, () => 4);
   const result = await tool.execute("vote", request, undefined, undefined, { hasUI: true, mode: "tui",
     ui: { custom: async () => { throw new Error("dialog unavailable"); } } });
   assert.equal(result.details.status, "needs-user");
@@ -152,7 +152,7 @@ test("abort closes the tie picker and releases the round lock without choosing",
   let opened!: () => void;
   const ready = new Promise<void>((resolve) => { opened = resolve; });
   const { controller } = fakeController(["a", "a", "b", "b", "a", "a", "a", "b"]);
-  registerDemocracy({ registerTool: (definition: unknown) => { tool = definition; } } as never, () => controller, () => 4);
+  registerCouncil({ registerTool: (definition: unknown) => { tool = definition; } } as never, () => controller, () => 4);
   let closed = false;
   const ctx = { hasUI: true, mode: "tui", ui: { custom: (factory: Function) => new Promise((resolve) => {
     factory({ requestRender() {} }, { fg: (_color: string, text: string) => text }, {}, (value: unknown) => { closed = true; resolve(value); });

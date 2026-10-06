@@ -14,6 +14,8 @@ const MAX_DISCUSSION_AGENTS = 64;
 /** A list reply never exceeds this, however many messages match; each listed message is clipped too. */
 export const MAX_LIST_CHARS = 4000;
 export const MAX_LISTED_TEXT = 400;
+/** A turn-start notice carries at most this much unread mail; the rest stays one `list` away. */
+export const MAX_NOTICE_CHARS = 2000;
 /** Unread mail piggybacked on an ask/answer reply never exceeds this. */
 const MAX_PIGGYBACK_CHARS = 1000;
 const BROADCAST: Record<string, true> = { all: true, "*": true, everyone: true, broadcast: true };
@@ -168,11 +170,11 @@ export class DiscussionHub {
 
   /** Unread mail, oldest first within the reply budget; the cursor moves past what was shown, so paging
    *  loses nothing. `since` rereads relevant messages newer than an id, read or not. */
-  list(key: string, since?: number): ListResult {
+  list(key: string, since?: number, budget = MAX_LIST_CHARS): ListResult {
     const agent = this.agent(key);
     const items = this.messages.filter((message) => this.relevant(agent, message)
       && (since === undefined ? !this.read(agent, message) : message.id > since));
-    const { views, shown } = this.select(items, MAX_LISTED_TEXT);
+    const { views, shown } = this.select(items, MAX_LISTED_TEXT, budget);
     this.markRead(agent, shown);
     const latest = this.messages.at(-1)?.id;
     return { messages: views, more: items.length - views.length, ...(latest ? { latest } : {}), unread: this.unreadOf(agent).length };
@@ -214,8 +216,9 @@ export class DiscussionHub {
     return { ...result, agents, unanswered: { total: open.length, questions } };
   }
 
-  unread(key: string): UnreadResult {
-    const unread = this.unreadOf(this.agent(key));
+  /** `except` leaves that sender's mail out, so the moderator's view of a subagent's mailbox never echoes its own messages. */
+  unread(key: string, except?: string): UnreadResult {
+    const unread = this.unreadOf(this.agent(key)).filter((message) => message.from !== except);
     return { unread: unread.length, ...(unread.length ? { newest: unread.at(-1)!.id } : {}) };
   }
 
@@ -334,13 +337,13 @@ export class DiscussionHub {
   }
 
   /** Oldest first into the budget; at least one message, so paging always progresses. */
-  private select(items: readonly Stored[], limit: number): { views: MessageView[]; shown: Stored[] } {
+  private select(items: readonly Stored[], limit: number, budget = MAX_LIST_CHARS): { views: MessageView[]; shown: Stored[] } {
     const views: MessageView[] = [];
     let used = 0;
     for (const message of items) {
       const view = this.view(message, limit);
       const size = messageLine(view).length + 1;
-      if (views.length && used + size > MAX_LIST_CHARS) break;
+      if (views.length && used + size > budget) break;
       views.push(view);
       used += size;
     }

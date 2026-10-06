@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { cleanText } from "./status.ts";
+import { setToolActive } from "./tool-activation.ts";
 
 export const SUGGEST_TOOL = "jar_suggest";
 const MAX_SUGGESTION = 160;
@@ -31,12 +32,8 @@ export function registerSuggestions(pi: ExtensionAPI, state: SuggestionState, op
   pi.registerTool?.({
     name: SUGGEST_TOOL,
     label: "suggest",
-    description: "Optionally offer one useful next prompt as ghost text in the input box; Tab accepts it for editing.",
-    promptSnippet: "Optionally use jar_suggest at the end when one genuinely useful next prompt would help the user continue.",
-    promptGuidelines: [
-      "jar_suggest is best-effort, not mandatory. Use it only when there is one clear next action worth surfacing; skip it for routine completions.",
-      "When used, call it once as the final action with one imperative line under 120 characters. Do not mention jar_suggest in your reply."
-    ],
+    description: "Optionally offer one useful next prompt (one imperative line under 120 characters) as ghost text in the input box; Tab accepts it for editing. Call once as the final action; do not mention it in your reply.",
+    promptSnippet: "Optionally end with one jar_suggest call only when one clear next prompt is worth surfacing; skip it for routine completions.",
     parameters: Type.Object({ suggestion: Type.String({ description: "The user's likely next prompt, one line." }) }),
     execute: async (_id, params) => {
       const ok = state.set(params.suggestion ?? "");
@@ -50,11 +47,7 @@ export function registerSuggestions(pi: ExtensionAPI, state: SuggestionState, op
   });
 
   const sync = () => {
-    if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
-    const active = pi.getActiveTools();
-    const has = active.includes(SUGGEST_TOOL);
-    if (options.enabled() && !has && pi.getAllTools().some((tool) => tool.name === SUGGEST_TOOL)) pi.setActiveTools([...active, SUGGEST_TOOL]);
-    else if (!options.enabled() && has) pi.setActiveTools(active.filter((name) => name !== SUGGEST_TOOL));
+    setToolActive(pi, SUGGEST_TOOL, options.enabled());
     if (!options.enabled()) state.clear();
   };
 

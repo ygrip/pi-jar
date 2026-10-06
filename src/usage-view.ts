@@ -53,7 +53,7 @@ function resetText(window: QuotaWindow, now: number): string {
   return `Resets ${when} (in ${duration(Math.max(0, at - now))})`;
 }
 
-export interface UsageView { stats: UsageStats; provider?: string; quota?: Quota; quotaEnabled: boolean; now: number }
+export interface UsageView { stats: UsageStats; provider?: string; quota?: Quota; quotaFailure?: { error: string; retryInMs: number }; quotaEnabled: boolean; now: number }
 
 /** Claude-style usage page: session totals, per-model breakdown, then plan limit bars. */
 export function usageLines(view: UsageView, width: number, fg: Paint): string[] {
@@ -79,9 +79,13 @@ export function usageLines(view: UsageView, width: number, fg: Paint): string[] 
   lines.push("", heading(`Plan usage limits${view.provider ? " · " + view.provider : ""}`));
   const windows: [string, QuotaWindow | undefined][] = [["Current session (5h)", view.quota?.fiveHour], ["Current week", view.quota?.week]];
   if (!windows.some(([, window]) => window)) {
-    lines.push(fg("dim", view.provider === "anthropic" || view.provider === "openai-codex"
-      ? view.quotaEnabled ? "  Loading limits… reopen in a moment." : "  Limit lookup is off; enable it with /jar quota on."
-      : "  Plan limits are available for anthropic and openai-codex subscriptions."));
+    const supported = view.provider === "anthropic" || view.provider === "openai-codex";
+    const failure = view.quotaFailure;
+    lines.push(fg(supported && view.quotaEnabled && failure ? "warning" : "dim", !supported
+      ? "  Plan limits are available for anthropic and openai-codex subscriptions."
+      : !view.quotaEnabled ? "  Limit lookup is off; enable it with /jar quota on."
+      : failure ? `  Limits unavailable: ${failure.error}. Retrying in ${duration(failure.retryInMs)}.`
+      : "  Loading limits…"));
     return lines;
   }
   for (const [label, window] of windows) {

@@ -151,9 +151,9 @@ watch matches  or  process exits  →  pi-jar.shell message  →  agent wakes (o
 - Progress (current tool, streaming text, tools used, turns, cost) stays in the activity view. Retained `idle` and `paused` agents remain visible in the footer/activity fleet; the newest eight ordinary retired reports remain for review, while unresolved private workspaces remain recoverable until explicit finalization/session cleanup. `s` in the activity view still steers a working subagent and `x` stops the selected agent through the same registry.
 - The deprecated `write: true` mode remains a one-shot shared-workspace compatibility path. New delegated implementation should use `mode: "worktree"`.
 
-### Exceptional agentic democracy
+### Exceptional agent council
 
-`jar_democracy` is **not** a default decomposition or decision tool. The moderator must supply `complexity: "super-complex"`, a concrete complexity justification, the persistent issue, at least two distinct failed approaches with evidence, and 2–8 uniquely identified options with tradeoffs. These gates are runtime-validated in addition to prompt guidance; the moderator is responsible for truthful evidence.
+`jar_council` is **not** a default decomposition or decision tool. The moderator must supply `complexity: "super-complex"`, a concrete complexity justification, the persistent issue, at least two distinct failed approaches with evidence, and 2–8 uniquely identified options with tradeoffs. These gates are runtime-validated in addition to prompt guidance; the moderator is responsible for truthful evidence.
 
 - Nominate relevant idle/paused **scouts** with `agents`, and set the total electorate with `voters` (default 4, or 2 at a cap of 2; always bounded by the configured cap). Forks, writable workers, busy agents and duplicate nominations are rejected. Reuse preserves context; prefer fresh scouts if discussion history could bias a ballot.
 - Unfilled seats spawn fresh read-only scouts through the normal delegate controller. The same session-wide capacity applies; the moderator must explicitly stop unneeded agents if there is no room. Voting never silently kills existing workers. Scouts spawned for the round are retired once it ends, so they never keep holding pool slots; nominated scouts stay retained.

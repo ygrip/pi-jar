@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isRoleName, normalizeSpec, parseRoleConfig, type RoleConfig } from "./model-roles.ts";
-import { isMaxSubagents, defaultVisualSettings, loadVisualSettings, type JarVisualSettings } from "./settings.ts";
+import { isMaxSubagents, defaultVisualSettings, loadVisualSettings, parseContextBudget, DEFAULT_CONTEXT_BUDGET, type JarVisualSettings } from "./settings.ts";
 import { ACCENT_NAMES } from "./accent.ts";
 import { FOOTER_FIELDS } from "./footer-settings.ts";
 import { ICON_SETS } from "./icons.ts";
@@ -41,7 +41,9 @@ function normalizeProfile(value: unknown): JarProfile | undefined {
     || !isPlainObject(settings.footer) || typeof settings.animations !== "boolean" || typeof settings.ui !== "boolean"
     || typeof settings.composer !== "boolean" || typeof settings.mascot !== "boolean" || typeof settings.suggestions !== "boolean"
     || typeof settings.advisor !== "boolean" || typeof settings.advisorGates !== "boolean"
-    || (settings.contextDiet !== undefined && typeof settings.contextDiet !== "boolean") || !Number.isInteger(settings.goalRounds)
+    || (settings.contextDiet !== undefined && typeof settings.contextDiet !== "boolean")
+    || (settings.contextBudget !== undefined && !parseContextBudget(settings.contextBudget))
+    || (settings.readCache !== undefined && typeof settings.readCache !== "boolean") || !Number.isInteger(settings.goalRounds)
     || (settings.goalRounds as number) < 1 || (settings.goalRounds as number) > 50
     || !isMaxSubagents(settings.maxSubagents) || typeof settings.accent !== "string"
     || !(settings.accent === "follow" || settings.accent === "default" || ACCENT_NAMES.includes(settings.accent as never))
@@ -50,7 +52,9 @@ function normalizeProfile(value: unknown): JarProfile | undefined {
   if (raw.name === DEFAULT_PROFILE && raw.id !== "default") return undefined;
   if (raw.name !== DEFAULT_PROFILE && (typeof raw.id !== "string" || !/^profile-[a-z0-9-]{8,64}$/.test(raw.id))) return undefined;
   for (const [role, spec] of Object.entries(raw.roles.roles)) if (!isRoleName(role) || typeof spec !== "string" || !normalizeSpec(spec)) return undefined;
-  return { id: raw.id as string, name: raw.name, theme: raw.theme, settings: { ...raw.settings, contextDiet: settings.contextDiet ?? false } as unknown as JarVisualSettings, roles: parseRoleConfig(raw.roles) };
+  const contextBudget = parseContextBudget(settings.contextBudget) ?? { ...DEFAULT_CONTEXT_BUDGET };
+  return { id: raw.id as string, name: raw.name, theme: raw.theme, settings: { ...raw.settings, contextDiet: settings.contextDiet ?? false,
+    contextBudget, readCache: settings.readCache ?? false } as unknown as JarVisualSettings, roles: parseRoleConfig(raw.roles) };
 }
 function atomicSave(file: string, document: ProfileDocument): string {
   mkdirSync(join(file, ".."), { recursive: true });

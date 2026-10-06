@@ -12,7 +12,10 @@ const DEFAULT_RESERVE = 16_384;
 export interface InfoPanelDeps {
   side: SideUsage;
   quota(ctx: ExtensionContext): Quota | undefined;
+  quotaFailure(ctx: ExtensionContext): { error: string; retryInMs: number } | undefined;
   quotaEnabled(): boolean;
+  /** Start a limit lookup when nothing fresh is cached: opening `/usage` is an explicit request. */
+  refreshQuota(ctx: ExtensionContext): void;
 }
 
 function reserveTokens(ctx: ExtensionContext): number {
@@ -61,10 +64,12 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
       { name: "Usage", render: (width, fg) => {
         usage ??= collectUsage(sessionBranch(ctx) as never, deps.side.all());
         const quota = deps.quota(ctx);
+        const quotaFailure = quota ? undefined : deps.quotaFailure(ctx);
         return usageLines({
           stats: usage,
           ...(ctx.model?.provider ? { provider: ctx.model.provider } : {}),
           ...(quota ? { quota } : {}),
+          ...(quotaFailure ? { quotaFailure } : {}),
           quotaEnabled: deps.quotaEnabled(), now: Date.now()
         }, width, fg);
       } },
@@ -78,6 +83,7 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
   const open = async (ctx: ExtensionContext, tab: number) => {
     try {
       const pages = tabs(ctx);
+      if (tab === 0) deps.refreshQuota(ctx);
       if (ctx.hasUI && ctx.mode === "tui") await openPanel(ctx, pages, tab);
       else ctx.ui.notify(pages[tab]!.render(100, plain).join("\n"), "info");
     } catch (error) { ctx.ui.notify("pi-jar: " + (error instanceof Error ? error.message : String(error)), "error"); }

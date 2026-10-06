@@ -153,6 +153,30 @@ export function describeRole(row: RoleRow): string {
   return row.role + "  ·  " + (row.spec?.startsWith("@") ? row.spec + " → " : "") + target + (row.scope === "project" ? "  · project" : "");
 }
 
+/** Delegated roles meant for a cheaper model than the main session: scouts discover, reviewers check. */
+export const ECONOMY_ROLES = ["scout", "reviewer"] as const;
+
+/**
+ * Economy roles whose subagents run on the main session model although a cheaper model is available, as
+ * jar_delegate picks it: the role's first available candidate, then the default role's, then the current
+ * model. The fix names @smol when the Fast role already points at a cheaper available model.
+ */
+export function premiumRoleWarnings(roles: Pick<ModelRoleManager, "resolveCandidates">, ctx: Pick<ExtensionContext, "model" | "modelRegistry">): string[] {
+  const main = ctx.model;
+  if (!main) return [];
+  const mainId = main.provider + "/" + main.id;
+  const mainPrice = main.cost.input + main.cost.output;
+  const models = ctx.modelRegistry.getAvailable();
+  const cheaper = new Set(models.filter((model) => model.cost.input + model.cost.output < mainPrice).map((model) => model.provider + "/" + model.id));
+  // Without a cheaper option there is nothing to recommend: a main model that is already economical is fine.
+  if (!cheaper.size) return [];
+  const available = new Set(models.map((model) => model.provider + "/" + model.id));
+  const pick = (role: string) => roles.resolveCandidates(role).map((item) => item.provider + "/" + item.model).find((id) => available.has(id));
+  const fix = cheaper.has(pick("smol") ?? "") ? "@smol" : "provider/model";
+  return ECONOMY_ROLES.filter((role) => (pick(role) ?? pick("default") ?? mainId) === mainId)
+    .map((role) => `⚠ ${role} subagents run on the main model ${mainId}; use a mini/haiku-class model: /roles set ${role} ${fix}`);
+}
+
 export class ModelRoleManager {
   private global: RoleConfig = readConfig(join(getAgentDir(), ROLE_FILE));
   private project: RoleConfig = { version: 2, roles: {} };
@@ -392,8 +416,8 @@ export class ModelRoleManager {
         const verb = (parts[0] ?? "").toLowerCase();
         if (!verb || verb === "list") {
           if (!verb && ctx.hasUI && ctx.mode === "tui" && openUi) { await openUi(ctx); return; }
-          ctx.ui.notify(this.list().map((row) => describeRole(row) + (this.fallbackSpecs(row.role).length
-            ? "  · fallbacks: " + this.fallbackSpecs(row.role).join(" → ") : "")).join("\n"), "info");
+          ctx.ui.notify([...this.list().map((row) => describeRole(row) + (this.fallbackSpecs(row.role).length
+            ? "  · fallbacks: " + this.fallbackSpecs(row.role).join(" → ") : "")), ...premiumRoleWarnings(this, ctx)].join("\n"), "info");
           return;
         }
         if (verb === "fallback") {

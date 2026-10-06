@@ -2,7 +2,7 @@ import { workspacePathAllowed } from "./delegate-worktree.ts";
 
 export const CHILD_TOOLS_ENV = "PI_JAR_CHILD_TOOLS";
 export const WEB_TOOLS = ["web_enable", "web_search", "fetch_content", "get_search_content", "source_check"] as const;
-export const RECURSIVE_TOOLS = new Set(["jar_delegate", "jar_subagent", "jar_democracy"]);
+export const RECURSIVE_TOOLS = new Set(["jar_delegate", "jar_subagent", "jar_council"]);
 
 /** Multi-file tools must validate each effective target, not just the top-level default path. */
 export function worktreeToolViolation(root: string, cwd: string, name: string, args: unknown): string | undefined {

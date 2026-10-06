@@ -28,7 +28,8 @@ import {
 export const DELEGATE_TOOL = "jar_delegate";
 /** Set in child processes so a subagent never delegates again. */
 export const CHILD_ENV = "PI_JAR_CHILD";
-export const MAX_DELEGATES = 4;
+/** Retained pool when no limit is configured; matches the settings default (the opt-in Swarm profile uses 4). */
+export const MAX_DELEGATES = 2;
 export const SUBAGENT_LIMIT_CHOICES = [2, 4, 6, 8, 16] as const;
 /** Read-only subagents also keep jar_todo so their checklist shows in the activity view. */
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "jar_todo", "jar_discuss"] as const;
@@ -58,6 +59,8 @@ const STATUS_REFRESH_MS = 20_000;
 const LIVE_UPDATE_MS = 1000;
 /** Visible message that wakes the moderator when a resumed subagent's turn ends. */
 export const SUBAGENT_MESSAGE = "pi-jar.subagent";
+/** An event carries at most this much of a report; the full report stays one `jar_subagent report` away. */
+export const EVENT_SUMMARY_CHARS = 400;
 const NOTIFY_COALESCE_MS = 250;
 const MAX_EVENT_TEXT = 16_000;
 /** Transcript entries kept per run; tool output and text are clipped so a run stays well under 2 MiB. */
@@ -204,7 +207,7 @@ export function delegatePrompt(task: string, write: boolean, mode: DelegateExecu
     "Track multi-step work with jar_todo (when available) so your progress is visible. The moderator may steer, pause or resume you; preserve scope across those controls.",
     "Use jar_discuss when available for short cross-agent questions and answers. Keep discussion messages narrow; it is for coordination, not a transcript.",
     "Finish with a self-contained report in these sections:",
-    "## Summary — the outcome in one to three sentences.",
+    `## Summary — the outcome in one to three sentences, under ${EVENT_SUMMARY_CHARS} characters: the moderator's notification shows only this.`,
     "## Details — findings or changes, with file paths (and line numbers where useful).",
     "## Verification — what you checked or ran, and the results.",
     "## Open issues — risks, unknowns and follow-ups, or \"none\".",
@@ -216,6 +219,22 @@ export function delegatePrompt(task: string, write: boolean, mode: DelegateExecu
 /** Text without terminal controls, keeping line breaks; clipped to `limit`. */
 const cleanBlock = (value: string, limit: number): string => value.slice(0, limit * 2)
   .replace(ANSI, "").replace(/\r\n?/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, limit);
+
+/** One line of at most EVENT_SUMMARY_CHARS, marked with … when clipped. */
+const summaryLine = (text: string): string => {
+  const line = cleanText(text, EVENT_SUMMARY_CHARS + 1);
+  return line.length > EVENT_SUMMARY_CHARS ? line.slice(0, EVENT_SUMMARY_CHARS - 1) + "…" : line;
+};
+const SUMMARY_HEADING = /^\s*#{1,6}\s*summary\b[\s:—–-]*(.*)$/i;
+/** What an event shows of a report: its `## Summary` section (its opening when the child skipped the format) on one line. */
+export function eventSummary(report: string): string {
+  const lines = report.split("\n");
+  const start = lines.findIndex((line) => SUMMARY_HEADING.test(line));
+  if (start < 0) return summaryLine(report);
+  const end = lines.findIndex((line, index) => index > start && /^\s*#{1,6}\s/.test(line));
+  const section = [SUMMARY_HEADING.exec(lines[start]!)![1]!, ...lines.slice(start + 1, end < 0 ? undefined : end)].join(" ");
+  return summaryLine(section.trim() ? section : report);
+}
 
 /** Whether `promise` settles within `ms`; the timer never keeps the process alive. */
 const settlesWithin = (promise: Promise<unknown>, ms: number): Promise<boolean> => {
@@ -831,7 +850,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     try {
       // Cross a settled boundary so the active task's report cannot answer the question.
       if (run.state === "working" && !await pause()) return undefined;
-      const instruction = "Moderator BTW: answer only this question in one compact paragraph. Preserve your assigned task scope for the next resume. Question: " + question;
+      const instruction = `Moderator BTW: answer only this question in one compact paragraph under ${EVENT_SUMMARY_CHARS} characters. Preserve your assigned task scope for the next resume. Question: ` + question;
       if (!beginPrompt(instruction, wasPaused)) return undefined;
       const answered = await settlesWithin(waitSettled(), 2 * 60_000);
       if (!answered) { void pause(); return undefined; }
@@ -1162,16 +1181,16 @@ export function runReport(run: DelegateRun, now = Date.now(), outputLimit = MAX_
 const DelegateModeSchema = Type.Union([Type.Literal("scout"), Type.Literal("fork"), Type.Literal("worktree")]);
 const Parameters = Type.Object({
   tasks: Type.Array(Type.Object({
-    task: Type.String({ description: "Task instruction. scout sees only this task; fork/worktree also inherit the parent's active conversation branch." }),
+    task: Type.String({ description: "Task instruction. scout sees only this; fork/worktree also inherit your conversation." }),
     name: Type.Optional(Type.String({ description: "Short label, e.g. \"auth scout\"." })),
-    role: Type.Optional(Type.String({ description: "pi-jar role override. Defaults by mode: scout→scout, fork→reviewer, worktree→worker; then role fallbacks/current model." })),
+    role: Type.Optional(Type.String({ description: "pi-jar role override; defaults by mode (scout→scout, fork→reviewer, worktree→worker), then role fallbacks/current model." })),
     mode: Type.Optional(DelegateModeSchema),
     tools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), { minItems: 1, maxItems: 64, uniqueItems: true,
-      description: "Explicit child tool allowlist. scout/fork remain read-only; worktree accepts only sandbox-aware file tools. Browser/web tools may be enabled when active in the parent." })),
-    inheritTools: Type.Optional(Type.Boolean({ description: "Inherit the parent's currently active tool names, subject to mode safety restrictions. Recursive pi-jar delegation tools are always removed." }))
+      description: "Explicit child tool allowlist; grant narrowly. scout/fork stay read-only; worktree accepts only path-guarded file tools; web/browser tools only when active here." })),
+    inheritTools: Type.Optional(Type.Boolean({ description: "Inherit your active tools, filtered by mode safety; recursive delegation tools are always removed." }))
   }), { minItems: 1, maxItems: 16 }),
   mode: Type.Optional(DelegateModeSchema),
-  write: Type.Optional(Type.Boolean({ description: "Deprecated compatibility switch. true keeps the old shared-workspace editing mode; prefer mode=\"worktree\"." }))
+  write: Type.Optional(Type.Boolean({ description: "Deprecated: true = legacy shared-workspace editing; prefer mode=\"worktree\"." }))
 });
 
 const glyph = (state: DelegateState) => state === "done" ? "✔" : state === "failed" ? "✖" : state === "stopped" ? "■" : state === "working" ? "●" : "○";
@@ -1200,7 +1219,7 @@ export interface DelegateController {
 export interface DelegateOptions {
   /** Snapshot names of tools active in the parent session. */
   getActiveToolNames?: () => readonly string[];
-  /** Allowed sizes: 2, 4, 6, 8, 16; defaults to 4. Read on every launch. */
+  /** Allowed sizes: 2, 4, 6, 8, 16; defaults to MAX_DELEGATES. Read on every launch. */
   getMaxSubagents?: () => number;
   /** Shares the delegate lifecycle and capacity with scout orchestration. */
   onController?: (controller: DelegateController) => void;
@@ -1215,6 +1234,8 @@ export interface DelegateOptions {
   discussionRetire?: (key: string) => void;
   /** Unread discussion messages waiting for an agent, shown in the moderator's fleet line. */
   discussionUnread?: (key: string) => number;
+  /** The moderator's unread discussion mail as one notice, marked read; it rides along with subagent events. */
+  discussionDigest?: () => string | undefined;
   /** Settled quiet time before a retained child's process hibernates; defaults to HIBERNATE_AFTER_MS. */
   hibernateAfterMs?: number;
 }
@@ -1227,21 +1248,16 @@ const remainingTasks = (run: DelegateRun): string[] => {
   return leaves.filter((todo) => todo.status !== "completed").map((todo) => todo.title).slice(0, 20);
 };
 
-const taskLabel = (task: string): string => {
-  const text = cleanText(task, 4096);
-  return text.length > 160 ? text.slice(0, 159) + "…" : text;
-};
-
-const controlReport = (report: SubagentStopReport): string => [
+/** The stop handoff, compact like every event: summary, what changed and reached /diff, what is left. `kept` is
+ *  the workspace still holding unapplied changes, if any; a reconciled or discarded worktree is gone. */
+const controlReport = (report: SubagentStopReport, kept: string | undefined): string => [
   `${report.key} · ${report.name} · ${report.state}`,
-  // The moderator already holds the full task in its own jar_delegate call; echo only a label.
-  `task: ${taskLabel(report.task)}`,
-  `workspace: ${report.workspace ?? "none"}`,
-  `changed: ${report.changed.length ? report.changed.join(", ") : "none"}`,
-  `applied: ${report.applied.length ? report.applied.join(", ") : "none"}`,
-  `remaining: ${report.remaining.length ? report.remaining.join("; ") : "none explicitly tracked"}`,
-  report.error ? `error: ${report.error}` : "",
-  report.last ? `last: ${cleanBlock(report.last, 1200)}` : ""
+  `summary: ${report.last ? eventSummary(report.last) : "(no report)"}`,
+  `changed: ${report.changed.length ? fileList(report.changed, 10) : "none"} · applied: ${report.applied.length ? fileList(report.applied, 10) : "none"}`,
+  kept ? `workspace kept: ${kept} (stop retries reconciliation; discard drops it)` : "",
+  report.remaining.length ? `remaining: ${report.remaining.slice(0, 3).map((title) => cleanText(title, 80)).join("; ")}`
+    + (report.remaining.length > 3 ? ` (+${report.remaining.length - 3} more)` : "") : "",
+  report.error ? `error: ${cleanText(report.error, 300)}` : ""
 ].filter(Boolean).join("\n");
 
 /** Peek is task progress only, read from memory: no git, transcript or report reads. */
@@ -1266,9 +1282,19 @@ const peekRecord = (record: SubagentRecord): string => {
     ] : [])
   ].filter(Boolean).join("\n");
 };
-/** The wake-up after a resumed turn: its progress plus the bounded report the turn produced. */
-const settledRecord = (record: SubagentRecord): string =>
-  peekRecord(record) + (record.run.output ? `\nlast: ${cleanBlock(record.run.output, 1200)}` : "");
+/** A settled turn as its event shows it: state and progress, the report's summary, changed files. */
+const turnEvent = (record: SubagentRecord): string => {
+  const run = record.run;
+  const leaves = leafTodos(run.todos);
+  const done = leaves.filter((todo) => todo.status === "completed").length;
+  return [
+    `${record.key} · ${run.name} · ${run.state}${leaves.length ? ` · ${done}/${leaves.length} tasks` : ""}`,
+    `summary: ${run.output ? eventSummary(run.output) : "(no report)"}`,
+    run.filesEdited.length ? `changed: ${fileList(run.filesEdited, 10)}` : "",
+    run.error ? `error: ${cleanText(run.error, 300)}` : "",
+    isRecovery(record) ? `workspace kept: ${run.workspace} (stop retries reconciliation; discard drops it)` : ""
+  ].filter(Boolean).join("\n");
+};
 
 /** One queued moderator notification; several coalesce into a single pi-jar.subagent message. */
 interface SubagentEvent { record: SubagentRecord; kind: "turn" | "control"; label: string; content: string; detail: Record<string, unknown> }
@@ -1314,6 +1340,10 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     try { return Math.max(0, Math.floor(options.discussionUnread?.(key) ?? 0)) || 0; }
     catch { return 0; } // the count is decoration; the fleet line must still render
   };
+  const discussionDigest = (): string | undefined => {
+    try { return options.discussionDigest?.(); }
+    catch (error) { console.error("pi-jar: could not read the moderator's discussion mail", error); return undefined; }
+  };
   const retireDiscussion = (key: string) => {
     try { options.discussionRetire?.(key); } catch (error) { console.error("pi-jar: could not retire a subagent's discussion identity", error); }
   };
@@ -1328,10 +1358,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     }).join("\n");
     return { message: { customType: "pi-jar.moderator-context", display: false, content: [
       "[PI-JAR MODERATOR MODE]",
-      "You are the coordinator while retained subagents do delegated work. Decompose and route work, steer only to correct direction, use ask for terse BTW questions, and use jar_discuss for structured cross-agent Q/A.",
-      "Initial/resumed turns and asynchronous ask/pause/stop operations wake you with pi-jar.subagent events. Accepted receipts are not completion: do not poll peek or claim files applied before the final event. Keep responding to user steering or do other work.",
-      "Do not duplicate work already owned by a retained subagent. Stop completed workers to obtain their handoff and reconcile worktree changes into /diff. Synthesize the final answer from their reports and evidence.",
-      "Hibernated agents are idle with their process closed to save memory; resume and ask relaunch them with context and workspace intact.",
+      "Retained subagents own their delegated tasks: don't duplicate their work. Their turn ends and ask/pause/stop results arrive as pi-jar.subagent events; an accepted receipt is not completion, so keep working and never poll peek.",
+      "Hibernated agents are idle with the process closed; resume and ask relaunch them intact. Stop finished workers to reconcile worktree changes into /diff, then synthesize from their reports.",
       "Retained fleet:",
       fleet
     ].join("\n") } };
@@ -1370,9 +1398,12 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     pendingEvents.clear();
     if (!events.length) return;
     const summary = cleanText(`Subagents · ${events.map(event => event.label).join(" · ")}`, 160);
+    // Discussion mail rides along with events delivered anyway; on its own it never wakes the moderator.
+    const mail = discussionDigest();
     return {
       customType: SUBAGENT_MESSAGE, display: true, details: { summary, events: events.map(event => event.detail) },
-      content: [`[PI-JAR SUBAGENT] ${summary}`, ...events.map(event => event.content), "Review, then resume, ask or stop retained agents as needed."].join("\n\n")
+      content: [`[PI-JAR SUBAGENT] ${summary}`, ...events.map(event => event.content), ...(mail ? [mail] : []),
+        "Summaries only: jar_subagent report <agent> returns a full report. Resume, ask or stop retained agents as needed."].join("\n\n")
     };
   };
   const scheduleWake = () => {
@@ -1396,7 +1427,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   pi.registerMessageRenderer?.<{ summary?: string }>(SUBAGENT_MESSAGE, (message, { expanded }, theme) => {
     const text = typeof message.content === "string" ? message.content : "Subagents";
     const summary = message.details?.summary ?? text.split("\n", 1)[0] ?? "Subagents";
-    return new Text(expanded ? text : theme.fg("accent", cleanText(summary, 160)) + theme.fg("dim", " · expand for report"), 0, 0);
+    return new Text(expanded ? text : theme.fg("accent", cleanText(summary, 160)) + theme.fg("dim", " · expand for details"), 0, 0);
   });
   pi.on?.("agent_start", () => { moderatorActive = true; moderatorInterrupted = false; clearTimeout(wakeTimer); wakeTimer = undefined; });
   pi.on?.("turn_end", boundary);
@@ -1413,7 +1444,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         // Freeze reports at the settled boundary. A fast resume must not overwrite a queued
         // initial report, and multiple turns before delivery must each be delivered.
         queueEvent(`${key}:${record.run.resumes}`, { record, kind: "turn", label: `${record.run.name} turn ended`,
-          content: settledRecord(record), detail: { key, turn: record.run.resumes } });
+          content: turnEvent(record), detail: { key, turn: record.run.resumes } });
       }
     }
   });
@@ -1421,14 +1452,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   const delegateTool: ToolDefinition<typeof Parameters> = {
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Start retained session-scoped subagents within the configured retained pool limit and return immediately. scout is fresh/read-only and defaults to the scout role; fork inherits the parent conversation read-only and defaults to reviewer; worktree inherits context, defaults to worker, and edits in an isolated Git worktree. Each task may provide an explicit tools allowlist or inheritTools=true to filter the parent's active tools by mode. Turn completions arrive as pi-jar.subagent event messages; control workers with jar_subagent. Settled agents hibernate (process closed, context kept) until resumed. Worktree changes apply only when the moderator stops that agent; at most ${RECOVERY_LIMIT} worktree workspaces may be active or awaiting recovery at once.`,
-    promptSnippet: "Act as moderator: delegate parallel work, then continue responding to the user while subagents run. Their turn completions arrive as pi-jar.subagent event messages; steer, pause or stop them with jar_subagent without polling.",
+    description: `Start retained subagents and return immediately; the pool limit counts idle, paused and hibernated agents. fork and worktree inherit this conversation; a worktree's isolated Git changes reach /diff only when you stop it, and at most ${RECOVERY_LIMIT} worktree workspaces may be active or awaiting recovery (resolve with jar_subagent stop or discard). Turn completions arrive as pi-jar.subagent events with a short summary and changed files; jar_subagent report returns a full report. Settled agents hibernate (process closed, context kept) until resumed.`,
+    promptSnippet: "Start retained parallel subagents: scout (cheap read-only discovery), fork (read-only review with your context), worktree (isolated implementation).",
     promptGuidelines: [
-      "When useful work can be delegated, act as the moderator: decompose, assign, monitor, resolve disagreements, and synthesize. Do not redo a delegated implementation yourself while its worker is active.",
-      "Use scout for cheap independent discovery, fork/reviewer for context-aware review, and worktree/worker for implementation. Explicit task.role overrides these mode defaults. Grant optional task.tools narrowly; task.inheritTools snapshots active parent tools then filters by mode. Scout/fork stay read-only; worktree only accepts path-guarded tools.",
-      "Retained agents become idle after each turn and hibernate after a quiet period; resume and ask relaunch them with their context. Initial and resumed turn completions arrive as pi-jar.subagent event messages, so keep responding to user steering while they work; do not poll jar_subagent peek. Reuse them with jar_subagent resume instead of spawning replacements; pause them when priorities change; stop completed workers to reconcile their worktree into /diff.",
-      "Use jar_subagent ask for a brief BTW question to one worker. For agent-to-agent questions, have them use jar_discuss so answers stay structured and cheap.",
-      "Respect the configured pool limit, including idle, paused and hibernated agents. Stop agents you no longer need; resolve failed worktree recovery records (stop to retry, discard to drop) before starting more worktree agents."
+      "Delegate only when there are ≥2 independent chunks that each need ≥10 tool calls; otherwise do the work yourself.",
+      "After delegating, moderate: completions arrive as pi-jar.subagent events, so keep working and never poll; don't redo delegated work; reuse retained agents (jar_subagent resume) instead of spawning; stop finished workers to apply worktree changes into /diff."
     ],
     parameters: Parameters,
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -1805,7 +1833,10 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         signal?.removeEventListener("abort", abortAll);
         publish();
         toolReturned = true;
-        return { content: [{ type: "text", text: runs.map((run) => runReport(run)).join("\n\n") + "\n\nSubagent launch is asynchronous; turn reports arrive as pi-jar.subagent events. You can continue working or steer the fleet with jar_subagent." }], details: details() };
+        return { content: [{ type: "text", text: [
+          `Subagent launch is asynchronous: ${plural(records.length, "agent")} started; turn reports arrive as pi-jar.subagent events. Keep working or steer with jar_subagent; don't poll.`,
+          ...records.map(({ key, run }) => `- ${key} · ${run.name} · ${run.mode} · ${run.role}${run.model ? " · " + run.model : ""}`)
+        ].join("\n") }], details: details() };
       }
       await startup;
       publish();
@@ -1866,7 +1897,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       if (!launched) throw new Error(result.content.map((part) => "text" in part ? part.text : "").join("\n"));
       const record = registry.get(`delegate-${launched}-1`);
       if (!record) throw new Error("Scout session was discarded");
-      // This launch is an internal democracy vote; its caller is already awaiting the result,
+      // This launch is an internal council vote; its caller is already awaiting the result,
       // so the moderator does not need a duplicate unsolicited completion notification.
       watched.delete(record.key);
       deleteSettled(record.key);
@@ -1920,21 +1951,20 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     const status = result.isError ? "failed" : "completed";
     // The stop handoff supersedes any queued turn report for the same agent.
     if (operation.action === "stop") deleteSettled(record.key);
+    const text = result.content.map(part => part.text).join("\n");
     queueEvent(operation.id, { record, kind: "control", label: `${operation.action} ${record.run.name} ${status}`,
-      content: `${operation.action} ${operation.id} ${status}:\n${result.content.map(part => part.text).join("\n")}`,
+      // A stop handoff is already compact; any other result (a BTW answer, an error) is clipped like a summary.
+      content: `${operation.action} ${operation.id} ${status}:\n${operation.action === "stop" ? text : summaryLine(text)}`,
       detail: { operationId: operation.id, action: operation.action, key: record.key, status, report: result.details } });
   };
 
   pi.registerTool({
     name: "jar_subagent",
     label: "subagent",
-    description: "Non-blocking moderator control for retained subagents. peek, steer, resume and discard return immediately. ask, pause and stop return an accepted operation receipt; the final answer or handoff arrives as a pi-jar.subagent event. Settled agents hibernate (process closed, context and workspace kept); resume and ask relaunch them transparently. Stop completion safely reconciles worktree changes; acceptance does not mean changes are applied yet. discard removes an unresolved worktree recovery workspace without applying it.",
-    promptSnippet: "Use jar_subagent as the moderator control plane. Prefer peek over rereading transcripts; reuse paused/idle/hibernated agents with resume; stop finished workers to reconcile their work.",
+    description: "Non-blocking control for retained subagents. peek: task progress only (plus workspace and changed files of an unresolved worktree recovery). report: an agent's latest full report, for retained and recently finished agents. steer: redirect a working agent. resume: continue an idle, paused or hibernated agent (hibernated ones relaunch transparently). ask, pause and stop return an accepted receipt; the answer or handoff arrives as a pi-jar.subagent event. stop aborts any active turn, retires the agent, reports changes and remaining work, and reconciles worktree changes into /diff (on a failed recovery record it retries). discard removes an unresolved recovery workspace without applying it.",
+    promptSnippet: "Moderator control for retained subagents: peek, report, steer, ask, pause, resume, stop, discard.",
     promptGuidelines: [
-      "peek returns only task progress, plus workspace and changed files for unresolved worktree recovery records. report returns an agent's latest full report when a result or event shows only part of it. Do not poll: initial/resumed turns and control completions send pi-jar.subagent events. Stop returns an accepted receipt first, then changed files and the full handoff in its completion event.",
-      "Use steer for active direction and ask for a brief BTW question. ask, pause and stop do not wait on the child; continue responding to the user until their completion event arrives.",
-      "Pause when an agent should stop spending tokens but keep its context/workspace. Resume the same agent later instead of spawning a replacement; a hibernated agent resumes exactly like an idle one.",
-      "Stop when an agent is no longer needed. Stop aborts any active turn, retires the process, reports progress/workspace/changes/remaining work, and reconciles safe worktree changes into /diff. On a failed/conflicted worktree recovery record, stop retries reconciliation; discard it only when its changes are not wanted."
+      "Results arrive as pi-jar.subagent events; never poll. Reuse idle/paused/hibernated agents with resume instead of spawning; ask = one brief BTW question; pause keeps context without spending; read report only when an event summary is not enough."
     ],
     parameters: Type.Object({
       action: Type.Union([
@@ -2005,7 +2035,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       }
       const report = await registry.stop(record.key);
       if (!report) return { content: [{ type: "text", text: "Subagent is already retired: " + record.run.name }] };
-      return { content: [{ type: "text", text: controlReport(report) }], details: report, isError: !!report.error };
+      return { content: [{ type: "text", text: controlReport(report, record.run.workspace) }], details: report, isError: !!report.error };
       };
       // Internal registry APIs remain awaited for shutdown/reconciliation correctness. Only the
       // external tool boundary is detached, so parent steering never waits on a child turn or Git.

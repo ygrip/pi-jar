@@ -34,8 +34,8 @@ test("start, slash command and automatic gates do not wait for an unresponsive p
   assert.equal(h.advisor.get("a2")?.state, "running");
   assert.throws(() => h.advisor.start(h.ctx), /busy/);
   h.advisor.cancel("a2");
-  const call = { toolName: "read", input: { path: "same.ts" } };
-  h.hooks.get("tool_call")!(call, h.ctx); h.hooks.get("tool_call")!(call, h.ctx);
+  const call = { toolName: "grep", input: { pattern: "same" } };
+  for (let repeat = 0; repeat < 3; repeat++) h.hooks.get("tool_call")!(call, h.ctx);
   const gate = h.hooks.get("tool_call")!(call, h.ctx);
   assert.equal(gate.block, true);
   assert.match(gate.reason, /reviewing in the background/);

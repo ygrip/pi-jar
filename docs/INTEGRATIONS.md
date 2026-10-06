@@ -39,7 +39,7 @@ ctx.ui.setStatus("pi-jar.quota.openai-codex", JSON.stringify({
 - `used` is a percentage from 0 to 100. Either window may be omitted, and each can carry an optional `resetsAt` (epoch milliseconds).
 - `expiresAt` is required and may be at most five minutes ahead. A valid published status always wins.
 - `/jar quota on` (the default each session) lets pi-jar resolve the current Anthropic or OpenAI Codex OAuth credentials through Pi's model registry and make a **read-only** request to the provider's quota endpoint when nothing is published.
-- Requests have a 5 s timeout; successful results are cached for 5 minutes, while consecutive failures back off for 5, 10, 20, then 30 minutes. `/jar quota off` cancels pending requests and clears the cache. Renders only read cached values.
+- Requests have a 5 s timeout; successful results are cached for 5 minutes, while consecutive failures back off for 5, 10, 20, then 30 minutes and `/usage` shows the failure reason until the next retry. `/jar quota off` cancels pending requests and clears the cache. Renders only read cached values.
 - These provider endpoints are not stable public APIs.
 
 ## Session entries owned by pi-jar
@@ -58,18 +58,34 @@ Hidden context messages (`pi-jar.plan-context`, `pi-jar.plan-reminder`, `pi-jar.
 | --- | --- |
 | `jar_todo` | branch-aware checklist: `todos` full-list writes (`content`, `status` pending/in_progress/completed, `activeForm`), plus `list`, `add`, `start`, `done`, `open`, `edit`, `delete` |
 | `jar_ask` | structured questions answered in the TUI |
-| `jar_plan_submit` | submit a plan file for review (plan mode only) |
-| `jar_goal` | `get`, `complete` (with evidence, audit phase only), `block` |
-| `jar_suggest` | one next-prompt suggestion shown as composer ghost text |
-| `jar_shell` | background shells: `start` (`command`, `name`, `watch`, `notify`), `list`, `output`, `kill` |
-| `jar_delegate` | up to four parallel subagents (`tasks: [{task, name?, role?}]`, `write?`) |
+| `jar_plan_submit` | submit a plan file for review; active only in plan mode |
+| `jar_goal` | `get`, `complete` (with evidence, audit phase only), `block`; active only while a goal runs |
+| `jar_suggest` | one next-prompt suggestion shown as composer ghost text; active only when suggestions are enabled |
+| `jar_shell` | background shells: `start` (`command`, `name`, `watch`, `notify`, `purpose`, `waitMs`), `list`, `peek`, `wait`, `output` (new lines; `all`), `kill` |
+| `jar_delegate` | retained subagents within the configured pool (`tasks: [{task, name?, role?, mode?, tools?, inheritTools?}]`) |
+| `jar_subagent` | moderator control: `peek`, `report`, `steer`, `ask`, `pause`, `resume`, `stop`, `discard` |
+| `jar_council` | exceptional scout vote with strict majority; never implements |
+| `jar_discuss` | parent-brokered Q/A between moderator and subagents |
 | `jar_advisor` | second opinion from the `advisor` role (`question?`, `draft?`) |
+
+Mode-specific tools are deactivated when their mode is off, so their schema and rules are not sent with every request.
 
 `jar_shell` events arrive as a visible `pi-jar.shell` custom message that triggers (or queues) an agent turn; subagent turn ends and `jar_subagent` control completions arrive as one coalesced, visible `pi-jar.subagent` message at the moderator's next turn boundary, or as a wake-up when it is idle. `jar_delegate` runs child processes with `PI_JAR_CHILD=1`, which keeps pi-jar in the child from registering `jar_delegate` again, and publishes each running subagent through the role contract above as `pi-jar.role.delegate-<batch>-<n>`. The advisor publishes `pi-jar.role.advisor` while it is consulting, and its `/advisor` and gate answers arrive as visible `pi-jar.advisor` custom messages.
 
 ## Commands that overlap other packages
 
 pi-jar registers `/usage`, `/context` and `/advisor`. Pi keeps both commands when two extensions register the same name and suffixes the later one (for example `/usage:2`), so remove packages whose commands you no longer need (such as a separate usage, context or advisor extension) to keep the plain names on pi-jar.
+
+## Keeping sessions cheap (recommendations)
+
+Every model call re-sends the whole context, so cost grows with session length far more than with the work done (see [EFFICIENCY_PLAN.md](./EFFICIENCY_PLAN.md#session-cost-reduction)). pi-jar never edits these files; apply them yourself if they fit:
+
+- **Compact earlier.** In `~/.pi/agent/settings.json` set `"compaction": { "reserveTokens": 140000, "keepRecentTokens": 20000 }`. With a 272k-window model this compacts around 130k instead of near the limit. pi-jar's context budget (`/jar settings` → Context budget) suggests `/compact` or `/new` at the same point, or compacts at the next finished task when set to `compact`.
+- **Enable heavy tool packages per project.** A package such as `pi-mono-figma` (~20 tools) sends every schema on every call; enable it only in projects that use it.
+- **Load each MCP server once.** Use codebase-memory either through the lazy `mcp` proxy **or** as direct tools, not both.
+- **Review rarely used packages** (for example `i-have-adhd`, `pi-mono-loop`, `pi-mono-btw`) and enable them per project.
+- **One task per session.** Start `/new` when the next request is unrelated; pi-jar suggests it when a finished checklist is followed by a new prompt in a large context.
+- **Measure.** `node scripts/session-cost.mjs <session.jsonl | id>` (in a pi-jar checkout) reports calls, the cost split, context buckets, repeated reads, tool counts and cache misses for one session.
 
 ## Working signals and other managers
 

@@ -12,7 +12,7 @@ export const ADVISOR_MESSAGE = "pi-jar.advisor";
 const TRANSCRIPT_LIMIT = 24_000;
 const GIT_LIMIT = 4_000;
 /** Identical tool calls (same tool and input) within the recent window that count as a loop. */
-export const LOOP_REPEATS = 3;
+export const LOOP_REPEATS = 4;
 /** Consecutive failing tool results that count as stuck. */
 export const FAILURE_STREAK = 3;
 /** Automatic consultations allowed per user prompt. */
@@ -93,6 +93,22 @@ export function advisorPrompt(request: AdvisorRequest, conversation: string, git
 export function callKey(tool: string, input: unknown): string {
   const json = String(JSON.stringify(input ?? {}));
   return tool + " " + (json.length <= KEY_INPUT_CHARS ? json : json.slice(0, 200) + "…#" + createHash("sha1").update(json).digest("hex"));
+}
+
+/** Shell status polls that legitimately repeat with identical input. */
+const POLL_ACTIONS: Record<string, true> = { output: true, wait: true, peek: true };
+/** Test runners: rerunning the same suite between edits is the normal fix loop, not a stuck one. */
+const TEST_COMMAND = /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test(?::\S+)?|node\s+(?:\S+\s+)*--test|(?:npx\s+)?(?:pytest|vitest|jest|mocha|phpunit|rspec|playwright\s+test)|(?:go|cargo|dotnet|deno|swift|mix)\s+test|python3?\s+-m\s+(?:pytest|unittest)|(?:\.\/)?(?:gradlew|gradle|mvnw|mvn)\s+(?:\S+\s+)*test|make\s+(?:\S+\s+)*test)(?=$|[\s;&|)])/;
+/**
+ * Calls that repeat identically during normal work never count toward a loop: re-reads, shell
+ * output/wait/peek polls and test reruns. They still count toward failure streaks.
+ */
+export function loopExempt(tool: string, input: unknown): boolean {
+  if (tool === "read") return true;
+  const fields = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  if (tool === "jar_shell" && typeof fields.action === "string" && Object.hasOwn(POLL_ACTIONS, fields.action)) return true;
+  return (tool === "bash" || (tool === "jar_shell" && fields.action === "start"))
+    && typeof fields.command === "string" && TEST_COMMAND.test(fields.command);
 }
 
 /** Tracks repeated calls and failure streaks within one user prompt. */
@@ -328,13 +344,9 @@ export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, optio
   });
   if (typeof (pi as ExtensionAPI & { registerTool?: unknown }).registerTool === "function") pi.registerTool({
     name: ADVISOR_TOOL, label: "advisor",
-    description: "Start a background second opinion and return its request ID immediately. Use status/get/wait/cancel with that ID; wait is bounded to 30 seconds.",
-    promptSnippet: "Use jar_advisor for a second opinion on consequential decisions, when stuck, or before declaring hard work done.",
-    promptGuidelines: [
-      "Call jar_advisor before committing to a risky approach, after two failed attempts, and before declaring complex work complete. Form a candidate first and pass it as draft.",
-      "Start returns immediately, not approval. Continue useful work; collect completed advice with get/wait before the consequential decision. A pending receipt is not a completed review.",
-      "Background completions reach the model at a safe agent boundary; they cannot interrupt an in-flight model response. Use bounded wait when no useful work remains."
-    ], parameters: Parameters,
+    description: "Start a background second opinion and return its request ID immediately. Start is a pending receipt, not approval: continue useful work and collect the advice with get, or wait (bounded to 30 seconds) when no useful work remains, before the consequential decision. Completions also arrive at a safe agent boundary; they cannot interrupt an in-flight response. status/cancel manage requests.",
+    promptSnippet: "Use jar_advisor only when the user asks or after two failed attempts at the same problem; pass your candidate approach as draft and collect the advice before deciding.",
+    parameters: Parameters,
     async execute(_id, params, signal, _onUpdate, ctx) {
       const action = params.action ?? "start";
       if (action === "status") {
@@ -371,7 +383,7 @@ export function registerAdvisor(pi: ExtensionAPI, roles: ModelRoleManager, optio
   pi.on("agent_before_settle", event => { interrupted = event.outcome !== "completed"; return boundary(event); });
   pi.on("agent_settled", (_event, ctx) => { active = false; if (ctx) deliveryContext = ctx; notify(); });
   pi.on("tool_call", (event, ctx) => {
-    if (event.toolName === ADVISOR_TOOL || !options.enabled() || !options.gates()) return;
+    if (event.toolName === ADVISOR_TOOL || !options.enabled() || !options.gates() || loopExempt(event.toolName, event.input)) return;
     const trigger = stuck.call(callKey(event.toolName, event.input)); if (!trigger) return;
     try { const job = start(ctx, { trigger }, ctx.signal); return { block: true, reason: `Loop detected: ${trigger}. Advisor ${job.id} is reviewing in the background. Change approach and collect its result with jar_advisor get/wait.` }; }
     catch (error) { toast(ctx, "Advisor gate: " + (error instanceof Error ? error.message : String(error)), true); }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerContextDiet, trimCompletedThinking, type DietMessage } from "../src/context-diet.ts";
+import { registerContextDiet, stubSupersededReads, trimCompletedThinking, type DietMessage } from "../src/context-diet.ts";
 
 type Message = DietMessage & { [key: string]: unknown };
 const thought = (text = "summary", signature = "opaque-provider-state") => ({ type: "thinking", thinking: text, thinkingSignature: signature });
@@ -10,6 +10,14 @@ const assistant = (...content: unknown[]): Message => ({ role: "assistant", cont
 const call = (id: string) => ({ type: "toolCall", id, name: "write", arguments: { path: "file.ts", content: "const thinking = 'keep exactly';" } });
 const result = (id: string): Message => ({ role: "toolResult", toolCallId: id, toolName: "write", content: [text("Saved file.ts")], details: { receipts: [1] } });
 const zero = { removedThinkingParts: 0, removedVisibleChars: 0, removedSignatureChars: 0 };
+const none = { ...zero, stubbedReads: 0, stubbedReadChars: 0 };
+const cwd = "/repo";
+const readCall = (id: string, path: string, window: object = {}) => ({ type: "toolCall", id, name: "read", arguments: { path, ...window } });
+const fileCall = (id: string, name: "edit" | "write", path: string) => ({ type: "toolCall", id, name, arguments: { path } });
+const readResult = (id: string, body = "x".repeat(400), extra: object = {}): Message =>
+  ({ role: "toolResult", toolCallId: id, toolName: "read", content: [text(body)], isError: false, ...extra });
+const fileResult = (id: string, name: "edit" | "write", isError = false): Message =>
+  ({ role: "toolResult", toolCallId: id, toolName: name, content: [text(isError ? "Could not edit" : "ok")], isError });
 
 function freeze<T>(value: T): T {
   if (value && typeof value === "object") {
@@ -115,10 +123,11 @@ test("context registration is opt-in, returns fresh diagnostic snapshots, and re
   const controller = registerContextDiet({ on: (name: string, fn: Function) => hooks.set(name, fn) } as never, () => enabled);
   const messages = [user("old"), assistant(thought(), text("done")), user("new")];
   const event = { messages };
-  assert.equal(hooks.get("context")!(event), undefined);
-  assert.deepEqual(controller.stats(), zero);
+  const ctx = { cwd };
+  assert.equal(hooks.get("context")!(event, ctx), undefined);
+  assert.deepEqual(controller.stats(), none);
   enabled = true;
-  const projected = hooks.get("context")!(event);
+  const projected = hooks.get("context")!(event, ctx);
   assert.equal(projected.messages[0], messages[0]);
   assert.deepEqual(projected.messages[1].content, [text("done")]);
   assert.equal(event.messages, messages);
@@ -126,9 +135,94 @@ test("context registration is opt-in, returns fresh diagnostic snapshots, and re
   const snapshot = controller.stats(); snapshot.removedThinkingParts = 999;
   assert.equal(controller.stats().removedThinkingParts, 1);
   enabled = false;
-  assert.equal(hooks.get("context")!(event), undefined);
-  assert.deepEqual(controller.stats(), zero);
-  enabled = true; hooks.get("context")!(event);
+  assert.equal(hooks.get("context")!(event, ctx), undefined);
+  assert.deepEqual(controller.stats(), none);
+  enabled = true; hooks.get("context")!(event, ctx);
   hooks.get("session_start")!();
-  assert.deepEqual(controller.stats(), zero);
+  assert.deepEqual(controller.stats(), none);
+});
+
+test("reads superseded within a completed turn become stubs; ids, order and later turns stay intact", () => {
+  const messages = freeze([
+    user("old"),
+    assistant(readCall("r1", "src/a.ts")), readResult("r1"),
+    assistant(readCall("r2", "./src/a.ts")), readResult("r2"),
+    assistant(readCall("r3", "src/a.ts", { offset: 50 })), readResult("r3"),
+    assistant(fileCall("e1", "edit", "/repo/src/a.ts")), fileResult("e1", "edit"),
+    assistant(readCall("r4", "src/b.ts")), readResult("r4"),
+    assistant(readCall("r5", "src/c.ts")), readResult("r5"),
+    assistant(readCall("r6", "src/c.ts", { offset: 2 })), readResult("r6"),
+    assistant(text("done")),
+    user("next"),
+    assistant(readCall("r7", "src/b.ts")), readResult("r7"),
+    assistant(readCall("r8", "src/b.ts")), readResult("r8"),
+    assistant(text("done")),
+    user("now"),
+    assistant(readCall("r9", "src/b.ts")), readResult("r9"),
+    assistant(readCall("r10", "src/b.ts")), readResult("r10")
+  ]);
+  const before = JSON.stringify(messages);
+  const diet = stubSupersededReads(messages, cwd);
+  // r4 is superseded only in a later turn and r8 only in the current one, which is never touched: a
+  // completed turn is projected once, so earlier prompt prefixes stay cached.
+  const stubs = new Map([
+    [2, "[superseded by a later read of src/a.ts]"],
+    [4, "[superseded by a later edit of ./src/a.ts]"],
+    [6, "[superseded by a later edit of src/a.ts]"],
+    [18, "[superseded by a later read of src/b.ts]"]
+  ]);
+  assert.equal(JSON.stringify(messages), before, "stored history is not mutated");
+  assert.equal(diet.messages.length, messages.length);
+  assert.deepEqual(diet.stats, { stubbedReads: 4, stubbedReadChars: 1600 });
+  diet.messages.forEach((message, index) => {
+    const stub = stubs.get(index);
+    if (stub === undefined) return assert.equal(message, messages[index], `message ${index} retains identity`);
+    const { content, ...rest } = message;
+    const { content: _original, ...pairing } = messages[index]!;
+    assert.deepEqual(rest, pairing, "role, toolCallId, toolName and isError are kept");
+    assert.deepEqual(content, [text(stub)]);
+  });
+  assert.equal(stubSupersededReads(diet.messages, cwd).messages, diet.messages, "the projection is stable");
+});
+
+test("read-cache stubs, errors, images, failed and same-message operations never supersede a read", () => {
+  const image = { type: "image", data: "base64", mimeType: "image/png" };
+  const messages = [
+    user("old"),
+    assistant(readCall("a1", "a.ts")), readResult("a1"),
+    assistant(readCall("a2", "a.ts")), readResult("a2", "[unchanged since read #1 (3 lines); pass force: true to re-read]", { details: { unchangedSinceRead: 1 } }),
+    assistant(readCall("a3", "a.ts")), readResult("a3", "ENOENT", { isError: true }),
+    assistant(fileCall("a4", "edit", "a.ts")), fileResult("a4", "edit", true),
+    assistant(readCall("b1", "b.ts"), fileCall("b2", "write", "b.ts")), readResult("b1"), fileResult("b2", "write"),
+    assistant(readCall("c1", "c.png")), readResult("c1", "Read image file [image/png]", { content: [text("Read image file [image/png]"), image] }),
+    assistant(readCall("c2", "c.png")), readResult("c2"),
+    assistant(readCall("d1", "d.ts")), readResult("d1", "tiny"),
+    assistant(readCall("d2", "d.ts")), readResult("d2"),
+    user("new")
+  ];
+  const diet = stubSupersededReads(messages, cwd);
+  assert.equal(diet.messages, messages);
+  assert.deepEqual(diet.stats, { stubbedReads: 0, stubbedReadChars: 0 });
+});
+
+test("superseded-read stubs fail closed on ambiguous tool sequences", () => {
+  const superseded = [user("old"), assistant(readCall("r1", "a.ts")), readResult("r1"), assistant(readCall("r2", "a.ts")), readResult("r2")];
+  assert.equal(stubSupersededReads([...superseded, user("new")], cwd).stats.stubbedReads, 1);
+  for (const tail of [[result("detached")], [assistant(call("same")), result("same"), result("same")], [assistant(call("open"))]]) {
+    const messages = [...superseded, ...tail, user("new")];
+    assert.equal(stubSupersededReads(messages, cwd).messages, messages);
+  }
+});
+
+test("the registered diet also stubs superseded reads, resolving paths against the session cwd", () => {
+  const hooks = new Map<string, Function>();
+  const controller = registerContextDiet({ on: (name: string, fn: Function) => hooks.set(name, fn) } as never, () => true);
+  const messages = [user("old"), assistant(thought(), readCall("r1", "src/a.ts")), readResult("r1"),
+    assistant(readCall("r2", "/repo/src/a.ts")), readResult("r2"), user("new")];
+  const projected = hooks.get("context")!({ messages }, { cwd });
+  assert.deepEqual(projected.messages[1].content, [readCall("r1", "src/a.ts")]);
+  assert.deepEqual(projected.messages[2].content, [text("[superseded by a later read of src/a.ts]")]);
+  assert.deepEqual(controller.stats(), { removedThinkingParts: 1, removedVisibleChars: 7, removedSignatureChars: 21, stubbedReads: 1, stubbedReadChars: 400 });
+  const elsewhere = hooks.get("context")!({ messages }, { cwd: "/elsewhere" });
+  assert.equal(elsewhere.messages[2], messages[2], "relative and absolute paths match only under the session cwd");
 });

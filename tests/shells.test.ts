@@ -74,7 +74,6 @@ test("jar_shell tool starts, lists, reads and kills", async () => {
     assert.match((await run({ action: "list" })).content[0].text, /s1 · hello · running/);
     assert.match((await run({ action: "kill", id: "s1" })).content[0].text, /Stopping s1/);
     assert.match((await run({ action: "output", id: "zz" })).content[0].text, /output failed: no shell zz/);
-    assert.match(tool.promptGuidelines.join(" "), /Do not poll/);
   } finally { manager.dispose(); }
 });
 
@@ -200,6 +199,70 @@ test("finished jobs compact once their result is surfaced", () => {
     assert.equal(manager.get(quiet.id)!.lines.length, 1000);
     manager.acknowledge([quiet.id]);
     assert.ok(charsOf(manager, quiet.id) <= 32 * 1024, "reading a finished result compacts it");
+  } finally { manager.dispose(); }
+});
+
+type ToolResult = { content: Array<{ text: string }> };
+/** The registered jar_shell tool as a text-returning call. */
+function shellTool(manager: ShellManager) {
+  let execute: ((id: string, params: object, signal: AbortSignal | undefined, update: undefined, ctx: { cwd: string }) => Promise<ToolResult>) | undefined;
+  registerShells({ registerTool(definition: { execute: typeof execute }) { execute = definition.execute; } } as never, () => manager);
+  return async (params: object, signal?: AbortSignal) => (await execute!("t", params, signal, undefined, { cwd: tmpdir() })).content[0]!.text;
+}
+
+test("jar_shell start with waitMs returns a quick job's exit code in one call and never re-notifies", async () => {
+  const manager = new ShellManager(() => {});
+  try {
+    const run = shellTool(manager);
+    assert.match(await run({ action: "start", command: "printf 'one\\ntwo\\n'; exit 3", waitMs: 5000 }), /^s1 · .* · exited 3 · .*\none\ntwo$/);
+    assert.equal(manager.pendingNotifications(), 0, "the surfaced exit is acknowledged");
+    assert.deepEqual(manager.takeNotifications(), []);
+    assert.match(await run({ action: "output", id: "s1" }), /no new output/);
+  } finally { manager.dispose(); }
+});
+
+test("start with waitMs reports partial output while running; output returns only new lines unless all", async () => {
+  const { children, manager } = fakeShells();
+  try {
+    const run = shellTool(manager);
+    const starting = run({ action: "start", command: "dev", waitMs: 30 });
+    children[0].stdout.emit("data", "booting\n");
+    assert.match(await starting, /Started s1 · dev · running.*Still running after 30ms.*\nbooting$/s);
+    assert.equal(manager.get("s1")!.status, "running");
+    assert.match(await run({ action: "output", id: "s1" }), /^s1 · dev · running · \d+s · no new output/);
+    children[0].stdout.emit("data", "compiled\nlistening\n");
+    assert.match(await run({ action: "output", id: "s1" }), /^s1 · dev · running · \d+s\ncompiled\nlistening$/);
+    assert.match(await run({ action: "output", id: "s1", all: true }), /\nbooting\ncompiled\nlistening$/);
+    assert.match(await run({ action: "output", id: "s1" }), /no new output/);
+
+    const abort = new AbortController();
+    const cancelled = run({ action: "start", command: "slow", waitMs: 30000 }, abort.signal);
+    abort.abort(new Error("esc"));
+    assert.match(await cancelled, /Started s2 · slow · running.*Wait cancelled; the job keeps running/);
+    assert.equal(manager.get("s2")!.status, "running", "cancelling the wait never kills the job");
+  } finally { manager.dispose(); }
+});
+
+test("read cursors survive trimming, cap new lines and show a growing partial line once", () => {
+  const { children, manager } = fakeShells();
+  try {
+    const job = manager.start({ command: "build", cwd: tmpdir() });
+    emitLines(children[0], "a", 1000, 10);
+    assert.deepEqual({ ...manager.read(job.id, 10), lines: undefined }, { lines: undefined, missed: 0, skipped: 990 });
+    emitLines(children[0], "b", 2200, 10);
+    const behind = manager.read(job.id, 400);
+    const { dropped } = manager.get(job.id)!;
+    assert.ok(dropped > 1000, "the trim reached lines the cursor had not read");
+    assert.deepEqual([behind.missed, behind.skipped, behind.lines.length], [dropped - 1000, 3200 - dropped - 400, 400], "trimmed unread lines are counted, not replayed");
+    assert.match(behind.lines.at(-1)!, /^b2199:/);
+    assert.deepEqual(manager.read(job.id), { lines: [], missed: 0, skipped: 0 });
+    children[0].stdout.emit("data", "prog");
+    assert.deepEqual(manager.read(job.id).lines, ["prog"]);
+    assert.deepEqual(manager.read(job.id).lines, [], "an unchanged partial line is not repeated");
+    children[0].stdout.emit("data", "ress\ndone\n");
+    assert.deepEqual(manager.read(job.id).lines, ["progress", "done"]);
+    assert.deepEqual(manager.read(job.id, 2, true).lines, ["progress", "done"], "all returns the trailing window");
+    assert.deepEqual(manager.output(job.id, 1), ["done"], "display reads never move the cursor");
   } finally { manager.dispose(); }
 });
 

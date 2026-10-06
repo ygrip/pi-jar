@@ -28,3 +28,29 @@ for (const width of [40, 100]) test(`role actions remain visible at width ${widt
   assert.deepEqual(activated, ["default"]);
   assert.ok(screens >= 2);
 });
+
+test("the roles screen warns for economy roles that run on the main model", async () => {
+  const rows = [{ role: "scout", label: "Scout", custom: false, usedBy: "cheap delegated discovery", fallbacks: [] }];
+  const model = (id: string, price: number) => ({ provider: "p", id, cost: { input: price, output: price, cacheRead: 0, cacheWrite: 0 } });
+  const render = async (candidates: Record<string, string>) => {
+    const roles = { list: () => rows, activeRole: () => undefined,
+      resolveCandidates: (role: string) => candidates[role] ? [{ provider: "p", model: candidates[role] }] : [] };
+    let component: any;
+    const ctx = { hasUI: true, mode: "tui", model: model("big", 10), modelRegistry: { getAvailable: () => [model("big", 10), model("mini", 1)] },
+      ui: { notify() {}, custom(factory: Function) {
+        return new Promise((resolve) => { component = factory({ requestRender() {} }, { fg: (_c: string, t: string) => t, bold: (t: string) => t }, {}, resolve); });
+      } } };
+    const open = openRolesUi(ctx as never, roles as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const text = component.render(200).map(stripTerminalSequences).join("\n");
+    component.handleInput("\x1b");
+    await open;
+    return text;
+  };
+  const unassigned = await render({});
+  assert.match(unassigned, /⚠ scout subagents run on the main model p\/big; use a mini\/haiku-class model/);
+  assert.match(unassigned, /⚠ reviewer subagents run on the main model/, "an unassigned reviewer also falls back to the main model");
+  const cheapScout = await render({ scout: "mini" });
+  assert.doesNotMatch(cheapScout, /scout subagents run on the main model/);
+  assert.match(cheapScout, /reviewer subagents run on the main model/);
+});

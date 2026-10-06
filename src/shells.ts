@@ -53,6 +53,9 @@ export interface ShellJob {
 export type ShellEvent = { kind: "match" | "exit"; job: ShellJob };
 export interface StartOptions { command: string; cwd: string; name?: string; watch?: string; notify?: boolean; purpose?: "task" | "service" }
 export interface ShellManagerOptions { budgetChars?: number; liveTailChars?: number }
+/** One caller read: `missed` lines were trimmed before they were read, `skipped` unread lines
+ * were retained but fell outside the requested line limit. */
+export interface ShellRead { lines: string[]; missed: number; skipped: number }
 export interface ShellStats {
   /** Processes still alive, including killed jobs in their grace period and draining trees. */
   live: number;
@@ -75,6 +78,11 @@ interface ShellEntry {
   partial: string;
   /** Retained line characters, maintained incrementally with the manager total. */
   chars: number;
+  /** Absolute index (`dropped` + offset) of the first line the agent has not read. Absolute, so
+   * trimming never invalidates it; a cursor below `dropped` means trimmed lines went unread. */
+  cursor: number;
+  /** Length of the unterminated `partial` already shown; reset once that line is committed. */
+  partialRead: number;
   timer?: ReturnType<typeof setTimeout>;
   closeTimer?: ReturnType<typeof setTimeout>;
   finished?: boolean;
@@ -179,7 +187,7 @@ export class ShellManager {
     const id = "s" + this.next++;
     const job: ShellJob = { id, name: cleanText(options.name || command, 40), command, cwd: options.cwd, startedAt: Date.now(), status: "running",
       notify: options.notify ?? true, complete: false, purpose: options.purpose ?? (options.watch ? "service" : "task"), lines: [], dropped: 0, ...(options.watch ? { watch: options.watch } : {}) };
-    const entry: ShellEntry = { job, partial: "", chars: 0, ...(pattern ? { pattern } : {}) };
+    const entry: ShellEntry = { job, partial: "", chars: 0, cursor: 0, partialRead: 0, ...(pattern ? { pattern } : {}) };
     this.jobs.set(id, entry);
     // Own process group so kill() stops the whole tree (dev servers spawn children).
     const child = this.spawnShell("/bin/sh", ["-c", command], { cwd: options.cwd, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], env: process.env });
@@ -230,7 +238,9 @@ export class ShellManager {
   private receive(entry: ShellEntry, text: string): void {
     const parts = (entry.partial + text.replace(/\r\n/g, "\n")).split("\n");
     entry.partial = parts.pop() ?? "";
-    if (entry.partial.length > MAX_LINE_CHARS) { this.push(entry, entry.partial); entry.partial = ""; }
+    // A committed line repeats any prefix shown as partial; the new partial is unread.
+    if (parts.length) entry.partialRead = 0;
+    if (entry.partial.length > MAX_LINE_CHARS) { this.push(entry, entry.partial); entry.partial = ""; entry.partialRead = 0; }
     for (const line of parts) this.push(entry, line);
   }
 
@@ -303,7 +313,7 @@ export class ShellManager {
     this.onChange?.();
   }
 
-  /** Last `count` lines (1–400). */
+  /** Last `count` lines (1–400) for display; never moves the agent's read cursor. */
   output(id: string, count = 40): string[] {
     const entry = this.jobs.get(id);
     if (!entry) throw new Error("no shell " + id);
@@ -311,6 +321,29 @@ export class ShellManager {
     if (!entry.partial) return entry.job.lines.slice(-limit);
     if (limit === 1) return [entry.partial];
     return [...entry.job.lines.slice(-(limit - 1)), entry.partial];
+  }
+
+  /** The agent's read: lines since its cursor (newest `count` kept), or the trailing window with
+   * `all`. Either way the cursor moves to the end, so the next read returns only newer lines.
+   * An unterminated last line is shown only when it grew since the previous read. */
+  read(id: string, count = 40, all = false): ShellRead {
+    const entry = this.jobs.get(id);
+    if (!entry) throw new Error("no shell " + id);
+    const { job } = entry;
+    let result: ShellRead;
+    if (all) result = { lines: this.output(id, count), missed: 0, skipped: 0 };
+    else {
+      const limit = Math.max(1, Math.min(MAX_OUTPUT_LINES, Math.floor(count)));
+      const partial = entry.partial.length > entry.partialRead;
+      const first = Math.max(0, entry.cursor - job.dropped);
+      const skipped = Math.max(0, job.lines.length - first + (partial ? 1 : 0) - limit);
+      const lines = job.lines.slice(first + skipped);
+      if (partial) lines.push(entry.partial);
+      result = { lines, missed: Math.max(0, job.dropped - entry.cursor), skipped };
+    }
+    entry.cursor = job.dropped + job.lines.length;
+    entry.partialRead = entry.partial.length;
+    return result;
   }
 
   /** Diagnostics snapshot, computed on demand in one pass over ≤ MAX_KEPT_SHELLS jobs. */
@@ -407,6 +440,14 @@ const boundedTail = (lines: readonly string[], limit = MAX_TOOL_OUTPUT_CHARS): s
   return (omitted ? `… ${omitted} earlier line(s) omitted\n` : "") + kept.join("\n");
 };
 
+/** A read as tool text: notes for lines the caller will not see, then the bounded lines. */
+const readText = (read: ShellRead): string => {
+  const notes: string[] = [];
+  if (read.missed) notes.push(`… ${read.missed} unread line(s) were trimmed from the log`);
+  if (read.skipped) notes.push(`… ${read.skipped} older unread line(s) skipped; raise lines to see more`);
+  return [...notes, boundedTail(read.lines)].join("\n");
+};
+
 /** The message that wakes the agent when a watched shell matches or ends. */
 export function shellEventMessage(event: ShellEvent): string {
   const { job } = event;
@@ -426,8 +467,9 @@ const Parameters = Type.Object({
   purpose: Type.Optional(Type.Union([Type.Literal("task"), Type.Literal("service")], { description: "task is finite and must be checked before claiming completion; service is intentionally long-lived (default with watch)." })),
   id: Type.Optional(Type.String({ description: "Shell id for output/kill/wait/peek, e.g. s1." })),
   ids: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: "Selected ids for wait/peek. Omit to inspect all jobs or wait for finite tasks only." })),
-  waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 30000, description: "Bounded event-driven wait (default 1000ms, maximum 30000). Esc cancels the wait, not the shell." })),
-  lines: Type.Optional(Type.Number({ description: "How many trailing output lines to return (default 40, max 400)." }))
+  waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 30000, description: "start: wait up to this long (0–30000ms) for the job to exit; returns its exit code and output in one call, or the output so far if still running. wait: bounded event-driven wait (default 1000ms). Esc cancels the wait, not the shell." })),
+  lines: Type.Optional(Type.Number({ description: "Line limit for output and start with waitMs (default 40, max 400): the newest unread lines, or the trailing window with all." })),
+  all: Type.Optional(Type.Boolean({ description: "output: return the trailing window again instead of only lines new since your last read." }))
 });
 
 export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | undefined): void {
@@ -435,13 +477,11 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
   pi.registerTool({
     name: SHELL_TOOL,
     label: "shell",
-    description: "Run background jobs. start returns immediately; notifications are compact and coalesced. peek reads status, wait checks selected tasks with a bounded event-driven wait, output loads logs and kill stops a process. Observed results are acknowledged so stale notifications do not replay. Verify relevant checks before claiming completion; do not wait for long-lived services.",
-    promptSnippet: "Use jar_shell for long-running or never-ending commands instead of blocking bash.",
+    description: "Background jobs: services, watchers and long commands; finite commands under ~2 min (build, test, git) belong in bash. start returns immediately, or with waitMs waits (≤30s) for exit and returns the exit code and output in one call. output returns only lines new since your last read (all: true for the trailing window). peek/list read status, wait blocks boundedly on selected finite jobs, kill stops the process tree. Completion notifications are compact, coalesced and arrive at the next safe turn boundary; they cannot interrupt an in-flight response, so when no useful work remains call wait instead of idling. Results read via output/peek/list/wait/start-with-waitMs are acknowledged and do not replay. Set watch to a regex for the line you wait for (e.g. \"listening|ready|error\"); mark never-ending jobs purpose: service, never wait on services, and kill shells you no longer need.",
+    promptSnippet: "Services, watchers and long jobs in the background.",
     promptGuidelines: [
-      "Use jar_shell start for servers, watchers and slow commands; set watch to a regex for the line you are waiting for (e.g. \"listening|ready|error\").",
-      "Do not poll: work while commands run, then use wait with explicit ids for relevant checks before the final summary. A bounded wait returns pending jobs honestly; never claim success without their exit codes. Do not wait for services/watchers. output, peek, list and wait acknowledge observed events, preventing stale replay.",
-      "Completion events cannot interrupt an in-flight model response. If no useful work remains, call wait for the relevant finite jobs immediately instead of thinking or waiting for an automatic wake-up.",
-      "Notifications contain coalesced status, not log dumps. Inspect output only for relevant diagnostics. Mark never-ending jobs purpose: service and kill shells you no longer need."
+      "Use bash for finite commands expected under ~2 min (build, test, git); jar_shell only for services, watchers or long jobs; short-but-uncertain: jar_shell start with waitMs.",
+      "Don't poll jar_shell; keep working, then wait on explicit ids before the final summary. Never claim a check passed without its exit code."
     ],
     parameters: Parameters,
     async execute(_id, params, signal, _update, ctx) {
@@ -454,15 +494,37 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
       try {
         switch (params.action) {
           case "start": {
+            // Validate before spawning: failing after the spawn would hide the running job's id.
+            const waitMs = params.waitMs === undefined ? undefined : Math.max(0, Math.min(30_000, params.waitMs));
+            if (waitMs !== undefined && !Number.isFinite(waitMs)) return reply("start failed: waitMs must be a number of milliseconds.");
             const job = manager.start({ command: params.command ?? "", cwd: ctx.cwd, ...(params.name ? { name: params.name } : {}), ...(params.watch ? { watch: params.watch } : {}),
               ...(params.notify !== undefined ? { notify: params.notify } : {}), ...(params.purpose ? { purpose: params.purpose } : {}) });
-            return reply(`Started ${describe(job)} (pid ${job.pid ?? "?"}). ${job.notify ? "Completion reaches the model at the next safe turn boundary (or wakes it when idle). If no other useful work remains, use wait now." : "Notifications are off; check it with output."}`);
+            const started = `Started ${describe(job)} (pid ${job.pid ?? "?"}).`;
+            const later = job.notify ? "Completion reaches the model at the next safe turn boundary (or wakes it when idle). If no other useful work remains, use wait now." : "Notifications are off; check it with output.";
+            if (waitMs === undefined) return reply(`${started} ${later}`);
+            let completed: boolean;
+            try { completed = await manager.wait([job.id], waitMs, signal); }
+            catch (error) {
+              // Esc ends the wait, never the job; the caller still needs its id.
+              if (!signal?.aborted) throw error;
+              return reply(`${started} Wait cancelled; the job keeps running. ${later}`);
+            }
+            const read = manager.read(job.id, params.lines ?? 40);
+            const output = read.lines.length || read.missed ? "\n" + readText(read) : " (no output)";
+            // These lines and (when finished) the exit code are surfaced now: a later completion
+            // notification would only repeat them.
+            manager.acknowledge([job.id]);
+            if (!completed) return reply(`${started} Still running after ${waitMs}ms. ${later}${output}`);
+            return reply(describe(manager.summaries().find(summary => summary.id === job.id) ?? job) + output);
           }
           case "output": {
             if (!params.id) return reply("output needs an id.");
-            const lines = manager.output(params.id, params.lines ?? 40);
-            manager.acknowledge([params.id]);
-            return reply(`${describe(manager.get(params.id)!)}\n${lines.length ? boundedTail(lines) : "(no output yet)"}`);
+            const { id } = params;
+            const read = manager.read(id, params.lines ?? 40, params.all === true);
+            manager.acknowledge([id]);
+            const head = describe(manager.summaries().find(summary => summary.id === id)!);
+            if (read.lines.length || read.missed) return reply(`${head}\n${readText(read)}`);
+            return reply(`${head} · ${params.all ? "no output" : "no new output; all: true repeats the last lines"}`);
           }
           case "kill":
             if (!params.id) return reply("kill needs an id.");

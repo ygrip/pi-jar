@@ -18,10 +18,10 @@ function setup(registry: DelegateRegistry, fake: ReturnType<typeof fakeSpawn>, o
 const quiet = { cwd: "/repo", hasUI: false };
 interface Tool { name: string; execute(id: string, params: object, signal: undefined, onUpdate: undefined, ctx: object): Promise<{ isError?: boolean; content: Array<{ text: string }> }> }
 /** jar_delegate and jar_subagent without an event bus, so control actions return their final result. */
-function tools(registry: DelegateRegistry, fake: ReturnType<typeof fakeSpawn>) {
+function tools(registry: DelegateRegistry, fake: ReturnType<typeof fakeSpawn>, options: object = {}) {
   const registered = new Map<string, Tool>();
   registerDelegate({ registerTool: (value: Tool) => { registered.set(value.name, value); } } as never,
-    { resolve: () => undefined } as never, registry, { spawnProcess: fake.spawn as never });
+    { resolve: () => undefined } as never, registry, { spawnProcess: fake.spawn as never, ...options });
   return { delegate: registered.get("jar_delegate")!, control: registered.get("jar_subagent")! };
 }
 function repository(): string {
@@ -156,7 +156,8 @@ test("the recovery bound refuses new worktree agents without touching existing w
       say(child, "done");
       settle(child);
     });
-    const { delegate, control } = tools(registry, fake);
+    // A pool as large as the recovery bound, so one batch can fill every recovery slot.
+    const { delegate, control } = tools(registry, fake, { getMaxSubagents: () => RECOVERY_LIMIT });
     const ctx = worktreeContext(root);
     await delegate.execute("w", { mode: "worktree", tasks: [1, 2, 3, 4].map((n) => ({ task: `w${n}` })) }, undefined, undefined, ctx);
     writeFileSync(join(root, "a.ts"), "parent drift\n");

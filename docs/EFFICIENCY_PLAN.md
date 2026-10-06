@@ -34,6 +34,26 @@ A synchronous `jar_delegate` result shares a 16k-character report budget across 
 
 The footer's per-tick registry listener reads `DelegateRegistry.stateSignature()` straight from the map instead of `records()` (a second sweep, a sort and two arrays per 50 ms tick).
 
+## Session cost reduction
+
+Baseline: a 309-call, $6.34 session (`node scripts/session-cost.mjs 01a101ba-…`): 60% of cost was cache reads, average context 125k, 138 calls above 125k context costing $3.87; 109 reads (12 of one file, 7 of a `/tmp` plan), 65 `jar_shell` calls (33 start, 22 output, 8 wait), 19 subagent events (36 KB). Cost scales with calls × context, so every change cuts calls, context per call, or the fixed prompt.
+
+| Change | Where | Effect |
+| --- | --- | --- |
+| Context budget (`suggest` by default at 120k; opt-in `compact` at a safe point) and average cost per call in the footer | `src/context-budget.ts` | Long sessions are compacted or split before every call re-sends 200k+ |
+| Topic-switch and cold-cache hints | `src/context-budget.ts` | `/new` for unrelated work; `/compact` before re-sending a large expired context |
+| `bash` for finite commands; `jar_shell start` `waitMs`; incremental `output` | `src/shells.ts` | Short jobs take one call instead of start → output → wait, and repeated reads don't resend old output |
+| 400-line cap on whole reads of files over 50 KB; opt-in repeated-read stub; diet stubs superseded reads | `src/compact-tools.ts`, `src/context-diet.ts` | Smaller tool results and fewer duplicate reads in the context |
+| Pool default 2 (opt-in Swarm profile: 4); delegate only for ≥2 chunks of ≥10 tool calls | `src/settings.ts`, `src/delegate.ts`, `src/profile-ui.ts` | Fewer moderation round-trips |
+| Events: ≤400-char summary + changed files, one message per boundary, discussion mail inlined | `src/delegate.ts`, `src/discussion.ts` | Events shrink from ~1.9 KB to ~0.5 KB; no `list` call to read mail; no echoes of own messages |
+| `/roles` warns when `scout`/`reviewer` run on the main model while a cheaper one is available | `src/model-roles.ts` | Subagent calls move to a cheaper model |
+| Advisor gates off by default; loop threshold 4; re-reads, shell polls and test reruns are never loops | `src/advisor.ts` | No side calls from normal fix loops |
+| Rules moved into tool descriptions; `jar_plan_submit`/`jar_goal` active only in their mode | all tool modules, `src/tool-activation.ts` | Smaller fixed prompt (below) |
+
+Fixed prompt that pi-jar contributes, measured from Pi's built system message in RPC mode (same project, same Pi 1.0.4): the `rules` section went from 7,584 to 1,675 characters and `tools` from 1,773 to 1,476; two schemas (~900 characters) are no longer sent outside their mode. Tool descriptions and schemas grew by ~1.1k characters because the guidance moved there. Net: ~5k characters (~1.3k tokens) less on every call. That is modest next to context growth, so the context budget and shell/read changes carry most of the saving.
+
+Not done: Pi's compaction thresholds and the user's own settings are left alone; recommendations are in [INTEGRATIONS.md](./INTEGRATIONS.md#keeping-sessions-cheap-recommendations). The ≤ $3 field target needs a real re-run of a similar task with the new defaults.
+
 ## Already covered — dropped
 
 | Item | Why |

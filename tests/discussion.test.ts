@@ -4,7 +4,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { MAX_DISCUSSION_BYTES, MAX_DISCUSSION_MESSAGES, MAX_DISCUSSION_TEXT, MAX_LIST_CHARS } from "../src/discussion-hub.ts";
+import { MAX_DISCUSSION_BYTES, MAX_DISCUSSION_MESSAGES, MAX_DISCUSSION_TEXT, MAX_LIST_CHARS, MAX_NOTICE_CHARS } from "../src/discussion-hub.ts";
 import {
   DISCUSSION_ENDPOINT_ENV,
   DISCUSSION_ENV_KEYS,
@@ -239,21 +239,47 @@ test("pending gives compact summaries without message bodies", () => withBroker(
   assert.doesNotMatch(mine + fleet, /private/);
 }));
 
-test("an unread notice joins only natural turn boundaries with new unread mail and never wakes anyone", () => withBroker(async (broker) => {
+test("unread mail arrives batched in one notice per turn start, read once shown, never echoing its sender or waking anyone", () => withBroker(async (broker) => {
   const moderator = agent(() => broker.local());
   const scout = member(broker, "delegate-1-1", "scout");
+  const worker = member(broker, "delegate-1-2", "worker");
   assert.equal(await moderator.boundary(), undefined, "no notice without unread mail");
   await scout.run({ action: "ask", text: "ping", to: "moderator" });
+  await scout.run({ action: "ask", text: "anyone own the cache?" });
+  await worker.run({ action: "answer", questionId: "d2", text: "the worker does" });
   assert.deepEqual(await moderator.boundary(), { message: { customType: DISCUSSION_NOTICE, display: false,
-    content: "You have 1 unread discussion message. Use jar_discuss list when relevant." } });
-  assert.equal(await moderator.boundary(), undefined, "ignored mail is not re-announced every turn");
-  await scout.run({ action: "ask", text: "ping again", to: "moderator" });
-  assert.match((await moderator.boundary())!.message.content, /^You have 2 unread discussion messages\./);
-  await moderator.run({ action: "list" });
-  assert.equal(await moderator.boundary(), undefined);
-  await moderator.run({ action: "ask", text: "pong", to: "scout" });
-  assert.match((await scout.boundary())!.message.content, /^You have 1 unread discussion message\./, "children get it over IPC");
-  assert.deepEqual([moderator.sent, scout.sent], [[], []], "discussion never sends a message, so it can never trigger a turn");
+    content: "Discussion mail (now read; reply with jar_discuss answer):\n[d1] Q · scout → moderator: ping\n[d2] Q · scout: anyone own the cache?" } },
+    "every unread message rides in one notice");
+  assert.equal(await moderator.boundary(), undefined, "shown mail is read, so it is never announced twice");
+  assert.equal(await moderator.say({ action: "list" }), "No unread messages (latest d3).", "no list call is needed");
+  const scoutNotice = (await scout.boundary())!.message.content;
+  assert.match(scoutNotice, /^\[d3\] A · worker → d2: the worker does$/m, "children get it over IPC");
+  assert.doesNotMatch(scoutNotice, /ping|cache/, "a sender is never notified of its own question or broadcast");
+  assert.equal(await worker.boundary(), undefined, "answering read the broadcast, and the worker's own answer is not echoed");
+
+  await moderator.run({ action: "ask", text: "status, everyone?" });
+  assert.equal(await moderator.boundary(), undefined, "the moderator's own broadcast is not echoed to it");
+  assert.deepEqual([broker.unreadFor("delegate-1-1"), broker.unreadFor("delegate-1-2")], [0, 0], "nor counted on its fleet line");
+  await scout.run({ action: "ask", text: "which tests cover it?", to: "worker" });
+  assert.equal(broker.unreadFor("delegate-1-2"), 1, "mail from other agents still counts; the moderator's broadcast does not");
+
+  for (let i = 0; i < 10; i++) await scout.run({ action: "ask", text: `question ${i} ` + "x".repeat(MAX_DISCUSSION_TEXT), to: "moderator" });
+  const page = (await moderator.boundary())!.message.content;
+  assert.ok(page.length <= MAX_NOTICE_CHARS + 120, `one bounded notice (${page.length})`);
+  assert.match(page, /^\[d6\] Q · scout → moderator: question 0 x+…$/m, "oldest first, clipped like list");
+  assert.match(page, /\n\(\d+ more unread messages; jar_discuss list\)$/);
+  assert.match((await moderator.boundary())!.message.content, /question \d+ x+…/, "the next turn start carries the next page");
+  assert.deepEqual([moderator.sent, scout.sent, worker.sent], [[], [], []], "discussion never sends a message, so it can never trigger a turn");
+}));
+
+test("the moderator's digest batches its unread mail for a subagent event and marks it read", () => withBroker(async (broker) => {
+  const scout = child(broker, "delegate-1-1", "scout");
+  assert.equal(broker.digest(), undefined, "no mail, no digest");
+  await scout.ask("which config wins?", "moderator");
+  await scout.ask("anyone own the cache?");
+  assert.equal(broker.digest(), "Discussion mail (now read; reply with jar_discuss answer):\n[d1] Q · scout → moderator: which config wins?\n[d2] Q · scout: anyone own the cache?");
+  assert.equal(broker.digest(), undefined, "digested mail is read");
+  assert.equal(broker.unreadFor("moderator"), 0);
 }));
 
 test("change notifications fire on state changes only, and a failing listener never fails a request", (t) => withBroker(async (broker) => {

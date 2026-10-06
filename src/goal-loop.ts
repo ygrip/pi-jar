@@ -5,6 +5,7 @@ import type { Goal, GoalStore } from "./goals.ts";
 import type { ModelRoleManager } from "./model-roles.ts";
 import { isSafePlanCommand } from "./plan-utils.ts";
 import type { Todo, TodoStore } from "./tasks.ts";
+import { setToolActive } from "./tool-activation.ts";
 import { projectWorkflowMessages } from "./workflow-context.ts";
 
 export const GOAL_TOOL = "jar_goal";
@@ -263,6 +264,8 @@ export class GoalLoop {
 
     this.pi.on("before_agent_start", async (_event, ctx) => {
       const goal = this.goal();
+      // jar_goal is only useful while a goal runs; inactive, it costs no schema or rules tokens.
+      setToolActive(this.pi, GOAL_TOOL, !!goal && goal.status !== "complete");
       if (!goal || goal.status === "complete") return;
       if (goal.status === "active" && !this.options.planActive()) await this.useRole(goal.phase === "audit" ? "advisor" : "implement", ctx);
       return { message: { customType: CONTEXT_TYPE, content: this.context(goal), display: false } };

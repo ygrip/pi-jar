@@ -103,13 +103,12 @@ test("extension reconstructs pi-jar tasks on session branch navigation without t
   events.get("session_shutdown")?.({}, ctx);
 });
 
-test("native jar_todo tool tells the agent to track multi-step work and updates branch-aware state", async () => {
+test("native jar_todo tool updates branch-aware state", async () => {
   let tool: any;
   let changes = 0;
   const store = new TodoStore(() => {});
   registerTaskTool({ registerTool(definition: unknown) { tool = definition; } } as never, () => store, () => { changes++; });
   assert.ok(tool);
-  assert.match(tool.promptGuidelines.join(" "), /without waiting for the user/);
   const added = await tool.execute("one", { action: "add", title: "Inspect repo" }, undefined, undefined, {} as never);
   assert.match(added.content[0].text, /Inspect repo/);
   const id = store.all()[0]!.id;

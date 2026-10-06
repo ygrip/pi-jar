@@ -5,7 +5,7 @@ import { askOne } from "./ask-tool.ts";
 import { MAX_RESUME_CHARS, type DelegateController, type SubagentReport } from "./delegate.ts";
 
 export interface DecisionOption { id: string; label: string; evidence: string }
-export interface DemocracyRequest {
+export interface CouncilRequest {
   complexity: "super-complex";
   issue: string;
   justification: string;
@@ -16,7 +16,7 @@ export interface DemocracyRequest {
   voters?: number;
 }
 export interface Ballot { agent: string; option: string; rationale: string }
-export interface DemocracyResult {
+export interface CouncilResult {
   status: "majority" | "needs-user";
   electorate: number;
   ballots: Ballot[];
@@ -33,15 +33,15 @@ export const BALLOT_TIMEOUT_MS = 10 * 60_000;
 const MAX_RATIONALE = 600;
 const MAX_FAILURE = 200;
 
-/** Runtime gates as well as a schema: democracy is not an ordinary task-selection shortcut. */
-export function validateDemocracy(request: DemocracyRequest): void {
+/** Runtime gates as well as a schema: the council is not an ordinary task-selection shortcut. */
+export function validateCouncil(request: CouncilRequest): void {
   if (request.complexity !== "super-complex" || !request.issue?.trim() || !request.justification?.trim()) {
     throw new Error("Voting requires a persistent super-complex issue and a concrete complexity justification.");
   }
   if (!Array.isArray(request.failedApproaches) || request.failedApproaches.length < 2 ||
     request.failedApproaches.some((item) => typeof item !== "string" || !item.trim()) ||
     new Set(request.failedApproaches.map((item) => item.trim())).size < 2) {
-    throw new Error("Provide evidence of at least two distinct failed approaches; routine decisions must not use democracy.");
+    throw new Error("Provide evidence of at least two distinct failed approaches; routine decisions must not use the council.");
   }
   if (!Array.isArray(request.options) || request.options.length < 2 || request.options.length > 8 ||
     request.options.some((option) => !/^[a-zA-Z0-9_-]{1,40}$/.test(option.id) || !option.label?.trim() || !option.evidence?.trim()) ||
@@ -65,7 +65,7 @@ export function parseBallot(report: SubagentReport, nonce: string, options: read
 }
 
 export function tallyBallots(options: readonly DecisionOption[], electorate: number, ballots: Ballot[],
-  failures: DemocracyResult["failures"] = []): DemocracyResult {
+  failures: CouncilResult["failures"] = []): CouncilResult {
   if (!Number.isInteger(electorate) || electorate < 2 || ballots.length > electorate ||
     new Set(ballots.map((ballot) => ballot.agent)).size !== ballots.length) throw new Error("Invalid electorate or duplicate ballot");
   const counts = Object.fromEntries(options.map((option) => [option.id, 0]));
@@ -85,9 +85,9 @@ export function tallyBallots(options: readonly DecisionOption[], electorate: num
  * Same retained pool and launch cap as jar_delegate; no forks, writable workers or extra process launcher.
  * Scouts spawned only to vote are retired after the tally so they never hold pool slots; nominated scouts stay.
  */
-export async function conductDemocracy(controller: DelegateController, request: DemocracyRequest,
-  maxSubagents: number, signal?: AbortSignal, timeoutMs = BALLOT_TIMEOUT_MS): Promise<DemocracyResult> {
-  validateDemocracy(request);
+export async function conductCouncil(controller: DelegateController, request: CouncilRequest,
+  maxSubagents: number, signal?: AbortSignal, timeoutMs = BALLOT_TIMEOUT_MS): Promise<CouncilResult> {
+  validateCouncil(request);
   if (signal?.aborted) throw new Error("Vote aborted");
   const agents = request.agents ?? [];
   const voters = request.voters ?? Math.max(2, agents.length || Math.min(4, maxSubagents));
@@ -135,7 +135,7 @@ export async function conductDemocracy(controller: DelegateController, request: 
     const results = await Promise.allSettled(jobs.map((job) => job()));
     if (signal?.aborted) throw new Error("Vote aborted; do not act on incomplete ballots");
     const ballots: Ballot[] = [];
-    const failures: DemocracyResult["failures"] = [];
+    const failures: CouncilResult["failures"] = [];
     results.forEach((result, index) => {
       if (result.status === "fulfilled") ballots.push(result.value);
       else failures.push({ agent: agents[index] ?? `new-scout-${index + 1}`,
@@ -161,19 +161,16 @@ async function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
   } finally { if (abort) signal.removeEventListener("abort", abort); }
 }
 
-export function registerDemocracy(pi: ExtensionAPI, controller: () => DelegateController | undefined,
+export function registerCouncil(pi: ExtensionAPI, controller: () => DelegateController | undefined,
   maxSubagents: () => number): void {
   if (typeof pi.registerTool !== "function") return;
   let running = false;
   pi.registerTool({
-    name: "jar_democracy", label: "exceptional decision vote",
-    description: "Only for persistent super-complex issues after at least two distinct failed approaches: open evidence-backed options, spawn or resume relevant fresh read-only scouts, collect private ballots, and return a strict-majority recommendation. Ties or no majority require the user's choice; this tool never implements a decision.",
-    promptSnippet: "Reserve jar_democracy for persistent super-complex issues with several viable options, never routine tasks.",
+    name: "jar_council", label: "exceptional decision vote",
+    description: "Exceptional decision vote. Explain why the issue is super-complex and cite at least two distinct failed approaches, then open 2–8 evidence-backed options. Prefer relevant idle fresh-context scouts (`agents`) over forks; fresh scouts avoid discussion bias. All voters share the retained pool cap. A strict majority of the invited electorate wins; ties, insufficient ballots and plurality go to the user — present leading options with evidence-based tradeoffs, never invented probabilities. Never implements a decision.",
+    promptSnippet: "jar_council is exceptional: only for a persistent super-complex issue with several viable options after two failed approaches, never routine choices.",
     promptGuidelines: [
-      "Explain why the task is super-complex and cite at least two failed approaches before opening a vote.",
-      "Prefer relevant idle fresh-context scouts over forks; use fresh scouts where prior discussion could bias the decision. All voters share the configured retained pool cap.",
-      "A strict majority of the invited electorate wins. Ties, insufficient ballots, and plurality without majority go to the user. Present leading options with evidence-based likelihood/tradeoffs, not invented probabilities.",
-      "If userChoice is absent or cancelled, use jar_ask to resolve needs-user; never treat the moderator's preferred option as a winner. Safety and approval requirements still apply to majority outcomes."
+      "If the result needs the user and userChoice is absent or cancelled, resolve it with jar_ask; a majority is a recommendation, not approval to skip safety checks."
     ],
     parameters: Type.Object({
       complexity: Type.Literal("super-complex"),
@@ -186,22 +183,22 @@ export function registerDemocracy(pi: ExtensionAPI, controller: () => DelegateCo
       voters: Type.Optional(Type.Integer({ minimum: 2, maximum: 16 }))
     }),
     async execute(_id, params, signal, _update, ctx) {
-      if (running) return { content: [{ type: "text", text: "A democracy round is already running." }], isError: true, details: undefined };
+      if (running) return { content: [{ type: "text", text: "A council round is already running." }], isError: true, details: undefined };
       const fleet = controller();
       if (!fleet) return { content: [{ type: "text", text: "Delegation is unavailable in this session." }], isError: true, details: undefined };
       running = true;
       try {
-        const result = await conductDemocracy(fleet, params, maxSubagents(), signal);
+        const result = await conductCouncil(fleet, params, maxSubagents(), signal);
         let userChoice: Awaited<ReturnType<typeof askOne>> | undefined;
         let selectionError: string | undefined;
         if (result.status === "needs-user" && ctx.hasUI && ctx.mode === "tui" && !signal?.aborted) {
           const choices = params.options.filter((option) => result.shortlist.includes(option.id));
-          try { userChoice = await abortable(askOne(ctx, { id: "democracy", header: "Moderator decision",
+          try { userChoice = await abortable(askOne(ctx, { id: "council", header: "Moderator decision",
             question: "No strict majority. Leading options: " + choices.map((option) => `${option.id}: ${result.counts[option.id]} votes`).join("; ") +
               ". Pick based on the evidence/tradeoffs, or discuss before deciding.",
             options: choices.map((option) => ({ label: option.id + ": " + option.label, description: option.evidence.slice(0, 320) })), allowCustom: true }, 0, 1, signal), signal); }
           catch (error) { selectionError = String(error); }
-          if (signal?.aborted) userChoice = { id: "democracy", cancelled: true };
+          if (signal?.aborted) userChoice = { id: "council", cancelled: true };
         }
         const details = { ...result, ...(userChoice ? { userChoice } : {}), ...(selectionError ? { selectionError } : {}) };
         return { content: [{ type: "text", text: JSON.stringify({ ...details,
