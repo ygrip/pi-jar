@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advisorPrompt, callKey, registerAdvisor, StuckDetector, transcript } from "../src/advisor.ts";
+import { advisorPrompt, callKey, loopExempt, registerAdvisor, StuckDetector, transcript } from "../src/advisor.ts";
 import { SideUsage } from "../src/side-model.ts";
 
 test("transcript keeps the newest messages within the cap and labels tool results", () => {
@@ -19,11 +19,12 @@ test("transcript keeps the newest messages within the cap and labels tool result
 
 test("stuck detector fires on repeated calls and failure streaks, within a per-prompt budget", () => {
   const stuck = new StuckDetector();
-  const key = callKey("read", { path: "a" });
+  const key = callKey("grep", { pattern: "a" });
   assert.equal(stuck.call(key), undefined);
-  assert.equal(stuck.call(callKey("read", { path: "b" })), undefined);
+  assert.equal(stuck.call(callKey("grep", { pattern: "b" })), undefined);
   assert.equal(stuck.call(key), undefined);
-  assert.match(stuck.call(key)!, /same tool call 3 times/);
+  assert.equal(stuck.call(key), undefined, "three repeats are not yet a loop");
+  assert.match(stuck.call(key)!, /same tool call 4 times/);
   assert.equal(stuck.call(key), undefined, "history resets after a gate");
   assert.equal(stuck.result(true, "bash"), undefined);
   assert.equal(stuck.result(false, "bash"), undefined, "a success breaks the streak");
@@ -44,8 +45,23 @@ test("loop keys for huge inputs stay small but still tell calls apart", () => {
   assert.equal(callKey("write", { path: "a.ts", content }), key);
   assert.notEqual(callKey("write", { path: "a.ts", content: content.slice(1) + "y" }), key);
   const stuck = new StuckDetector();
-  stuck.call(key); stuck.call(key);
-  assert.match(stuck.call(callKey("write", { path: "a.ts", content }))!, /same tool call 3 times: write \{"path":"a\.ts"/);
+  stuck.call(key); stuck.call(key); stuck.call(key);
+  assert.match(stuck.call(callKey("write", { path: "a.ts", content }))!, /same tool call 4 times: write \{"path":"a\.ts"/);
+});
+
+test("re-reads, shell polls and test reruns never count as loops; other repeats do", () => {
+  assert.equal(loopExempt("read", { path: "a.ts" }), true);
+  for (const action of ["output", "wait", "peek"]) assert.equal(loopExempt("jar_shell", { action, id: "s1" }), true, action);
+  for (const command of ["npm test", "npm run build && npm test", "pnpm run test:unit", "node --experimental-strip-types --test tests/a.test.ts",
+    "npx vitest run", "pytest -q tests", "python -m pytest", "go test ./...", "cargo test", "./gradlew clean test", "make -C api test"]) {
+    assert.equal(loopExempt("bash", { command }), true, command);
+  }
+  assert.equal(loopExempt("jar_shell", { action: "start", command: "npm test" }), true);
+  for (const [tool, input] of [["jar_shell", { action: "start", command: "npm run dev" }], ["jar_shell", { action: "kill", id: "s1" }],
+    ["bash", { command: "git status" }], ["bash", { command: "cat latest-tests.log" }], ["bash", { command: "npm run testify" }],
+    ["edit", { path: "a.ts" }], ["bash", {}]] as const) {
+    assert.equal(loopExempt(tool, input), false, JSON.stringify(input));
+  }
 });
 
 test("advisor consultation uses the configured fallback after a provider error", async () => {
@@ -125,9 +141,8 @@ test("advisor tool, /advisor and the loop gate consult the advisor role", async 
   assert.match(boundary.entries[0].content, /◆ Advisor a2 · p\/opus · auth flow[\s\S]*token expiry/);
   assert.equal(sent.length, 0, "active results are delivered once at a safe boundary, not an irrevocable follow-up");
 
-  const call = { toolName: "bash", input: { command: "npm test" } };
-  assert.equal(events.get("tool_call")!(call, ctx), undefined);
-  assert.equal(events.get("tool_call")!(call, ctx), undefined);
+  const call = { toolName: "bash", input: { command: "git status" } };
+  for (let repeat = 0; repeat < 3; repeat++) assert.equal(events.get("tool_call")!(call, ctx), undefined);
   const gate = events.get("tool_call")!(call, ctx);
   assert.equal(gate.block, true);
   assert.match(gate.reason, /Loop detected[\s\S]*Advisor a3 is reviewing in the background/);

@@ -8,7 +8,7 @@ import { childToolAllowlist, worktreeToolViolation } from "../src/subagent-tools
 test("child capability parsing fails closed and excludes recursive delegation", () => {
   assert.equal(childToolAllowlist(undefined), undefined);
   assert.deepEqual([...childToolAllowlist('["read","web_search"]')!], ["read", "web_search"]);
-  for (const value of ["bad json", '{}', '["jar_delegate"]', '["jar_subagent"]', '["jar_democracy"]', '["read",42]'])
+  for (const value of ["bad json", '{}', '["jar_delegate"]', '["jar_subagent"]', '["jar_council"]', '["read",42]'])
     assert.equal(childToolAllowlist(value)!.size, 0);
 });
 

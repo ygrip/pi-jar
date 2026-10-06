@@ -87,16 +87,10 @@ export function registerTaskTool(
   pi.registerTool({
     name: "jar_todo",
     label: "tasks",
-    description: "Maintain session tasks: write establishes a fresh complete task plan, update changes one existing task by stable id, append adds genuinely new work, and remove deletes one task tree. start/done/open/edit remain concise status operations. Stable IDs are returned for every task.",
-    promptSnippet: "Track multi-step work with jar_todo: write the task plan first, update/remove existing tasks by stable id, append only when new work arrives mid-run, and keep one leaf in_progress.",
+    description: "Maintain session tasks. write sets the complete current plan (omitted tasks are removed; each item has content, status, optional activeForm and one level of `subtasks`, whose completion completes the parent; progress counts leaves). update changes one task by stable id, append adds genuinely new work mid-run (not a new plan), remove deletes one task tree; start/done/open/edit are concise status operations. Stable IDs are returned for every task.",
+    promptSnippet: "Track work with 3+ steps or several requests in jar_todo (skip trivial requests and questions): write the complete plan for a new request, start fresh once the old list is completed.",
     promptGuidelines: [
-      "Use jar_todo proactively, without waiting for the user, for any task with three or more distinct steps, when the user gives several tasks, or right after receiving new instructions. Skip it for single trivial requests and pure questions.",
-      "Prefer write when establishing the task plan for a new request. If the existing checklist is fully completed, start the next request with a fresh write rather than appending onto old completed work.",
-      "Use update with a stable id to revise one existing task and remove to delete one task tree. Use append mainly when the user steers or adds genuinely new requirements while an active checklist is already in progress; do not use append as the default way to create a new plan.",
-      "write with todos is the complete current task plan and removes omitted tasks. Each item has content, status, and optional activeForm/subtasks.",
-      "Break a large task into `subtasks` (same shape, one level deep). A parent's status follows its subtasks: it is completed when all of them are. Progress counts leaf tasks (subtasks and tasks without subtasks).",
-      "Keep exactly one leaf task in_progress at a time. Mark a task in_progress before you start it and completed immediately after it is verified; do not batch completions.",
-      "Only mark a task completed when it is fully done. If tests fail, work is partial or you are blocked, keep it in_progress and add a task for what must be resolved. Remove tasks that are no longer relevant."
+      "Keep exactly one leaf in_progress; mark it completed right after verifying it. Never batch completions or complete partial, failing or blocked work: keep it open and add a task for the blocker."
     ],
     parameters: Parameters,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

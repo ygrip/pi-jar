@@ -55,10 +55,15 @@ function harness(maxRounds = 3, subagentMode?: (agent: string) => string | undef
   const notices: string[] = [];
   const roleCalls: string[] = [];
   let planActive = false;
+  // Pi activates newly registered extension tools by default.
+  let active = [GOAL_TOOL];
   const pi = {
     on(name: string, handler: (...args: any[]) => any) { events.set(name, handler); },
     registerCommand(name: string, spec: { handler: any }) { commands.set(name, spec.handler); },
     registerTool(tool: { name: string; execute: any }) { tools.set(tool.name, tool); },
+    getActiveTools: () => [...active],
+    setActiveTools: (names: string[]) => { active = [...names]; },
+    getAllTools: () => [...tools.keys()].map((name) => ({ name })),
     sendUserMessage(text: string) { sent.push(text); }
   } as unknown as ExtensionAPI;
   const ctx = { hasUI: false, mode: "print", ui: { notify(message: string) { notices.push(message); } } } as unknown as ExtensionContext;
@@ -71,7 +76,7 @@ function harness(maxRounds = 3, subagentMode?: (agent: string) => string | undef
   const settle = (outcome = "completed", extra: object = {}) => events.get("agent_before_settle")!({ outcome, continue: false, entries: [], ...extra }, ctx);
   const tool = (params: object) => tools.get(GOAL_TOOL)!.execute("id", params, undefined, undefined, ctx);
   const guard = (toolName: string, input: object = {}) => events.get("tool_call")!({ toolName, input }, ctx);
-  return { events, commands, ctx, goals, todos, sent, notices, roleCalls, completed, settle, tool, guard, setPlan: (value: boolean) => { planActive = value; } };
+  return { events, commands, ctx, goals, todos, sent, notices, roleCalls, completed, settle, tool, guard, active: () => active, setPlan: (value: boolean) => { planActive = value; } };
 }
 
 test("goal command starts the loop; edits are blocked until a task is open", async () => {
@@ -86,6 +91,18 @@ test("goal command starts the loop; edits are blocked until a task is open", asy
   assert.equal(await h.guard("write", { path: "a.ts" }), undefined);
   const injected = await h.events.get("before_agent_start")!({}, h.ctx);
   assert.match(injected.message.content, /ACTIVE GOAL[\s\S]*Ship the hello command[\s\S]*\[ \] Register command/);
+});
+
+test("jar_goal is active only while a goal runs", async () => {
+  const h = harness();
+  await h.events.get("before_agent_start")!({}, h.ctx);
+  assert.deepEqual(h.active(), [], "no goal: no schema or rules tokens");
+  await h.commands.get("goal")!("Ship the hello command", h.ctx);
+  await h.events.get("before_agent_start")!({}, h.ctx);
+  assert.deepEqual(h.active(), [GOAL_TOOL]);
+  h.goals.setStatus("complete", { evidence: "tests pass" });
+  await h.events.get("before_agent_start")!({}, h.ctx);
+  assert.deepEqual(h.active(), []);
 });
 
 test("goal prompts keep a stable prefix on every LLM call: repeats dropped, sent copies kept, all dropped once complete", async () => {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { DEFAULT_FOOTER_SETTINGS } from "../src/footer-settings.ts";
-import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, SETTINGS_FILE, MAX_SUBAGENT_CHOICES, isMaxSubagents } from "../src/settings.ts";
+import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, SETTINGS_FILE, MAX_SUBAGENT_CHOICES, isMaxSubagents, DEFAULT_CONTEXT_BUDGET } from "../src/settings.ts";
 import { openJarSettings } from "../src/settings-ui.ts";
 
 test("visual preferences ignore retired legacy footer files and validate fields", () => {
@@ -50,8 +50,8 @@ test("visual preferences ignore retired legacy footer files and validate fields"
 test("max subagents defaults, validates supported choices and persists", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-jar-subagent-settings-"));
   try {
-    assert.equal(defaultVisualSettings().maxSubagents, 4);
-    assert.equal(loadVisualSettings(dir).maxSubagents, 4);
+    assert.equal(defaultVisualSettings().maxSubagents, 2);
+    assert.equal(loadVisualSettings(dir).maxSubagents, 2);
     assert.deepEqual(MAX_SUBAGENT_CHOICES, [2, 4, 6, 8, 16]);
     for (const maxSubagents of MAX_SUBAGENT_CHOICES) {
       assert.equal(isMaxSubagents(maxSubagents), true);
@@ -63,9 +63,25 @@ test("max subagents defaults, validates supported choices and persists", () => {
     for (const invalid of [undefined, null, "8", false, 0, 1, 3, 5, 7, 9, 17, 50, 4.5, {}, []]) {
       assert.equal(isMaxSubagents(invalid), false);
       writeFileSync(join(dir, SETTINGS_FILE), JSON.stringify({ version: 1, maxSubagents: invalid, goalRounds: 12 }));
-      assert.equal(loadVisualSettings(dir).maxSubagents, 4);
+      assert.equal(loadVisualSettings(dir).maxSubagents, 2);
       assert.equal(loadVisualSettings(dir).goalRounds, 12);
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test("context budget and read cache fall back on invalid stored values and persist valid ones", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-jar-budget-settings-"));
+  try {
+    assert.deepEqual(loadVisualSettings(dir).contextBudget, DEFAULT_CONTEXT_BUDGET);
+    assert.equal(loadVisualSettings(dir).readCache, false);
+    for (const invalid of [null, 120000, { softTokens: 9_999, action: "suggest" }, { softTokens: 120000.5, action: "suggest" },
+      { softTokens: 120000, action: "nag" }, { softTokens: "120000", action: "off" }]) {
+      writeFileSync(join(dir, SETTINGS_FILE), JSON.stringify({ version: 1, contextBudget: invalid, readCache: "yes" }));
+      assert.deepEqual(loadVisualSettings(dir).contextBudget, DEFAULT_CONTEXT_BUDGET);
+      assert.equal(loadVisualSettings(dir).readCache, false);
+    }
+    const settings = { ...defaultVisualSettings(), contextBudget: { softTokens: 150_000, action: "compact" as const }, readCache: true };
+    saveVisualSettings(dir, settings);
+    assert.deepEqual(loadVisualSettings(dir), settings);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

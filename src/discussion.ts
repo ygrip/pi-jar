@@ -6,8 +6,8 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-  DiscussionError, DiscussionHub, MAX_DISCUSSION_BYTES, MAX_DISCUSSION_MESSAGES, MAX_DISCUSSION_TEXT, MAX_LIST_CHARS, messageLine,
-  MODERATOR, parseDiscussionId, type ListResult, type PendingResult, type PostResult, type ThreadResult, type UnreadResult
+  DiscussionError, DiscussionHub, MAX_DISCUSSION_BYTES, MAX_DISCUSSION_MESSAGES, MAX_DISCUSSION_TEXT, MAX_LIST_CHARS, MAX_NOTICE_CHARS, messageLine,
+  MODERATOR, parseDiscussionId, type ListResult, type PendingResult, type PostResult, type ThreadResult
 } from "./discussion-hub.ts";
 import { cleanText } from "./status.ts";
 
@@ -44,7 +44,8 @@ export interface DiscussionTransport {
   list(since?: number): Promise<ListResult>;
   thread(questionId: number, since?: number): Promise<ThreadResult>;
   pending(): Promise<PendingResult>;
-  unread(): Promise<UnreadResult>;
+  /** Unread mail for a turn-start notice, marked read: a list within the smaller notice budget. */
+  inbox(): Promise<ListResult>;
 }
 
 /** A 1600-character message JSON-escapes to well under this; anything larger is not from our client. */
@@ -65,7 +66,7 @@ const transportOf = (request: Request): DiscussionTransport => ({
   list: (since) => request("list", since === undefined ? {} : { since }) as Promise<ListResult>,
   thread: (questionId, since) => request("thread", since === undefined ? { questionId } : { questionId, since }) as Promise<ThreadResult>,
   pending: () => request("pending", {}) as Promise<PendingResult>,
-  unread: () => request("unread", {}) as Promise<UnreadResult>
+  inbox: () => request("inbox", {}) as Promise<ListResult>
 });
 
 /** Shared by the tool adapter and the broker, so a bad id is rejected the same way on both sides. */
@@ -147,7 +148,12 @@ export class DiscussionBroker {
     this.notify();
   }
 
-  unreadFor(key: string): number { return this.hub.has(key) ? this.hub.unread(key).unread : 0; }
+  /** Unread mail waiting for an agent, minus the moderator's own messages: the moderator's fleet line never
+   *  echoes its broadcasts or questions back to it. */
+  unreadFor(key: string): number { return this.hub.has(key) ? this.hub.unread(key, MODERATOR).unread : 0; }
+
+  /** The moderator's unread mail as one notice, marked read, to ride along with subagent events delivered anyway. */
+  digest(): string | undefined { return inboxNotice(this.call(MODERATOR, "inbox", {}) as ListResult); }
 
   stats(): DiscussionStats {
     return {
@@ -254,7 +260,7 @@ export class DiscussionBroker {
         case "list": return this.hub.list(key, idArgument(args.since, "since", false));
         case "thread": return this.hub.thread(key, idArgument(args.questionId, "questionId", true)!, idArgument(args.since, "since", false));
         case "pending": return this.hub.pending(key);
-        case "unread": return this.hub.unread(key);
+        case "inbox": return this.hub.list(key, undefined, MAX_NOTICE_CHARS);
         default: throw new DiscussionError("Unknown discussion operation.");
       }
     } catch (error) {
@@ -363,6 +369,16 @@ export function discussionClientFromEnv(env: NodeJS.ProcessEnv = process.env): D
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
+/** Unread mail as one notice; it is marked read once fetched, so a message is never announced twice. */
+export function inboxNotice(result: ListResult): string | undefined {
+  if (!result.messages.length) return undefined;
+  return [
+    "Discussion mail (now read; reply with jar_discuss answer):",
+    ...result.messages.map(messageLine),
+    ...(result.more ? [`(${plural(result.more, "more unread message")}; jar_discuss list)`] : [])
+  ].join("\n");
+}
+
 export function registerDiscussionTool(pi: ExtensionAPI, transport: () => DiscussionTransport | undefined): void {
   const parameters = Type.Object({
     action: Type.Union([Type.Literal("ask"), Type.Literal("answer"), Type.Literal("list"), Type.Literal("thread"), Type.Literal("pending")]),
@@ -376,12 +392,8 @@ export function registerDiscussionTool(pi: ExtensionAPI, transport: () => Discus
   pi.registerTool?.<typeof parameters, Record<string, never>>({
     name: "jar_discuss",
     label: "discuss",
-    description: `Parent-brokered Q/A between this session's moderator and subagents; not a transcript, and it never wakes anyone. ask/answer reply with the new id only. list returns only unread messages for you: questions to you, broadcasts, answers to your questions (≤${MAX_LIST_CHARS} chars).`,
-    promptSnippet: "Ask or answer one concrete cross-agent question through the session discussion broker.",
-    promptGuidelines: [
-      "jar_discuss: one precise question or answer per call. ask to moderator, a subagent key or unique name, or omit to to broadcast; answer needs the questionId. Replies never echo your text.",
-      "Answers to your questions also arrive on your next ask/answer. list shows only unread messages for you; thread reads one question in full; pending summarizes open items. Don't poll."
-    ],
+    description: `Parent-brokered Q/A between this session's moderator and subagents; never wakes anyone. ask/answer reply with the new id (never your text) plus your unread mail when it fits. Unread mail (questions to you, broadcasts, answers to your questions; never your own) also arrives once at your next turn start. list: your unread (≤${MAX_LIST_CHARS} chars); thread: one question in full; pending: open counts.`,
+    promptSnippet: "One concise cross-agent question or answer per call; unread mail reaches you at turn start, so never poll.",
     parameters,
     async execute(_id, params) {
       const broker = transport();
@@ -441,19 +453,16 @@ export function registerDiscussionTool(pi: ExtensionAPI, transport: () => Discus
     }
   });
 
-  // At a natural boundary only: a hidden notice joins the turn that is starting anyway. Discussion
-  // traffic never sends a message or triggers a turn, so agents cannot wake each other into a loop.
-  let notified: number | undefined;
+  // At a natural boundary only: unread mail joins the turn that is starting anyway, as one hidden message
+  // that already carries it, so reading it costs no list call. Discussion traffic never sends a message
+  // or triggers a turn, so agents cannot wake each other into a loop.
   pi.on?.("before_agent_start", async () => {
     const broker = transport();
     if (!broker) return;
-    let state: UnreadResult;
+    let inbox: ListResult;
     // Advisory only: a broker failure surfaces on the agent's next jar_discuss call instead of delaying this turn.
-    try { state = await broker.unread(); } catch { return; }
-    // Once per newest unread message: ignored mail is not re-announced every turn.
-    if (!state.unread || state.newest === notified) return;
-    notified = state.newest;
-    return { message: { customType: DISCUSSION_NOTICE, display: false,
-      content: `You have ${plural(state.unread, "unread discussion message")}. Use jar_discuss list when relevant.` } };
+    try { inbox = await broker.inbox(); } catch { return; }
+    const content = inboxNotice(inbox);
+    if (content) return { message: { customType: DISCUSSION_NOTICE, display: false, content } };
   });
 }

@@ -423,14 +423,23 @@ test("Pi lifecycle keeps working UI static and event-driven in long sessions", a
   }
 });
 
-test("welcome shows for fresh sessions, including Pi's startup setup entries, and skips resumed ones", () => {
-  const cases: [string, unknown[], boolean][] = [
+test("welcome ignores startup metadata and skips resumed conversations", () => {
+  const cases: [string, unknown[], boolean, string?][] = [
     ["empty", [], true],
     ["startup thinking level and model", [{ type: "thinking_level_change", thinkingLevel: "off" }, { type: "model_change" }], true],
-    ["resumed with state", [{ type: "thinking_level_change" }, { type: "custom", customType: "existing", data: {} }], false],
-    ["resumed with messages", [{ type: "message", message: { role: "user", content: "hi" } }], false]
+    ["startup extension telemetry", [{ type: "model_change" }, { type: "thinking_level_change" },
+      { type: "custom", customType: "punakawan-telemetry-origin", data: {} }], true],
+    ["startup profile and session metadata", [{ type: "custom", customType: "pi-jar.profile", data: { version: 1, id: "default" } },
+      { type: "session_info", name: "New session" }], true],
+    ["new session with extension metadata", [{ type: "custom", customType: "existing", data: {} }], true, "new"],
+    ["resumed with state", [{ type: "thinking_level_change" }, { type: "custom", customType: "existing", data: {} }], false, "resume"],
+    ["forked empty session", [], false, "fork"],
+    ["resumed with messages", [{ type: "message", message: { role: "user", content: "hi" } }], false],
+    ["resumed with custom messages", [{ type: "custom_message", customType: "existing", content: "hi", display: true }], false],
+    ["resumed with compaction", [{ type: "compaction", summary: "Earlier conversation" }], false],
+    ["resumed with branch summary", [{ type: "branch_summary", summary: "Earlier branch" }], false]
   ];
-  for (const [name, branch, expected] of cases) {
+  for (const [name, branch, expected, reason = "startup"] of cases) {
     const events = new Map<string, Function>();
     let welcomeInstalled = false;
     const ctx = {
@@ -452,7 +461,7 @@ test("welcome shows for fresh sessions, including Pi's startup setup entries, an
       getCommands: () => [],
       registerCommand() {}
     } as unknown as Parameters<typeof piJar>[0]);
-    events.get("session_start")?.({ reason: "startup" }, ctx);
+    events.get("session_start")?.({ reason }, ctx);
     assert.equal(welcomeInstalled, expected, name);
     events.get("session_shutdown")?.({}, ctx);
   }

@@ -82,7 +82,7 @@ test("plan blocks unknown tools, shell mutations and writes outside the plan dir
   assert.equal(await call("edit", { path: join(h.dir, "nested", "deep-plan.md") }), undefined);
   assert.match((await call("write", { path: "README.md" })).reason, /read-only.*-plan\.md/);
   await h.commands.get("plan")!("stop", h.ctx);
-  assert.deepEqual(h.active(), ["read", "bash", "write", "edit", "jar_ask", "remote_get", PLAN_SUBMIT_TOOL]);
+  assert.deepEqual(h.active(), ["read", "bash", "write", "edit", "jar_ask", "remote_get"], "the plan-only submit tool leaves with plan mode");
 });
 
 test("symlinks cannot escape the plan directory", () => {
@@ -160,12 +160,12 @@ test("branch restoration handles v1 and v2 entries; cancelled compaction never i
   assert.deepEqual(h.plan.summary(), { enabled: false, title: "Add hello command", steps: 1 });
 });
 
-test("stopping from review restores the exact original tool set", async () => {
+test("stopping from review restores the original tool set minus the plan-only submit tool", async () => {
   const h = harness({ reviewAction: "stop" });
   await h.commands.get("plan")!("", h.ctx);
   await h.submit(h.writePlan("s-plan.md", GOOD_PLAN));
   await h.events.get("agent_settled")!({}, h.ctx);
-  assert.deepEqual(h.active(), ["read", "bash", "write", "edit", "jar_ask", "remote_get", PLAN_SUBMIT_TOOL]);
+  assert.deepEqual(h.active(), ["read", "bash", "write", "edit", "jar_ask", "remote_get"]);
   assert.deepEqual(h.sent, []);
 });
 

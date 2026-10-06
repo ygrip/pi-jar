@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ModelRoleManager, normalizeSpec, parseRoleConfig, resolveRole } from "../src/model-roles.ts";
+import { ModelRoleManager, normalizeSpec, parseRoleConfig, premiumRoleWarnings, resolveRole } from "../src/model-roles.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 function withAgentDir(run: (directory: string) => Promise<void>) {
@@ -238,4 +238,29 @@ test("role activation falls back to the next configured model when the primary i
   assert.deepEqual(h.models, ["cheap"]);
   assert.deepEqual(h.thinking, ["minimal"]);
   assert.deepEqual(h.manager.resolveCandidates("scout").map((item) => item.model), ["expensive", "cheap"]);
+}));
+
+test("scout and reviewer on the main model warn only when a cheaper model is available", withAgentDir(async () => {
+  const h = harness();
+  const model = (id: string, price: number) => ({ provider: "p", id, cost: { input: price, output: price * 5, cacheRead: 0, cacheWrite: 0 } });
+  const big = model("big", 15);
+  const small = model("small", 1);
+  const on = (main: typeof big | undefined) => ({ ...h.ctx, model: main, modelRegistry: { ...h.ctx.modelRegistry, getAvailable: () => [big, small] } }) as never;
+  assert.deepEqual(premiumRoleWarnings(h.manager, on(big)), [
+    "⚠ scout subagents run on the main model p/big; use a mini/haiku-class model: /roles set scout provider/model",
+    "⚠ reviewer subagents run on the main model p/big; use a mini/haiku-class model: /roles set reviewer provider/model"
+  ], "unassigned roles follow the main model");
+  h.manager.update("smol", "p/small");
+  h.manager.update("scout", "@smol");
+  h.manager.update("reviewer", "p/big:high");
+  assert.deepEqual(premiumRoleWarnings(h.manager, on(big)),
+    ["⚠ reviewer subagents run on the main model p/big; use a mini/haiku-class model: /roles set reviewer @smol"],
+    "a cheap scout is fine; an explicit main-model reviewer still warns, and the fix names the economical Fast role");
+  h.manager.update("default", "p/missing");
+  h.manager.update("reviewer", "p/also-missing");
+  assert.equal(premiumRoleWarnings(h.manager, on(big)).length, 1, "unavailable targets fall back to the main model, as jar_delegate does");
+  assert.deepEqual(premiumRoleWarnings(h.manager, on(small)), [], "an economical main model needs no warning");
+  assert.deepEqual(premiumRoleWarnings(h.manager, on(undefined)), [], "no main model, no claim");
+  await h.commands.get("roles")!("list", on(big));
+  assert.match(h.notices.at(-1)!, /\n⚠ reviewer subagents run on the main model p\/big/, "/roles list shows the warning");
 }));

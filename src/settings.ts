@@ -25,9 +25,27 @@ export interface JarVisualSettings {
   advisorGates: boolean;
   /** Opt-in provider-context pruning of reasoning from completed earlier user turns. */
   contextDiet: boolean;
+  /** Context-size guard: past softTokens, suggest /compact or /new, or compact at the next safe point. */
+  contextBudget: ContextBudget;
+  /** Opt-in: an unchanged repeated `read` of the same range returns a short stub instead of the content. */
+  readCache: boolean;
   /** Glyph set for footer, composer and views: unicode, Nerd Font icons, or plain ascii. */
   icons: IconSet;
   footer: FooterSettings;
+}
+
+export const CONTEXT_BUDGET_ACTIONS = ["off", "suggest", "compact"] as const;
+export type ContextBudgetAction = (typeof CONTEXT_BUDGET_ACTIONS)[number];
+export interface ContextBudget { softTokens: number; action: ContextBudgetAction }
+export const CONTEXT_BUDGET_CHOICES = [80_000, 120_000, 160_000, 200_000] as const;
+export const DEFAULT_CONTEXT_BUDGET: ContextBudget = { softTokens: 120_000, action: "suggest" };
+/** Accepts any stored integer budget in a sane range, not only the picker's choices. */
+export function parseContextBudget(value: unknown): ContextBudget | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { softTokens, action } = value as Record<string, unknown>;
+  if (typeof softTokens !== "number" || !Number.isInteger(softTokens) || softTokens < 10_000 || softTokens > 2_000_000) return undefined;
+  if (!CONTEXT_BUDGET_ACTIONS.some((choice) => choice === action)) return undefined;
+  return { softTokens, action: action as ContextBudgetAction };
 }
 
 export const GOAL_ROUND_CHOICES = [4, 8, 12, 20] as const;
@@ -39,7 +57,7 @@ export function isMaxSubagents(value: unknown): value is MaxSubagents {
 
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 4, advisor: true, advisorGates: true, contextDiet: false, icons: "unicode", footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 2, advisor: true, advisorGates: false, contextDiet: false, contextBudget: { ...DEFAULT_CONTEXT_BUDGET }, readCache: false, icons: "unicode", footer: { ...footer } };
 }
 
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
@@ -73,6 +91,8 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     advisor: typeof value.advisor === "boolean" ? value.advisor : fallback.advisor,
     advisorGates: typeof value.advisorGates === "boolean" ? value.advisorGates : fallback.advisorGates,
     contextDiet: typeof value.contextDiet === "boolean" ? value.contextDiet : fallback.contextDiet,
+    contextBudget: parseContextBudget(value.contextBudget) ?? fallback.contextBudget,
+    readCache: typeof value.readCache === "boolean" ? value.readCache : fallback.readCache,
     icons: ICON_SETS.some((set) => set === value.icons) ? value.icons as IconSet : fallback.icons,
     footer: Object.fromEntries(FOOTER_FIELDS.map((field) => [field,
       typeof footer[field] === "boolean" ? footer[field] : fallback.footer[field]])) as FooterSettings

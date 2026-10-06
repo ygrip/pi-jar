@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Key, truncateToWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { ACCENT_NAMES, loadedAccents, selectAccent } from "../src/accent.ts";
 import { registerAskTool } from "../src/ask-tool.ts";
-import { registerDemocracy } from "../src/democracy.ts";
+import { registerCouncil } from "../src/council.ts";
 import type { DelegateController } from "../src/delegate.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
@@ -37,6 +37,7 @@ import { manageTasks } from "../src/tasks-ui.ts";
 import { registerTaskTool, todoRow } from "../src/task-tool.ts";
 import { TASK_ENTRY, TodoStore, todoProgress, todoTotals } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
+import { branchCalls, compactForBudget, CONTEXT_CONTINUATION, ContextBudgetGuard, providerCall, resumeAfterBudget } from "../src/context-budget.ts";
 import { WorkingState } from "../src/working.ts";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_ENV, DelegateRegistry, registerDelegate, SUBAGENT_MESSAGE, type DelegateRun } from "../src/delegate.ts";
@@ -61,8 +62,8 @@ const VERSION = (() => {
 })();
 /** Ignore the click Pi may synthesize right after a press we already acted on. */
 const WELCOME_CLICK_DEDUPE_MS = 400;
-/** Entries Pi writes when a fresh session starts; a branch holding only these has no transcript yet. */
-const SESSION_SETUP_ENTRIES = new Set(["thinking_level_change", "model_change", "session_info"]);
+/** Conversation content, unlike startup metadata or extension bookkeeping. */
+const SESSION_TRANSCRIPT_ENTRIES = new Set(["message", "custom_message", "compaction", "branch_summary"]);
 export default function piJar(pi: ExtensionAPI): void {
   const delegatedChild = process.env[CHILD_ENV] === "1";
   const delegatedWorktree = delegatedChild ? process.env[CHILD_WORKTREE_ENV] : undefined;
@@ -71,7 +72,7 @@ export default function piJar(pi: ExtensionAPI): void {
     // and handlers are disabled. Remove only parent automation, not task/user context.
     const parentAutomation = new Set([
       "pi-jar.goal-context", "pi-jar.goal-continuation",
-      "pi-jar.plan-context", "pi-jar.plan-reminder", "pi-jar.moderator-context", SUBAGENT_MESSAGE, DISCUSSION_NOTICE
+      "pi-jar.plan-context", "pi-jar.plan-reminder", "pi-jar.moderator-context", SUBAGENT_MESSAGE, DISCUSSION_NOTICE, CONTEXT_CONTINUATION
     ]);
     pi.on("context", (event) => {
       const messages = event.messages.filter((message) => !parentAutomation.has((message as { customType?: string }).customType ?? ""));
@@ -97,7 +98,7 @@ export default function piJar(pi: ExtensionAPI): void {
       pi.setActiveTools([...allowed].filter(name => available.has(name)));
     });
   }
-  installCompactBuiltinTools(pi);
+  installCompactBuiltinTools(pi, { readCache: () => visualSettings.readCache === true });
   let demo = false;
   let visualSettings = defaultVisualSettings();
   let profileStore: ProfileStore | undefined;
@@ -130,6 +131,15 @@ export default function piJar(pi: ExtensionAPI): void {
     if (footerTui && footerSettings.quota) quotaCache?.refresh(ctx.model?.provider, welcomeStatuses(), Date.now());
   };
   let cost = 0;
+  /**
+   * Context budget: footer chip, average cost per call, prompt hints and safe-point compaction.
+   * Delegated children never run it; the parent session owns the budget.
+   */
+  const contextGuard = new ContextBudgetGuard(() => delegatedChild ? { ...visualSettings.contextBudget, action: "off" } : visualSettings.contextBudget);
+  /** jar_todo calls in flight → completed count before each ran; a raised count marks a safe point. */
+  const todoCalls = new Map<string, number>();
+  /** Bumped per session: a compaction finishing after a session change resumes nothing. */
+  let budgetGeneration = 0;
   let welcomeInterval: ReturnType<typeof setInterval> | undefined;
   let welcomeFrame = 0;
   let welcomeDismiss = 0;
@@ -141,6 +151,8 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeBranch = (): string | null => null;
   let refreshWelcome: (() => void) | undefined;
   let todos: TodoStore | undefined;
+  /** Leaf completion: jar_todo safe points, the stop decision and the topic hint. */
+  const todoCounts = () => todoTotals(todos?.all() ?? []);
   let goals: GoalStore | undefined;
   const composer = new ComposerStyle();
   let footerSettings = visualSettings.footer;
@@ -360,8 +372,9 @@ export default function piJar(pi: ExtensionAPI): void {
     discussionEnv: (key, name) => discussion?.childEnv(key, name),
     discussionRetire: (key) => discussion?.retire(key),
     discussionUnread: (key) => discussion?.unreadFor(key) ?? 0,
+    discussionDigest: () => discussion?.digest(),
     getMaxSubagents: () => visualSettings.maxSubagents, onController: (controller) => { delegateController = controller; } });
-  if (!delegatedChild) registerDemocracy(pi, () => delegateController, () => visualSettings.maxSubagents);
+  if (!delegatedChild) registerCouncil(pi, () => delegateController, () => visualSettings.maxSubagents);
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);
   if (!delegatedChild) planMode.register();
   const goalLoop = new GoalLoop(pi, {
@@ -638,7 +651,7 @@ export default function piJar(pi: ExtensionAPI): void {
                 sessionName: footerSessionName,
                 cwd: ctx.cwd, settings: footerSettings, branch: footerData.getGitBranch(),
                 context: contextUsage?.label ?? "ctx ?", goal: goalLoop.progress(), chips: footerChips(), activity: footerActivity(now),
-                memory, cost: formatCost(cost), quota, roles, extras: live.extras,
+                memory, cost: formatCost(cost, contextGuard.perCall), overBudget: contextGuard.over, quota, roles, extras: live.extras,
                 demo, animations, frame, motionBudget: ctx.isIdle() ? 2 : 1
               }, width, ctx.ui.theme ?? theme);
               hits = layout.hits;
@@ -810,7 +823,17 @@ export default function piJar(pi: ExtensionAPI): void {
   const restoreGoal = (ctx: ExtensionContext, branch?: readonly unknown[]) => {
     try { goals?.restore(branch ?? sessionBranch(ctx)); } catch { goals?.restore([]); }
   };
-  pi.on("session_start", (_event, ctx) => {
+  /** Awaited by agent_settled (see compactForBudget), whose handler is the last pi-jar settle handler. */
+  const settleBudget = async (ctx: ExtensionContext) => {
+    const job = contextGuard.settle({ idle: ctx.isIdle(), blocked: planMode.isEnabled() });
+    if (!job) return;
+    const open = (todos?.all() ?? []).filter((item) => !item.done).map((item) => item.title);
+    if (!job.compact) { resumeAfterBudget(pi, ctx, open); return; }
+    const generation = budgetGeneration;
+    await compactForBudget(pi, ctx, { resume: job.resume, tokens: contextGuard.lastTokens, softTokens: visualSettings.contextBudget.softTokens, open },
+      () => generation === budgetGeneration);
+  };
+  pi.on("session_start", (event, ctx) => {
     sideUsage.clear();
     if (!profileStore) initializeProfiles(ctx);
     composer.setProfile(profileStore?.activeName ?? "Default");
@@ -861,6 +884,9 @@ export default function piJar(pi: ExtensionAPI): void {
       restoreTodos(ctx, branch);
       restoreGoal(ctx, branch);
     }
+    contextGuard.reset(branchCalls(branch, Date.now()));
+    todoCalls.clear();
+    budgetGeneration++;
     // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
@@ -892,9 +918,12 @@ export default function piJar(pi: ExtensionAPI): void {
     }
     // Resumed sessions already have a transcript to paint. Rebuilding the animated welcome and
     // scanning other session files competes with that expensive initial render for no real benefit.
-    // A fresh session is not empty: Pi records the startup thinking level/model as entries.
-    const resumed = branch.some((entry) => !(typeof entry === "object" && entry !== null && "type" in entry
-      && typeof entry.type === "string" && SESSION_SETUP_ENTRIES.has(entry.type)));
+    // Fresh sessions can already contain model settings and other extensions' custom metadata.
+    // Those entries are not a transcript; only conversation content or an explicit resume/fork
+    // should suppress the welcome (including resumes of sessions containing only saved state).
+    const resumed = event.reason === "resume" || event.reason === "fork" || branch.some((entry) =>
+      typeof entry === "object" && entry !== null && "type" in entry
+      && typeof entry.type === "string" && SESSION_TRANSCRIPT_ENTRIES.has(entry.type));
     if (!delegatedChild && !resumed) showWelcome(ctx);
     if (discussion) {
       const current = discussion;
@@ -922,6 +951,11 @@ export default function piJar(pi: ExtensionAPI): void {
     }
     if (event.source !== "interactive") return;
     dismissWelcome(ctx);
+    // Hints read a finished list before this prompt acknowledges (hides) it.
+    if (!event.streamingBehavior) {
+      const hint = contextGuard.prompt(Date.now(), todoCounts());
+      if (hint) ctx.ui.notify(hint, "info");
+    }
     if (!todosAcknowledged && todos?.all().every((item) => item.done)) { todosAcknowledged = true; updateTaskWidget(ctx); }
   });
   pi.on("agent_start", (_event, ctx) => {
@@ -939,20 +973,46 @@ export default function piJar(pi: ExtensionAPI): void {
     if (event.message.role === "assistant") {
       working.reportOutputTokens(event.message.usage?.output ?? 0);
       addMessageCost(event.message);
+      // Each provider call moves the per-call average and the budget; a crossing turns the context chip amber.
+      const notice = contextGuard.call(providerCall(event.message, Date.now()));
+      if (notice) ctx.ui.notify(notice, "warning");
       applyWorking(ctx);
       repaint("cost", "background");
     }
   });
-  pi.on("tool_execution_start", (event, ctx) => { working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx); });
-  pi.on("tool_execution_end", (event, ctx) => { working.toolEnd(event.toolCallId); applyWorking(ctx); });
+  pi.on("tool_execution_start", (event, ctx) => {
+    if (event.toolName === "jar_todo") todoCalls.set(event.toolCallId, todoCounts().done);
+    working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx);
+  });
+  pi.on("tool_execution_end", (event, ctx) => {
+    const before = todoCalls.get(event.toolCallId);
+    if (before !== undefined) {
+      todoCalls.delete(event.toolCallId);
+      if (todoCounts().done > before) contextGuard.todoCompleted();
+    }
+    working.toolEnd(event.toolCallId); applyWorking(ctx);
+  });
   pi.on("ui_prompt_start", (_event, ctx) => { working.prompt(true); applyWorking(ctx); });
   pi.on("ui_prompt_end", (_event, ctx) => { working.prompt(false); applyWorking(ctx); });
   // A request may span several tool turns; keep its elapsed time and reported tokens until agent_end.
-  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); refreshQuota(ctx); });
+  pi.on("turn_end", (event, ctx) => {
+    applyWorking(ctx); refreshQuota(ctx);
+    todoCalls.clear();
+    // Safe point: every tool result of this turn is in. Stop before the next request; agent_settled compacts and resumes.
+    const stop = event.message?.role === "assistant" ? event.message.stopReason : undefined;
+    if (contextGuard.turnEnd({ open: () => { const { done, total } = todoCounts(); return total - done; },
+      interrupted: stop === "error" || stop === "aborted" || ctx.signal?.aborted === true || ctx.hasPendingMessages?.() === true,
+      blocked: planMode.isEnabled() })) ctx.abort();
+  });
   pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); sampleFooter(ctx); });
   pi.on("agent_before_settle", (event) => { if (event.outcome === "error") composer.flash("error"); });
   // Retries or compaction after agent_end may have added messages; otherwise the agent_end sample stands.
-  pi.on("agent_settled", (_event, ctx) => { working.end(); applyWorking(ctx); if (contextUsage?.dirty) sampleFooter(ctx); refreshQuota(ctx); });
+  pi.on("agent_settled", (_event, ctx) => {
+    working.end(); applyWorking(ctx); if (contextUsage?.dirty) sampleFooter(ctx); refreshQuota(ctx);
+    if (contextGuard.busy) return settleBudget(ctx);
+  });
+  // Pi's idle cache warming keeps the prompt cache alive; the cold-cache hint counts from its last refresh.
+  pi.on("cache_warming_decision", (event) => { if (event.action === "warm") contextGuard.warmed(Date.now()); });
   pi.on("session_tree", (_event, ctx) => {
     let branch: readonly unknown[] = [];
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
@@ -961,6 +1021,7 @@ export default function piJar(pi: ExtensionAPI): void {
       restoreTodos(ctx, branch);
       restoreGoal(ctx, branch);
     }
+    contextGuard.reset(branchCalls(branch, Date.now()));
     updateCost(ctx);
     composer.refreshSession(ctx);
     sampleFooter(ctx);
@@ -970,6 +1031,7 @@ export default function piJar(pi: ExtensionAPI): void {
     try { branch = sessionBranch(ctx); } catch { /* keep empty */ }
     renders?.setEntries(branch.length);
     if (!delegatedChild) { restoreTodos(ctx, branch); restoreGoal(ctx, branch); }
+    contextGuard.compacted();
     updateCost(ctx);
     sampleFooter(ctx);
   });
@@ -992,6 +1054,9 @@ export default function piJar(pi: ExtensionAPI): void {
     renders = undefined;
     contextUsage?.dispose();
     contextUsage = undefined;
+    contextGuard.reset();
+    todoCalls.clear();
+    budgetGeneration++;
     todos = undefined;
     changes = undefined;
     changeCount = 0;

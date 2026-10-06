@@ -11,6 +11,7 @@ import { extractApproachSteps, isSafePlanCommand, PLAN_TEMPLATE, planTextFromSte
 import { cleanText } from "./status.ts";
 import { sessionBranch } from "./session-branch.ts";
 import { type TodoStore } from "./tasks.ts";
+import { setToolActive } from "./tool-activation.ts";
 import { projectWorkflowMessages } from "./workflow-context.ts";
 
 export const PLAN_ENTRY = "pi-jar.plan";
@@ -139,7 +140,8 @@ export class PlanMode {
     this.enabled = true;
     this.pendingReview = false;
     this.reminders = 0;
-    this.toolsBefore = this.pi.getActiveTools();
+    // The submit tool is active only in plan mode; never restore it with the pre-plan loadout.
+    this.toolsBefore = this.pi.getActiveTools().filter((name) => name !== PLAN_SUBMIT_TOOL);
     this.pi.setActiveTools(this.planTools(this.toolsBefore));
     this.onEnter?.(ctx);
     this.restoreRole = await this.roles.activateTemporary("plan", ctx);
@@ -414,7 +416,7 @@ export class PlanMode {
     });
 
     this.pi.on("before_agent_start", async () => {
-      if (!this.enabled) return;
+      if (!this.enabled) { setToolActive(this.pi, PLAN_SUBMIT_TOOL, false); return; }
       return { message: { customType: "pi-jar.plan-context", content: this.context(), display: false } };
     });
 

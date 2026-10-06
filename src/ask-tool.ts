@@ -159,13 +159,8 @@ export function registerAskTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "jar_ask",
     label: "ask user",
-    description: "Ask the user one or more structured clarification questions with described choices, multi-select checkboxes, custom text, or a chat-about-this path.",
-    promptSnippet: "Use jar_ask when a decision or clarification is needed; prefer concise options with useful descriptions.",
-    promptGuidelines: [
-      "Use jar_ask instead of writing ad-hoc numbered questions when the user needs to choose between options or provide clarification.",
-      "Use multi=true only when several answers may be selected. Include short descriptions when labels alone are ambiguous.",
-      "If a jar_ask result contains chat, respond to that discussion before asking for a final choice again."
-    ],
+    description: "Ask the user one or more structured clarification questions with described choices, multi-select checkboxes (multi=true only when several answers may apply), custom text, or a chat-about-this path. If a result contains chat, respond to that discussion before asking for a final choice again.",
+    promptSnippet: "Use jar_ask instead of ad-hoc numbered questions when the user must choose or clarify; add short option descriptions when labels are ambiguous.",
     parameters: Parameters,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const questions = params.questions as AskQuestion[];

@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, writeChildBaseline } from "../src/child-baselines.ts";
-import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, piInvocation, READ_ONLY_TOOLS, registerDelegate, WORKTREE_TOOLS, type DelegateOptions, type DelegateController, type SubagentStopReport } from "../src/delegate.ts";
+import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, EVENT_SUMMARY_CHARS, eventSummary, MAX_DELEGATES, piInvocation, READ_ONLY_TOOLS, registerDelegate, WORKTREE_TOOLS, type DelegateOptions, type DelegateController, type SubagentStopReport } from "../src/delegate.ts";
 import { CHILD_WORKTREE_ENV, GIT_EXECUTABLE_ENV } from "../src/delegate-worktree.ts";
 import { emit, fakeSpawn, say, settle, taskOf, type FakeChild } from "./fake-rpc.ts";
 
@@ -87,7 +87,7 @@ test("default scouts load only pi-jar while optional tools and explicit parent e
 });
 
 test("explicit active web tools and filtered parent inheritance produce per-child allowlists", async () => {
-  const active = [...READ_ONLY_TOOLS, "web_search", "edit", "write", "bash", "jar_delegate", "jar_subagent", "jar_democracy"];
+  const active = [...READ_ONLY_TOOLS, "web_search", "edit", "write", "bash", "jar_delegate", "jar_subagent", "jar_council"];
   const fake = fakeSpawn(child => { say(child, "ready"); settle(child); });
   const host = moderatorHost(fake.spawn, active);
   const context = { ...quiet, sessionManager: { getSessionFile: () => "/tmp/parent.jsonl" } };
@@ -105,7 +105,7 @@ test("explicit active web tools and filtered parent inheritance produce per-chil
   await tick();
   const inherited = fake.calls[1]!.args.at(-1)!;
   assert.ok(inherited.includes("read") && inherited.includes("jar_discuss") && inherited.includes("web_search"));
-  for (const forbidden of ["edit", "write", "bash", "jar_delegate", "jar_subagent", "jar_democracy"])
+  for (const forbidden of ["edit", "write", "bash", "jar_delegate", "jar_subagent", "jar_council"])
     assert.ok(!inherited.split(",").includes(forbidden), `${forbidden} is filtered from read-only inheritance`);
   await host.registry.stop(host.registry.records()[0]!.key);
 });
@@ -351,7 +351,7 @@ test("clearing a session retires retained subagents and removes their details", 
 test("the registry keeps only the newest eight retired subagents", async () => {
   const { spawn } = fakeSpawn((child) => settle(child));
   const registry = new DelegateRegistry();
-  const tool = register(registry, spawn);
+  const tool = register(registry, spawn, { getMaxSubagents: () => 4 });
   for (let batch = 0; batch < 3; batch++) {
     await tool.execute("d", { tasks: [1, 2, 3, 4].map((n) => ({ task: `t${n}` })) }, undefined, undefined, quiet);
     const retained = registry.records().filter((record) => record.run.state === "idle");
@@ -465,7 +465,8 @@ test("moderator can peek, resume, pause, ask and stop the same retained subagent
   assert.equal(record!.run.state, "idle");
 
   const stopped = await control.execute("s", { action: "stop", agent: record!.key }, undefined, undefined, quiet);
-  assert.match(stopped.content[0]!.text, /workspace: none[\s\S]*changed: none[\s\S]*remaining:/);
+  assert.equal(stopped.content[0]!.text, `${record!.key} · auth scout · stopped\nsummary: finished follow-up\nchanged: none · applied: none`,
+    "the stop handoff is compact: summary and what reached /diff");
   assert.equal(record!.run.state, "stopped");
   assert.equal(fake.children[0]!.stdin.writableEnded, true);
 });
@@ -705,7 +706,7 @@ test("session discard racing a worktree stop never applies private edits", async
 });
 
 /** jar_delegate + jar_subagent on a host that records hooks and wake-up messages. */
-const moderatorHost = (spawn: unknown, activeTools?: string[]) => {
+const moderatorHost = (spawn: unknown, activeTools?: string[], options: DelegateOptions = {}) => {
   const registry = new DelegateRegistry();
   const tools = new Map<string, Tool>();
   const events = new Map<string, (event: { messages: unknown[] }) => { messages: unknown[] } | undefined>();
@@ -714,7 +715,7 @@ const moderatorHost = (spawn: unknown, activeTools?: string[]) => {
     registerTool(definition: Tool) { tools.set(definition.name, definition); },
     on(name: string, handler: never) { events.set(name, handler); },
     sendMessage(message: { customType: string; content: string }, options: { triggerTurn?: boolean; deliverAs?: string }) { sent.push({ message, options }); }
-  } as never, roles({}), registry, { spawnProcess: spawn as never, ...(activeTools ? { getActiveToolNames: () => activeTools } : {}) });
+  } as never, roles({}), registry, { ...options, spawnProcess: spawn as never, ...(activeTools ? { getActiveToolNames: () => activeTools } : {}) });
   return { registry, delegate: tools.get("jar_delegate")!, control: tools.get("jar_subagent")!, events, sent };
 };
 
@@ -781,7 +782,7 @@ test("initial and resumed subagent turns wake the moderator over RPC without blo
   assert.equal(host.sent.length, 2, "one coalesced event per settled turn");
   assert.equal(host.sent[1]!.message.customType, "pi-jar.subagent");
   assert.deepEqual(host.sent[1]!.options, { triggerTurn: true }, "idle wake-ups never use Pi's irrevocable follow-up queue");
-  assert.match(host.sent[1]!.message.content, /auth scout · idle[\s\S]*last: follow-up report/);
+  assert.match(host.sent[1]!.message.content, /auth scout · idle\nsummary: follow-up report/);
   await host.control.execute("s", { action: "stop", agent: record!.key }, undefined, undefined, quiet);
   await until(() => host.sent.length >= 3);
   t.mock.timers.tick(1000);
@@ -1031,7 +1032,7 @@ test("a synchronous result shares one report budget; jar_subagent report returns
   const long = (tag: string) => tag + ":" + "x".repeat(6000) + ":end";
   const fake = fakeSpawn((child, prompt) => { say(child, long(prompt.includes("alpha") ? "alpha" : prompt.includes("beta") ? "beta" : prompt.includes("gamma") ? "gamma" : "delta")); settle(child); });
   registerDelegate({ registerTool(definition: Tool) { tools.set(definition.name, definition); } } as never,
-    roles({ scout: { provider: "p", model: "cheap" } }), registry, { spawnProcess: fake.spawn as never, maxSubagents: () => 4 } as never);
+    roles({ scout: { provider: "p", model: "cheap" } }), registry, { spawnProcess: fake.spawn as never, getMaxSubagents: () => 4 });
   const result = await tools.get("jar_delegate")!.execute("d", { tasks: ["alpha", "beta", "gamma", "delta"].map(task => ({ task, name: task })) },
     undefined, undefined, { ...quiet, model: { provider: "p", id: "current" }, modelRegistry: { getAvailable: () => [{ provider: "p", id: "cheap" }] } });
   const text = result.content[0]!.text as string;
@@ -1041,6 +1042,82 @@ test("a synchronous result shares one report budget; jar_subagent report returns
   const record = registry.records().find(item => item.run.name === "beta")!;
   const full = await tools.get("jar_subagent")!.execute("r", { action: "report", agent: record.key }, undefined, undefined, quiet);
   assert.match(full.content[0]!.text, /beta:x{6000}:end/);
+});
+
+test("the default pool is two retained subagents", async () => {
+  assert.equal(MAX_DELEGATES, 2);
+  const registry = new DelegateRegistry();
+  const fake = fakeSpawn((child) => settle(child));
+  const tool = register(registry, fake.spawn);
+  const denied = await tool.execute("d", { tasks: [1, 2, 3].map((n) => ({ task: `t${n}` })) }, undefined, undefined, quiet);
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0]!.text, /pool is full: 0\/2/);
+  assert.equal(fake.calls.length, 0);
+});
+
+test("event summaries prefer the report's Summary section and never exceed the event budget", () => {
+  assert.equal(eventSummary("## Summary\nFixed the race.\n\n## Details\nlong details"), "Fixed the race.");
+  assert.equal(eventSummary("### Summary: Found it in a.ts\nline two\n## Open issues\nnone"), "Found it in a.ts line two", "text on the heading line counts");
+  assert.equal(eventSummary("Plain report without sections"), "Plain report without sections");
+  assert.equal(eventSummary("## Summary\n\n## Details\nonly details"), "## Summary ## Details only details", "an empty section falls back to the report");
+  const long = eventSummary("## Summary\n" + "word ".repeat(400));
+  assert.equal(long.length, EVENT_SUMMARY_CHARS);
+  assert.ok(long.endsWith("…"));
+});
+
+test("an event carries a capped summary and the changed files; jar_subagent report returns the full report", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const report = `## Summary\n${"Fixed the token refresh race. ".repeat(30)}\n## Details\n${"x".repeat(3000)}:end`;
+  const fake = fakeSpawn((child) => {
+    for (const [index, path] of ["src/auth.ts", "src/token.ts"].entries()) {
+      emit(child, { type: "tool_execution_start", toolCallId: `e${index}`, toolName: "edit", args: { path } });
+      emit(child, { type: "tool_execution_end", toolCallId: `e${index}`, toolName: "edit", result: { content: [] }, isError: false });
+    }
+    say(child, report);
+    settle(child);
+  });
+  const host = moderatorHost(fake.spawn);
+  await host.delegate.execute("d", { tasks: [{ task: "fix", name: "fixer" }] }, undefined, undefined, quiet);
+  await until(() => host.registry.records()[0]?.run.state === "idle");
+  t.mock.timers.tick(1000);
+  assert.equal(host.sent.length, 1);
+  const content = host.sent[0]!.message.content;
+  const summary = /^summary: (.*)$/m.exec(content)![1]!;
+  assert.ok(summary.length <= EVENT_SUMMARY_CHARS && summary.endsWith("…"), `the summary is capped (${summary.length})`);
+  assert.match(summary, /^Fixed the token refresh race\./, "the report's own Summary section leads");
+  assert.match(content, /^changed: src\/auth\.ts, src\/token\.ts$/m);
+  assert.doesNotMatch(content, /x{20}/, "details stay out of the event");
+  const record = host.registry.records()[0]!;
+  const full = await host.control.execute("r", { action: "report", agent: record.key }, undefined, undefined, quiet);
+  assert.match(full.content[0]!.text, /## Details\nx{3000}:end$/, "the full report is one call away");
+  await host.registry.stop(record.key);
+  const retired = await host.control.execute("r", { action: "report", agent: "fixer" }, undefined, undefined, quiet);
+  assert.match(retired.content[0]!.text, /— stopped[\s\S]*x{3000}:end$/, "a retired agent still in the registry keeps its report");
+});
+
+test("events from several agents at one boundary coalesce into one message with the moderator's discussion mail", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fake = fakeSpawn((child, prompt) => { say(child, `## Summary\n${taskOf(prompt)} done\n## Details\n${"y".repeat(2000)}`); settle(child); });
+  let digests = 0;
+  const host = moderatorHost(fake.spawn, undefined, { getMaxSubagents: () => 4,
+    discussionDigest: () => ++digests === 1 ? "Discussion mail (now read; reply with jar_discuss answer):\n[d1] Q · alpha → moderator: which config?" : undefined });
+  const hook = (name: string, event: object = {}) => (host.events.get(name) as unknown as (event: object) => unknown)(event);
+  hook("agent_start");
+  const launched = await host.delegate.execute("d", { tasks: ["alpha", "beta", "gamma"].map((task) => ({ task, name: task })) }, undefined, undefined, quiet);
+  assert.match(launched.content[0]!.text, /^- delegate-\d+-1 · alpha · scout · scout$/m, "the receipt names each agent's key");
+  await until(() => host.registry.records().every((record) => record.run.state === "idle"));
+  t.mock.timers.tick(1000);
+  assert.equal(host.sent.length, 0, "nothing wakes a running moderator");
+  const settled = hook("agent_before_settle", { outcome: "completed" }) as { entries: Array<{ content: string }> };
+  assert.equal(settled.entries.length, 1, "one message for every pending event");
+  const content = settled.entries[0]!.content;
+  for (const name of ["alpha", "beta", "gamma"]) assert.match(content, new RegExp(`· ${name} · idle\\nsummary: ${name} done`));
+  assert.match(content, /\[d1\] Q · alpha → moderator: which config\?/, "discussion mail rides along");
+  assert.doesNotMatch(content, /y{20}/);
+  assert.equal(hook("agent_before_settle", { outcome: "completed" }), undefined, "mail alone never adds a message");
+  assert.equal(digests, 1, "the digest is read only for a message that is delivered anyway");
+  hook("agent_settled");
+  await Promise.all(host.registry.records().map((record) => host.registry.stop(record.key)));
 });
 
 test("registry state signature changes only with the key/state set", () => {

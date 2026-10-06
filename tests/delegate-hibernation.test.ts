@@ -83,7 +83,7 @@ test("a settled scout hibernates after its quiet grace without waking the modera
   assert.deepEqual(prompts(sessionFile).map((line) => line.includes("Task:")), [true, false], "both processes wrote one session: the task, then the resume");
   t.mock.timers.tick(1000);
   assert.equal(moderator.sent.length, 2);
-  assert.match(moderator.sent[1]!.content, /auth scout · idle[\s\S]*last: follow-up report/, "the resumed turn wakes the moderator as before");
+  assert.match(moderator.sent[1]!.content, /auth scout · idle\nsummary: follow-up report/, "the resumed turn wakes the moderator as before");
   assert.deepEqual([record!.run.turns, record!.run.resumes], [2, 1]);
 
   assert.equal((await moderator.registry.stop(record!.key))?.state, "stopped");

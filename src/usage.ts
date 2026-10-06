@@ -12,6 +12,8 @@ export function sessionCost(ctx: Pick<ExtensionContext, "sessionManager">): numb
   return total;
 }
 
-export function formatCost(value: number): string {
-  return `cost $${value < 0.01 && value > 0 ? value.toFixed(4) : value.toFixed(2)}`;
+/** `cost $1.23`, plus the recent average per provider call when there is one: `cost $1.23 · $0.04/call`. */
+export function formatCost(value: number, perCall?: number): string {
+  const money = (amount: number) => `$${amount < 0.01 && amount > 0 ? amount.toFixed(4) : amount.toFixed(2)}`;
+  return `cost ${money(value)}` + (perCall !== undefined && perCall > 0 ? ` · ${money(perCall)}/call` : "");
 }
