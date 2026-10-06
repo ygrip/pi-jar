@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Cost/shape report for one Pi session JSONL: model calls, cost split, context buckets, tool counts,
-// repeated reads, cache misses and injected-message overhead. A regression baseline for
-// plans/session-cost-reduction.md; it only reads the file and never changes the session.
+// repeated reads, cache misses and injected-message overhead. A regression baseline for the
+// session-cost work in docs/EFFICIENCY_PLAN.md; it only reads the file and never changes the session.
 //
 //   node scripts/session-cost.mjs <session.jsonl | session-id> [--json]
 import { readFileSync, readdirSync, existsSync } from "node:fs";

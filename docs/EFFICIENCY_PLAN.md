@@ -36,7 +36,7 @@ The footer's per-tick registry listener reads `DelegateRegistry.stateSignature()
 
 ## Session cost reduction
 
-From [plans/session-cost-reduction.md](../plans/session-cost-reduction.md). Baseline: a 309-call, $6.34 session (`node scripts/session-cost.mjs 01a101ba-…`): 60% of cost was cache reads, average context 125k, 138 calls above 125k context costing $3.87; 109 reads (12 of one file, 7 of a `/tmp` plan), 65 `jar_shell` calls (33 start, 22 output, 8 wait), 19 subagent events (36 KB). Cost scales with calls × context, so every change cuts calls, context per call, or the fixed prompt.
+Baseline: a 309-call, $6.34 session (`node scripts/session-cost.mjs 01a101ba-…`): 60% of cost was cache reads, average context 125k, 138 calls above 125k context costing $3.87; 109 reads (12 of one file, 7 of a `/tmp` plan), 65 `jar_shell` calls (33 start, 22 output, 8 wait), 19 subagent events (36 KB). Cost scales with calls × context, so every change cuts calls, context per call, or the fixed prompt.
 
 | Change | Where | Effect |
 | --- | --- | --- |
