@@ -7,9 +7,24 @@ pi-jar is intentionally small. Contributions should improve clarity, role visibi
 Run:
 
 ```bash
-npm install
+npm ci
+npm audit
 npm run check
+npm test
 ```
+
+Install-script approvals in `package.json` are pinned to reviewed dependency versions.
+When updating dependencies, review `npm install-scripts ls` and approve only scripts
+that are needed and understood (for example, esbuild's binary setup).
+
+The `node-domexception` deprecation comes from Pi's Google SDK authentication
+chain, not pi-jar code. It remains an upstream warning; do not suppress all npm
+warnings or replace that dependency with an incompatible shim.
+
+If npm reports an unknown `always-auth` user setting locally, remove the obsolete
+`always-auth` line from the user npmrc reported by `npm config get userconfig`,
+leaving registry-scoped authentication intact. Release CI uses `setup-node@v6`,
+which no longer generates that setting.
 
 Then test the theme and extension inside Pi.
 

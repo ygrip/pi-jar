@@ -1449,7 +1449,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     }
   });
 
-  const delegateTool: ToolDefinition<typeof Parameters> = {
+  const delegateTool = {
     name: DELEGATE_TOOL,
     label: "delegate",
     description: `Start retained subagents and return immediately; the pool limit counts idle, paused and hibernated agents. fork and worktree inherit this conversation; a worktree's isolated Git changes reach /diff only when you stop it, and at most ${RECOVERY_LIMIT} worktree workspaces may be active or awaiting recovery (resolve with jar_subagent stop or discard). Turn completions arrive as pi-jar.subagent events with a short summary and changed files; jar_subagent report returns a full report. Settled agents hibernate (process closed, context kept) until resumed.`,
@@ -1459,7 +1459,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       "After delegating, moderate: completions arrive as pi-jar.subagent events, so keep working and never poll; don't redo delegated work; reuse retained agents (jar_subagent resume) instead of spawning; stop finished workers to apply worktree changes into /diff."
     ],
     parameters: Parameters,
-    async execute(_id, params, signal, onUpdate, ctx) {
+    // Internal council launches use session context, not tool-only nested execution APIs.
+    async execute(_id, params, signal, onUpdate, ctx: ExtensionContext) {
       controllerContext = ctx;
       const requested = params.tasks;
       const parentToolNames = (): string[] | undefined => {
@@ -1878,7 +1879,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       });
       return new Text(rows.join("\n") || theme.fg("dim", "No subagents."), 0, 0);
     }
-  };
+  } satisfies ToolDefinition<typeof Parameters>;
   pi.registerTool(delegateTool);
 
   const snapshot = (record: SubagentRecord): SubagentReport => ({

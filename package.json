@@ -1,6 +1,6 @@
 {
   "name": "pi-jar",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "A warm, role-aware Pi terminal workspace with switchable profiles, animated UI, plan and goal workflows, tasks, change review, model roles, background shells and subagents.",
   "type": "module",
   "license": "MIT",
@@ -54,9 +54,14 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.87.1",
-    "@earendil-works/pi-tui": "^0.87.1",
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-tui": "^1.1.0",
     "typebox": "^1.3.34",
     "typescript": "5.9.2"
+  },
+  "allowScripts": {
+    "@google/genai@2.21.0": true,
+    "esbuild@0.28.2": true,
+    "protobufjs@7.6.6": true
   }
 }
