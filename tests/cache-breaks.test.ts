@@ -324,8 +324,10 @@ test("compaction, unknown payloads and resets start a fresh baseline", () => {
 
   tracker.request(APPENDED);
   tracker.complete({ usage: usage(500, 50_000, 500), at: T0 + 40_000, model: MODEL });
+  const checked = tracker.checked;
   tracker.request(undefined); // a payload shape this module does not know
   assert.equal(tracker.complete(costly()), undefined);
+  assert.equal(tracker.checked, checked, "a call that could not be fingerprinted was not checked");
   tracker.request(APPENDED);
   assert.equal(tracker.complete({ ...costly(), at: T0 + 60_000 }), undefined, "nothing to compare with after an unknown payload");
 });
@@ -510,6 +512,7 @@ test("the Cache tab explains an empty session and a disabled diagnostic", () => 
   const empty = cacheBreakLines({ enabled: true, calls: 5, breaks: [], file: undefined, now: T0 }, 80, plain).join("\n");
   assert.match(empty, /Calls checked\s+5/);
   assert.match(empty, /None so far\./);
+  assert.match(cacheBreakLines({ enabled: true, calls: 0, breaks: [], file: undefined, now: T0 }, 80, plain).join("\n"), /Calls checked\s+0\n\s+Costly cache breaks\s+0\n\s+No call checked yet \(Anthropic and OpenAI requests are read\)\./);
   assert.match(empty, /A break is a call whose cache read fell more than 4,096 tokens/);
   const off = cacheBreakLines({ enabled: false, calls: 0, breaks: [entry()], file: undefined, now: T0 }, 80, plain).join("\n");
   assert.match(off, /Cache diagnostics are off\. Turn them on in \/jar settings → Pi\./);

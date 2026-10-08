@@ -30,7 +30,10 @@ export function cacheBreakLines(view: CacheBreakState & { now: number }, width: 
   const lines: string[] = [];
   if (!view.enabled) lines.push(...wrap("Cache diagnostics are off. Turn them on in /jar settings → Pi.", "warning"), "");
   lines.push(heading("Session"), "  " + row("Calls checked", String(view.calls), inner - 2), "  " + row("Costly cache breaks", String(totals.count), inner - 2));
-  if (!totals.count) return [...lines, fg("dim", "  None so far."), "", ...wrap(HOW, "dim")];
+  if (!totals.count) {
+    const none = view.calls ? "None so far." : "No call checked yet (Anthropic and OpenAI requests are read).";
+    return [...lines, ...wrap(none, "dim", "  "), "", ...wrap(HOW, "dim")];
+  }
   lines.push("  " + row("Tokens rewritten", tokens(totals.rewritten), inner - 2));
   if (totals.cost > 0) lines.push("  " + row("Estimated extra cost", extra(totals.cost), inner - 2));
 

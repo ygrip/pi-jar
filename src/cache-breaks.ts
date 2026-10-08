@@ -392,7 +392,7 @@ export class CacheBreakTracker {
     this.pending = undefined;
     const prompt = contextTokens(call.usage);
     if (!prompt) return undefined; // Nothing reached the provider: keep the last good baseline.
-    this.calls++;
+    if (pending) this.calls++; // Only calls whose prompt was fingerprinted can be checked.
     this.cacheSeen ||= count(call.usage?.cacheRead) + count(call.usage?.cacheWrite) > 0;
     this.baseline = pending ? { segments: pending.segments, prompt, at: call.at } : undefined;
     // Providers that never report caching make every call look cold, so wait for the first sign of it.
@@ -460,7 +460,7 @@ export interface SessionRef { sessionManager: { getSessionId(): string } }
 export interface CacheBreakOptions {
   /** Runtime-toggleable setting; the caller owns its persisted value. */
   enabled(): boolean;
-  /** Directory of the per-session logs, for tests; Pi's agent directory by default. */
+  /** Directory of the per-session logs; `pi-jar-cache-breaks` in Pi's agent directory by default (tests pass their own). */
   directory?: string;
 }
 
