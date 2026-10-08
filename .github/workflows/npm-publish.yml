@@ -4,12 +4,19 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (e.g. v0.2.4)'
+        required: true
+        type: string
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
-  group: npm-publish-${{ github.ref }}
+  group: npm-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -19,21 +26,26 @@ jobs:
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-          cache: npm
+          package-manager-cache: false
 
       - name: Verify tag matches package version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           test "$PACKAGE_NAME" = "pi-jar" || { echo "Unexpected npm package: $PACKAGE_NAME"; exit 1; }
-          test "${GITHUB_REF_NAME}" = "v${PACKAGE_VERSION}" || { echo "Tag ${GITHUB_REF_NAME} does not match package version v${PACKAGE_VERSION}"; exit 1; }
+          test "$RELEASE_TAG" = "v${PACKAGE_VERSION}" || { echo "Tag $RELEASE_TAG does not match package version v${PACKAGE_VERSION}"; exit 1; }
+          test "$(git tag --points-at HEAD | grep -Fx "$RELEASE_TAG")" = "$RELEASE_TAG" || { echo "Tag $RELEASE_TAG does not point to checked-out commit"; exit 1; }
 
       - name: Install dependencies
         run: npm ci
@@ -47,7 +59,5 @@ jobs:
       - name: Preview package contents
         run: npm pack --dry-run
 
-      - name: Publish to npm
+      - name: Publish to npm (trusted publishing)
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
