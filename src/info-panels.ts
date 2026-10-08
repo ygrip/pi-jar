@@ -1,6 +1,8 @@
 import { getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
+import { cacheBreakLines } from "./cache-breaks-view.ts";
+import type { CacheBreakState } from "./cache-breaks.ts";
 import { contextBreakdown, contextLines } from "./context-view.ts";
-import { openPanel, type PanelTab } from "./panel.ts";
+import { openPanel, type Paint, type PanelTab } from "./panel.ts";
 import type { Quota } from "./quota.ts";
 import type { SideUsage } from "./side-model.ts";
 import { collectUsage, usageLines } from "./usage-view.ts";
@@ -16,6 +18,8 @@ export interface InfoPanelDeps {
   quotaEnabled(): boolean;
   /** Start a limit lookup when nothing fresh is cached: opening `/usage` is an explicit request. */
   refreshQuota(ctx: ExtensionContext): void;
+  /** Costly prompt-cache breaks of this session for the Cache tab and `/cache-breaks`; omitted when unavailable. */
+  cacheBreaks?(ctx: ExtensionContext): CacheBreakState;
 }
 
 function reserveTokens(ctx: ExtensionContext): number {
@@ -48,7 +52,7 @@ export function contextFor(pi: ExtensionAPI, ctx: ExtensionContext, options?: Pr
   });
 }
 
-/** `/usage` and `/context`: one tabbed panel, like Claude's usage and context views. */
+/** `/usage`, `/context` and `/cache-breaks`: one tabbed panel, like Claude's usage and context views. */
 export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void {
   let parts: PromptParts | undefined;
   pi.on("before_agent_start", (event) => {
@@ -76,7 +80,8 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
       { name: "Context", render: (width, fg) => {
         context ??= contextFor(pi, ctx, parts);
         return contextLines(context, width, fg);
-      } }
+      } },
+      ...(deps.cacheBreaks ? [{ name: "Cache", render: (width: number, fg: Paint) => cacheBreakLines({ ...deps.cacheBreaks!(ctx), now: Date.now() }, width, fg) }] : [])
     ];
   };
   const plain = (_color: string, text: string) => text;
@@ -90,4 +95,5 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
   };
   pi.registerCommand("usage", { description: "Session cost, tokens per model and plan limits (pi-jar)", handler: async (_args, ctx) => open(ctx, 0) });
   pi.registerCommand("context", { description: "Breakdown of what fills the context window (pi-jar)", handler: async (_args, ctx) => open(ctx, 1) });
+  if (deps.cacheBreaks) pi.registerCommand("cache-breaks", { description: "Costly prompt-cache breaks in this session and what changed (pi-jar)", handler: async (_args, ctx) => open(ctx, 2) });
 }

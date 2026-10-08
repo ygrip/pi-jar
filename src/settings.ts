@@ -25,6 +25,8 @@ export interface JarVisualSettings {
   advisorGates: boolean;
   /** Opt-in provider-context pruning of reasoning from completed earlier user turns. */
   contextDiet: boolean;
+  /** Explain prompt-cache breaks: which tool, system section or message changed when a call re-sent cached context. */
+  cacheDiagnostics: boolean;
   /** Context-size guard: past softTokens, suggest /compact or /new, or compact at the next safe point. */
   contextBudget: ContextBudget;
   /** Opt-in: an unchanged repeated `read` of the same range returns a short stub instead of the content. */
@@ -57,7 +59,7 @@ export function isMaxSubagents(value: unknown): value is MaxSubagents {
 
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 2, advisor: true, advisorGates: false, contextDiet: false, contextBudget: { ...DEFAULT_CONTEXT_BUDGET }, readCache: false, icons: "unicode", footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 2, advisor: true, advisorGates: false, contextDiet: false, cacheDiagnostics: true, contextBudget: { ...DEFAULT_CONTEXT_BUDGET }, readCache: false, icons: "unicode", footer: { ...footer } };
 }
 
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
@@ -91,6 +93,7 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     advisor: typeof value.advisor === "boolean" ? value.advisor : fallback.advisor,
     advisorGates: typeof value.advisorGates === "boolean" ? value.advisorGates : fallback.advisorGates,
     contextDiet: typeof value.contextDiet === "boolean" ? value.contextDiet : fallback.contextDiet,
+    cacheDiagnostics: typeof value.cacheDiagnostics === "boolean" ? value.cacheDiagnostics : fallback.cacheDiagnostics,
     contextBudget: parseContextBudget(value.contextBudget) ?? fallback.contextBudget,
     readCache: typeof value.readCache === "boolean" ? value.readCache : fallback.readCache,
     icons: ICON_SETS.some((set) => set === value.icons) ? value.icons as IconSet : fallback.icons,
