@@ -20,7 +20,7 @@ The showcase is captured from a real pi-jar terminal session: the torch-style `�
 | **Goal mode** | Set an outcome; the agent must break it into tracked tasks and keeps working until they are done, then an **auditor** pass verifies the goal before it can be marked complete. |
 | **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `implement`, `advisor`, `moderator`, `scout`, `worker`, `reviewer`, `task`, `commit`, plus your own) with aliases, effort, per-role fallback models and project overrides. |
 | **Advisor** | A second-opinion model: the agent calls `jar_advisor` when you ask or after two failed attempts, `/advisor [focus]` asks on demand, and opt-in automatic gates consult it when the agent repeats the same tool call or keeps failing. |
-| **Usage & context** | `/usage` shows session cost and tokens per model (advisor and commit calls included) and plan-limit bars with reset times; `/context` draws a grid of what fills the context window, with a per-file, per-skill and per-tool breakdown. |
+| **Usage & context** | `/usage` shows session cost and tokens per model (advisor and commit calls included) and plan-limit bars with reset times; `/context` draws a grid of what fills the context window, with a per-file, per-skill and per-tool breakdown; `/cache-breaks` names the tool, system section or message whose change forced a costly prompt-cache rewrite. |
 | **Commit** | `/jar commit [note]` drafts a message for the staged changes with the `commit` role, lets you edit it, then commits (never pushes). |
 | **Tasks & questions** | A Claude/omp-style `jar_todo` checklist with subtasks and per-task progress that the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
 | **Change review** | Every file the agent or its editing subagents change is remembered as it was; `/diff` (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) shows changed files (each counted once) next to a colored diff, with accept or revert per file or all at once. |
@@ -59,6 +59,7 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | `/profiles` | Create or switch profiles. `/profiles new` creates (name and theme, then roles), `/profiles <name>` switches. |
 | `/advisor [focus]` | Ask the advisor for a second opinion on the current work; the answer joins the conversation. |
 | `/usage` · `/context` | Usage (cost, tokens per model, plan limits) and context-window breakdown in one tabbed panel. |
+| `/cache-breaks` | The panel's **Cache** tab: costly prompt-cache breaks in this session, what changed, tokens rewritten and the estimated extra cost. See [Cache break diagnostics](#cache-break-diagnostics). |
 | `/jar commit [note]` | Draft a commit message for the staged changes with the `commit` role, edit it, and commit. Offers `git add -A` when nothing is staged. |
 | `/jar` · `/jar settings` | Visual and workflow preferences. |
 | `/jar status` | One-line status summary. |
@@ -250,10 +251,37 @@ This is a pi-jar enhancement: [pi-advisor](https://github.com/philipbrembeck/pi-
 
 ## Usage and context
 
-`/usage` and `/context` open one tabbed panel (<kbd>Tab</kbd> switches, <kbd>Esc</kbd> closes):
+`/usage`, `/context` and `/cache-breaks` open one tabbed panel (<kbd>Tab</kbd> switches, <kbd>Esc</kbd> closes):
 
 - **Usage** — total cost, duration, prompts and responses, tokens (input, output, cache read/write); a per-model breakdown including advisor and commit calls; and, for Anthropic and OpenAI Codex subscriptions, 5-hour and weekly limit bars with reset times (lookups follow `/jar quota on|off`). A failed lookup shows its reason (for example the provider's HTTP 429 rate limit) and when it retries, instead of loading indefinitely.
 - **Context** — a 10×10 grid (each cell ≈ 1% of the window) beside a legend: system prompt, tools, context files, skills, compaction summary, user and assistant messages, tool results, extension messages, free space and the autocompact buffer. Parts are estimated at ~4 characters per token and scaled to the provider-reported total when one is known; context files, skills and tools are listed individually below.
+- **Cache** — the costly prompt-cache breaks of this session with totals by cause; see below.
+
+### Cache break diagnostics
+
+Providers cache a prompt as an ordered prefix: tools, then the system prompt, then the messages. Change anything early in a request and the provider re-processes, and bills again, everything after it. Pi tells you *that* a call missed the cache; pi-jar tells you *what changed*. It is on by default (**`/jar settings` → Pi → Cache diagnostics**, saved per profile) and only observes: it never modifies a request or a message.
+
+- **How it finds the change.** For every provider request pi-jar reduces the final payload (Anthropic Messages, OpenAI Responses and Chat Completions; other shapes are skipped) to an ordered list of segments: the model, each tool, each system-prompt section (`<tools>`, `<skills>`, … or markdown headings and paragraphs) and each message, labelled by role or tool name. A segment keeps only a hash and a size, never content, and the cache markers that move with every call are ignored. The first segment where the previous request is no longer a prefix of this one is the change.
+- **When it matters.** The call's own usage decides. A *costly break* is a call whose cache read fell more than 4,096 tokens short of the previous prompt, or that read nothing from a prompt over 8,192 tokens. Appending messages never is one. The first call of a session, and the first after compaction or tree navigation (which rewrite the history on purpose), have nothing to compare with, and providers that never report cache reads are skipped.
+- **What you see.** One warning per costly break, with the extra cost estimated from the call's own prices, and the **Cache** tab (`/cache-breaks`) with totals by cause:
+
+  ```text
+  cache break: tools changed (+jendral_build_get, +17 more) — rewrote 235k tokens (~$1.89)
+  ```
+
+  | Cause | Reading it |
+  | --- | --- |
+  | `tools changed (+a, -b, ~c)` | Tools were added, removed or redefined, or `reordered`. Activating tools mid-session (an MCP server, a tool package) rewrites the whole prompt. |
+  | `system prompt changed (~<skills>)` | The named sections changed (`~`), appeared (`+`) or went (`-`). |
+  | `message 14/87 shrank (tool result: read, 52k → 98 chars, 73 from the end)` | An earlier message was rewritten, for example by an extension that replaces old tool results with placeholders; everything after it is re-processed. `first change` in the tab gives its position in the ordered prompt. |
+  | `history shortened (87 → 40 messages)` | Messages were dropped from the end of the history. |
+  | `model changed (a → b)` | A different model or provider has its own cache. |
+  | `cache expired after 12m idle` | The prompt is unchanged, but more than about 5 minutes passed since the cache was last warm (Pi's cache warming counts). |
+  | `no prompt change found` | The prefix is identical, so the content of the prompt does not explain the miss: provider-side eviction, or a request setting outside the fingerprint such as the thinking level or `tool_choice`. |
+
+  A change is followed by `, after 12m idle` when the cache had also lapsed.
+- **Where it is kept.** Each costly break is appended as one JSON line to `pi-jar-cache-breaks/<session id>.jsonl` in Pi's agent directory, so it survives `/reload` and resuming the session: `timestamp`, `request` (provider calls pi-jar has seen for the session), `kind`, `summary`, `segment` and `first` (the first changed segment), `model`, `promptTokens`, `cacheReadTokens`, `rewrittenTokens`, `costUsd` and `idleMs`. Hashes and prompt text are never written.
+- **Limits.** pi-jar fingerprints the payload as it sees it; a `before_provider_request` handler of an extension loaded after pi-jar can still change it. Subagent processes do not run the diagnostic.
 
 ## Tasks, questions and history
 
@@ -286,7 +314,7 @@ This is a pi-jar enhancement: [pi-advisor](https://github.com/philipbrembeck/pi-
 
 - **Appearance** — accent, motion, rounded composer, Ember mascot, next-prompt suggestions, pi-jar UI, icons (`unicode` default, `nerd` for a [Nerd Font](https://www.nerdfonts.com) terminal like omp's nerd preset, `ascii` for plain labels).
 - **Footer** — field visibility. In fullscreen mode the session name (or `sessions` for an unnamed session) opens the session picker and each subagent/shell row opens the activity view. SoL-Pi's savings status is not repeated in the footer (it already notifies).
-- **Pi** — mouse clicks (Pi fullscreen mode), copy on select, goal auto rounds, **Max subagents** (explicit choice then Save; default 2, existing saved values are kept), advisor, advisor gates (default off), context diet, context budget and its limit, repeated-read stub.
+- **Pi** — mouse clicks (Pi fullscreen mode), copy on select, goal auto rounds, **Max subagents** (explicit choice then Save; default 2, existing saved values are kept), advisor, advisor gates (default off), context diet, cache diagnostics (default on), context budget and its limit, repeated-read stub.
 
 pi-jar preferences are saved in `pi-jar-settings.json` in Pi's agent directory; the Pi tab writes Pi's own settings.
 
@@ -301,6 +329,7 @@ pi-jar/
 ├── extensions/index.ts   extension entry: wiring, welcome, footer, commands
 ├── src/
 │   ├── context-budget.ts context budget, per-call cost average, topic and cold-cache hints
+│   ├── cache-breaks.ts   prompt-cache break diagnostics: payload fingerprints, diff, usage correlation, JSONL log; cache-breaks-view.ts is its tab
 │   ├── flame.ts          pixel fire simulation
 │   ├── mascot.ts         Ember's moods and sprites
 │   ├── composer.ts       rounded composer, ghost text, mouse mapping

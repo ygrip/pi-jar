@@ -495,7 +495,7 @@ test("the Cache tab totals the breaks, ranks causes by cost and lists each with 
   assert.match(text, /#31[\s\S]*message 14\/87 shrank[\s\S]*first change: message tool result: read \(segment 44\)/);
   assert.match(text, /#40[\s\S]*no prompt change found/);
   assert.match(text, /Log: \/var\/pi\/s1\.jsonl/);
-  assert.match(text, /more than 4\.1k tokens short of the\s+previous prompt/);
+  assert.match(text, /more than 4,096 tokens short of the\s+previous prompt/);
   const longPath = "/var/folders/ys/yhg5j9_j4bl16cmjnqbs_gzm0000gp/T/pi-jar-cache-breaks/019a1234-5678-7abc-9def-0123456789ab.jsonl";
   for (const width of [40, 60, 80, 120]) {
     for (const enabled of [true, false]) {
@@ -510,7 +510,7 @@ test("the Cache tab explains an empty session and a disabled diagnostic", () => 
   const empty = cacheBreakLines({ enabled: true, calls: 5, breaks: [], file: undefined, now: T0 }, 80, plain).join("\n");
   assert.match(empty, /Calls checked\s+5/);
   assert.match(empty, /None so far\./);
-  assert.match(empty, /A break is a call whose cache read fell more than 4\.1k tokens/);
+  assert.match(empty, /A break is a call whose cache read fell more than 4,096 tokens/);
   const off = cacheBreakLines({ enabled: false, calls: 0, breaks: [entry()], file: undefined, now: T0 }, 80, plain).join("\n");
   assert.match(off, /Cache diagnostics are off\. Turn them on in \/jar settings → Pi\./);
   assert.match(off, /Costly cache breaks\s+1/);

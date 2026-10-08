@@ -7,7 +7,7 @@ const CAUSES: Record<BreakKind, string> = {
   model: "model switch", tools: "tool list changed", system: "system prompt changed", message: "message changed",
   truncated: "history shortened", idle: "cache expired (idle)", unknown: "no prompt change found"
 };
-const HOW = `A break is a call whose cache read fell more than ${tokens(BREAK_SHORTFALL_TOKENS)} tokens short of the previous prompt.`;
+const HOW = `A break is a call whose cache read fell more than ${BREAK_SHORTFALL_TOKENS.toLocaleString("en-US")} tokens short of the previous prompt.`;
 
 const pad = (value: number) => String(value).padStart(2, "0");
 

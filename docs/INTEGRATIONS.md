@@ -74,7 +74,7 @@ Mode-specific tools are deactivated when their mode is off, so their schema and 
 
 ## Commands that overlap other packages
 
-pi-jar registers `/usage`, `/context` and `/advisor`. Pi keeps both commands when two extensions register the same name and suffixes the later one (for example `/usage:2`), so remove packages whose commands you no longer need (such as a separate usage, context or advisor extension) to keep the plain names on pi-jar.
+pi-jar registers `/usage`, `/context`, `/cache-breaks` and `/advisor`. Pi keeps both commands when two extensions register the same name and suffixes the later one (for example `/usage:2`), so remove packages whose commands you no longer need (such as a separate usage, context or advisor extension) to keep the plain names on pi-jar.
 
 ## Keeping sessions cheap (recommendations)
 
@@ -83,6 +83,7 @@ Every model call re-sends the whole context, so cost grows with session length f
 - **Compact earlier.** In `~/.pi/agent/settings.json` set `"compaction": { "reserveTokens": 140000, "keepRecentTokens": 20000 }`. With a 272k-window model this compacts around 130k instead of near the limit. pi-jar's context budget (`/jar settings` → Context budget) suggests `/compact` or `/new` at the same point, or compacts at the next finished task when set to `compact`.
 - **Enable heavy tool packages per project.** A package such as `pi-mono-figma` (~20 tools) sends every schema on every call; enable it only in projects that use it.
 - **Load each MCP server once.** Use codebase-memory either through the lazy `mcp` proxy **or** as direct tools, not both.
+- **Activate tools at startup, not mid-session.** Changing the tool list, the system prompt or an earlier message makes the provider re-process the whole prefix after it: an MCP server or tool package switched on halfway through a long session rewrote ~230k tokens on every call until the cache caught up. pi-jar announces costly cache breaks and `/cache-breaks` lists what changed (see [Cache break diagnostics](../README.md#cache-break-diagnostics)).
 - **Review rarely used packages** (for example `i-have-adhd`, `pi-mono-loop`, `pi-mono-btw`) and enable them per project.
 - **One task per session.** Start `/new` when the next request is unrelated; pi-jar suggests it when a finished checklist is followed by a new prompt in a large context.
 - **Measure.** `node scripts/session-cost.mjs <session.jsonl | id>` (in a pi-jar checkout) reports calls, the cost split, context buckets, repeated reads, tool counts and cache misses for one session.
