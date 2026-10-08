@@ -42,9 +42,9 @@ export async function openJarSettings(
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
     let choosing: "goalRounds" | "maxSubagents" | "contextBudget" | undefined;
     const choices = () => choosing === "maxSubagents" ? MAX_SUBAGENT_CHOICES : choosing === "contextBudget" ? CONTEXT_BUDGET_CHOICES : GOAL_ROUND_CHOICES;
-    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 10 : page === "profiles" ? 2 : 7;
+    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 11 : page === "profiles" ? 2 : 7;
     // Back on the row that opened the picker.
-    const finishChoice = () => { selected = choosing === "maxSubagents" ? 3 : choosing === "contextBudget" ? 8 : 2; choosing = undefined; };
+    const finishChoice = () => { selected = choosing === "maxSubagents" ? 3 : choosing === "contextBudget" ? 9 : 2; choosing = undefined; };
     const piError = (error: unknown) => ctx.ui.notify("Could not change Pi setting: " + (error as Error).message, "error");
     const explainPool = () => choosing === "maxSubagents" || (page === "pi" && !choosing && selected === 3);
     const pageSize = () => Math.min(fields(), Math.max(4, (process.stdout.rows ?? 24) - (explainPool() ? 10 : 9)));
@@ -78,15 +78,16 @@ export async function openJarSettings(
         else if (index === 4) update({ ...state, advisor: !state.advisor });
         else if (index === 5) update({ ...state, advisorGates: !state.advisorGates });
         else if (index === 6) update({ ...state, contextDiet: !state.contextDiet });
-        else if (index === 7) {
+        else if (index === 7) update({ ...state, cacheDiagnostics: !state.cacheDiagnostics });
+        else if (index === 8) {
           const at = CONTEXT_BUDGET_ACTIONS.indexOf(state.contextBudget.action);
           update({ ...state, contextBudget: { ...state.contextBudget, action: CONTEXT_BUDGET_ACTIONS[(at + 1) % CONTEXT_BUDGET_ACTIONS.length]! } });
         }
-        else if (index === 8) {
+        else if (index === 9) {
           choosing = "contextBudget";
           selected = Math.max(0, CONTEXT_BUDGET_CHOICES.indexOf(state.contextBudget.softTokens as never));
         }
-        else if (index === 9) update({ ...state, readCache: !state.readCache });
+        else if (index === 10) update({ ...state, readCache: !state.readCache });
       } else if (index === 0) {
         const at = Math.max(0, accents.indexOf(state.accent));
         update({ ...state, accent: accents[(at + 1) % accents.length]! });
@@ -176,9 +177,10 @@ export async function openJarSettings(
             row(4, "Advisor (jar_advisor, /advisor)", state.advisor ? "ON" : "OFF", state.advisor),
             row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates),
           row(6, "Context diet (prior-turn reasoning)", state.contextDiet ? "ON" : "OFF", state.contextDiet),
-            row(7, "Context budget (past the limit)", state.contextBudget.action.toUpperCase(), budgetOn),
-            row(8, "Context budget limit", formatTokens(state.contextBudget.softTokens), budgetOn),
-            row(9, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache)
+            row(7, "Cache diagnostics (explain cache breaks)", state.cacheDiagnostics ? "ON" : "OFF", state.cacheDiagnostics),
+            row(8, "Context budget (past the limit)", state.contextBudget.action.toUpperCase(), budgetOn),
+            row(9, "Context budget limit", formatTokens(state.contextBudget.softTokens), budgetOn),
+            row(10, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache)
           ] : page === "profiles" ? [
             row(0, "Switch profile…", profiles!.activeName(), true),
             row(1, "Create profile…", "OPEN", true)
@@ -200,8 +202,9 @@ export async function openJarSettings(
           line(theme.fg("dim", explainPool() ? " Live pool includes idle/paused subagents"
             : choosing ? " Select a value; Enter/click to save, Esc to cancel"
             : page === "footer" ? ` Footer fields ${start + 1}–${start + rows.length}/${fields()}`
-            : page === "pi" ? (selected === 7 || selected === 8 ? " Past the limit: suggest /compact or /new, or compact at a safe point"
-              : selected === 9 ? " An unchanged re-read of the same range returns a short stub" : " Fullscreen mode enables clicks and copy-on-select")
+            : page === "pi" ? (selected === 7 ? " Names what changed when a call re-sent cached context (/cache-breaks)"
+              : selected === 8 || selected === 9 ? " Past the limit: suggest /compact or /new, or compact at a safe point"
+              : selected === 10 ? " An unchanged re-read of the same range returns a short stub" : " Fullscreen mode enables clicks and copy-on-select")
             : page === "profiles" ? " Switch only in a fresh, idle session; roles via /roles" : " Accent cycles through loaded themes")),
           ...rows,
           line(theme.fg("dim", choosing ? " ↑↓: choose · Enter/click: save · Esc: cancel"

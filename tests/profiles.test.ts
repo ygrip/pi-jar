@@ -34,6 +34,33 @@ test("malformed context-diet preferences are rejected rather than enabled", temp
   assert.throws(() => new ProfileStore(dir), /Malformed profile entry/);
 }));
 
+test("cache diagnostics are on by default, saved per profile, and older profiles load without rewriting", temp((dir) => {
+  new ProfileStore(dir);
+  const file = join(dir, PROFILE_FILE);
+  const legacy = JSON.parse(readFileSync(file, "utf8"));
+  delete legacy.profiles[0].settings.cacheDiagnostics;
+  const original = JSON.stringify(legacy);
+  writeFileSync(file, original);
+  const store = new ProfileStore(dir);
+  assert.equal(store.active().settings.cacheDiagnostics, true);
+  assert.equal(readFileSync(file, "utf8"), original);
+  store.add("Quiet", "dark", { ...defaultVisualSettings(), cacheDiagnostics: false });
+  const restarted = new ProfileStore(dir);
+  assert.equal(restarted.list()[0]!.settings.cacheDiagnostics, true);
+  assert.equal(restarted.list()[1]!.settings.cacheDiagnostics, false);
+  restarted.update("Quiet", { settings: { ...restarted.list()[1]!.settings, cacheDiagnostics: true } });
+  assert.equal(new ProfileStore(dir).list()[1]!.settings.cacheDiagnostics, true);
+}));
+
+test("malformed cache-diagnostics preferences are rejected rather than enabled or disabled", temp((dir) => {
+  new ProfileStore(dir);
+  const file = join(dir, PROFILE_FILE);
+  const doc = JSON.parse(readFileSync(file, "utf8"));
+  doc.profiles[0].settings.cacheDiagnostics = "off";
+  writeFileSync(file, JSON.stringify(doc));
+  assert.throws(() => new ProfileStore(dir), /Malformed profile entry/);
+}));
+
 test("profiles persist stable IDs, themes and role maps across restart; cycles safely", temp((dir) => {
   const store = new ProfileStore(dir, "pi-jar-dark-violet", { version: 2, roles: { default: "openai/gpt-test" } });
   assert.equal(store.active().theme, "pi-jar-dark-violet");

@@ -42,6 +42,7 @@ function normalizeProfile(value: unknown): JarProfile | undefined {
     || typeof settings.composer !== "boolean" || typeof settings.mascot !== "boolean" || typeof settings.suggestions !== "boolean"
     || typeof settings.advisor !== "boolean" || typeof settings.advisorGates !== "boolean"
     || (settings.contextDiet !== undefined && typeof settings.contextDiet !== "boolean")
+    || (settings.cacheDiagnostics !== undefined && typeof settings.cacheDiagnostics !== "boolean")
     || (settings.contextBudget !== undefined && !parseContextBudget(settings.contextBudget))
     || (settings.readCache !== undefined && typeof settings.readCache !== "boolean") || !Number.isInteger(settings.goalRounds)
     || (settings.goalRounds as number) < 1 || (settings.goalRounds as number) > 50
@@ -54,7 +55,7 @@ function normalizeProfile(value: unknown): JarProfile | undefined {
   for (const [role, spec] of Object.entries(raw.roles.roles)) if (!isRoleName(role) || typeof spec !== "string" || !normalizeSpec(spec)) return undefined;
   const contextBudget = parseContextBudget(settings.contextBudget) ?? { ...DEFAULT_CONTEXT_BUDGET };
   return { id: raw.id as string, name: raw.name, theme: raw.theme, settings: { ...raw.settings, contextDiet: settings.contextDiet ?? false,
-    contextBudget, readCache: settings.readCache ?? false } as unknown as JarVisualSettings, roles: parseRoleConfig(raw.roles) };
+    cacheDiagnostics: settings.cacheDiagnostics ?? true, contextBudget, readCache: settings.readCache ?? false } as unknown as JarVisualSettings, roles: parseRoleConfig(raw.roles) };
 }
 function atomicSave(file: string, document: ProfileDocument): string {
   mkdirSync(join(file, ".."), { recursive: true });

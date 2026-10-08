@@ -26,6 +26,7 @@ import { ModelRoleManager } from "../src/model-roles.ts";
 import { jarCommit } from "../src/commit.ts";
 import { registerAdvisor } from "../src/advisor.ts";
 import { registerContextDiet } from "../src/context-diet.ts";
+import { registerCacheBreaks } from "../src/cache-breaks.ts";
 import { registerInfoPanels } from "../src/info-panels.ts";
 import { SideUsage } from "../src/side-model.ts";
 import { PlanMode } from "../src/plan.ts";
@@ -320,10 +321,13 @@ export default function piJar(pi: ExtensionAPI): void {
   const modelRoles = new ModelRoleManager(pi);
   const sideUsage = new SideUsage();
   registerContextDiet(pi, () => visualSettings.contextDiet === true);
+  // Observe-only: explains costly prompt-cache breaks; subagent processes have no UI to tell.
+  const cacheBreaks = registerCacheBreaks(pi, { enabled: () => !delegatedChild && visualSettings.cacheDiagnostics !== false });
   const advisor = registerAdvisor(pi, modelRoles, { enabled: () => !delegatedChild && visualSettings.advisor, gates: () => !delegatedChild && visualSettings.advisorGates, usage: sideUsage });
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()),
     quotaFailure: (ctx) => quotaCache?.failure(ctx.model?.provider, Date.now()),
+    cacheBreaks: (ctx) => cacheBreaks.state(ctx),
     refreshQuota: (ctx) => { quotaCache?.refresh(ctx.model?.provider, welcomeStatuses(), Date.now()); } });
   let followingTheme: string | undefined;
   const profileEntries = (ctx: ExtensionContext): readonly unknown[] => {

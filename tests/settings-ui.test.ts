@@ -109,3 +109,46 @@ test("goal rounds shares the explicit picker and cancels without persisting", as
   } };
   await openJarSettings(ctx as never, () => state, (next) => { state = next; saves++; }, []);
 });
+
+test("cache diagnostics toggle sits right after context diet and the later rows keep working", async () => {
+  let state = startState();
+  let saves = 0;
+  const ctx = { hasUI: true, mode: "tui", ui: {
+    custom: async (factory: Function) => {
+      const pane: Pane = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text }, {}, () => {});
+      const text = () => pane.render(80).join("\n");
+      const down = (times: number) => { for (let i = 0; i < times; i++) pane.handleInput("\x1b[B"); };
+      pane.handleInput("\t"); pane.handleInput("\t");
+      assert.ok(text().indexOf("Context diet") < text().indexOf("Cache diagnostics") && text().indexOf("Cache diagnostics") < text().indexOf("Context budget (past the limit)"));
+      assert.match(text(), /Cache diagnostics \(explain cache breaks\)\s+ON/);
+      down(7);
+      assert.match(text(), /❯ Cache diagnostics \(explain cache breaks\)\s+ON/);
+      assert.match(text(), /Names what changed when a call re-sent cached context \(\/cache-breaks\)/);
+      pane.handleInput(" ");
+      assert.equal(state.cacheDiagnostics, false);
+      assert.equal(saves, 1);
+      assert.match(text(), /Cache diagnostics \(explain cache breaks\)\s+OFF/);
+      assert.equal(state.contextDiet, false, "the neighbouring toggle is untouched");
+      pane.handleInput("\r");
+      assert.equal(state.cacheDiagnostics, true);
+
+      // Context budget action, its limit picker and the repeated-read stub moved down one row each.
+      down(1);
+      pane.handleInput(" ");
+      assert.equal(state.contextBudget.action, "compact");
+      down(1);
+      pane.handleInput("\r");
+      assert.match(text(), /CONTEXT BUDGET · SOFT LIMIT/);
+      pane.handleInput("\x1b[B"); pane.handleInput("\r");
+      assert.equal(state.contextBudget.softTokens, 160_000);
+      assert.match(text(), /❯ Context budget limit\s+160k/, "back on the row that opened the picker");
+      down(1);
+      pane.handleInput(" ");
+      assert.equal(state.readCache, true);
+      assert.equal(state.cacheDiagnostics, true);
+      pane.handleInput("\x1b[B"); // wraps to the first Pi row
+      assert.match(text(), /❯ Mouse clicks/);
+    }
+  } };
+  await openJarSettings(ctx as never, () => state, (next) => { state = next; saves++; }, []);
+});

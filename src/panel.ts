@@ -5,7 +5,7 @@ import { RowCache } from "./row-cache.ts";
 export type Paint = (color: string, text: string) => string;
 export interface PanelTab { name: string; render(width: number, fg: Paint): string[] }
 
-/** Tabbed, scrollable info panel (Usage / Context). Tab or click switches tabs; Esc closes. */
+/** Tabbed, scrollable info panel (Usage / Context / Cache). Tab or click switches tabs; Esc closes. */
 export async function openPanel(ctx: ExtensionContext, tabs: readonly PanelTab[], initial = 0): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
   await ctx.ui.custom<void>((tui, theme, _keys, done) => {

@@ -43,7 +43,7 @@ npm run check      # tsc --noEmit
 npm test           # node:test suites in tests/
 ```
 
-Tests isolate `PI_CODING_AGENT_DIR`, so they never touch your real preferences. Suites cover the flame simulation, welcome layout and hit-testing, composer framing/expansion/ghost text/mouse mapping, the mascot, plan mode (guards, submission, reminders, restore), the plan view, plan parsing, the goal loop, roles v2, suggestions and settings.
+Tests isolate `PI_CODING_AGENT_DIR`, so they never touch your real preferences. Suites cover the flame simulation, welcome layout and hit-testing, composer framing/expansion/ghost text/mouse mapping, the mascot, plan mode (guards, submission, reminders, restore), the plan view, plan parsing, the goal loop, roles v2, suggestions, settings and the cache-break diagnostic (payload fingerprints for Anthropic and OpenAI shapes, diff classification, usage correlation, the `/cache-breaks` tab). `tests/cache-payloads.ts` builds the provider payloads those suites share.
 
 Manual smoke test (offline, throwaway agent directory, nothing sent to a model):
 
@@ -61,6 +61,7 @@ Then check:
 - `/jar activity`: select a subagent or background shell, scroll its live transcript/output, pause and resume follow, `Tab` into a subagent's transcript and expand/collapse entries, steer it with `s`, and stop/kill only the selected run;
 - `/roles`: the split manager, `n` new role, `a` alias, `s` scope;
 - `/plan`: the status shows `◆ PLAN · read-only` and a directory appears under `$TMPDIR/pi-jar/plans/`.
+- `/cache-breaks`: a fresh session reports no breaks and `/usage` has a **Cache** tab; with a logged-in model, activate an extra tool (or edit an earlier message through an extension) mid-session and expect `cache break: …` after the next call, plus a line in `pi-jar-cache-breaks/<session id>.jsonl` under the temporary agent directory; **Pi → Cache diagnostics** off silences both.
 
 For pointer interaction start with `--tui-mode fullscreen` (or enable **Pi → Mouse clicks** and restart). Check that welcome actions fire once per press, that footer activity rows open their matching details, that the footer session indicator opens search, that clicking composer text moves the cursor, that clicking Ember pokes it, that plan-view headings and actions respond to clicks and the wheel, and that selecting text anywhere still copies it. In regular mode use `/jar activity` and `/jar sessions` instead.
 

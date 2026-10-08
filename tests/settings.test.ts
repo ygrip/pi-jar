@@ -84,6 +84,23 @@ test("context budget and read cache fall back on invalid stored values and persi
     assert.deepEqual(loadVisualSettings(dir), settings);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+test("cache diagnostics default on, ignore invalid stored values and persist an explicit off", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-jar-cache-settings-"));
+  try {
+    assert.equal(defaultVisualSettings().cacheDiagnostics, true);
+    assert.equal(loadVisualSettings(dir).cacheDiagnostics, true);
+    writeFileSync(join(dir, SETTINGS_FILE), JSON.stringify({ version: 1, goalRounds: 12 }));
+    assert.equal(loadVisualSettings(dir).cacheDiagnostics, true, "settings saved before the option existed keep it on");
+    for (const invalid of ["off", 0, null, {}, []]) {
+      writeFileSync(join(dir, SETTINGS_FILE), JSON.stringify({ version: 1, cacheDiagnostics: invalid }));
+      assert.equal(loadVisualSettings(dir).cacheDiagnostics, true);
+    }
+    const off = { ...defaultVisualSettings(), cacheDiagnostics: false };
+    saveVisualSettings(dir, off);
+    assert.equal(JSON.parse(readFileSync(join(dir, SETTINGS_FILE), "utf8")).cacheDiagnostics, false);
+    assert.deepEqual(loadVisualSettings(dir), off);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("malformed retired footer files are ignored without being touched", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-jar-invalid-legacy-"));
