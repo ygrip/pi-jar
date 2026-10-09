@@ -119,7 +119,8 @@ test("settings pane supports fullscreen clicks, keyboard operation and narrow wi
   let renders = 0;
   const ctx = { hasUI: true, mode: "tui", ui: {
     custom: async (factory: Function, options: unknown) => {
-      assert.deepEqual(options, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%", margin: 0 } });
+      assert.equal(typeof (options as any).overlayOptions.visible, "function");
+      assert.deepEqual({ ...(options as any), overlayOptions: { ...(options as any).overlayOptions, visible: undefined } }, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%", margin: 0, visible: undefined } });
       pane = factory({ requestRender() { renders++; } }, { fg: (_color: string, text: string) => text }, {}, () => { closed = true; });
       for (const width of [16, 40, 64]) assert.ok(pane!.render(width).every((line) => visibleWidth(line) <= width));
       pane!.render(64);

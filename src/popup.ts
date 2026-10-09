@@ -1,6 +1,14 @@
 import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, stripTerminalSequences, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
+let priorityPopups = 0;
+/** Hide ordinary jar overlays while a blocking question owns the screen. */
+export function acquirePopupPriority(): () => void {
+  priorityPopups++;
+  let released = false;
+  return () => { if (!released) { released = true; priorityPopups--; } };
+}
+
 type Factory<T> = (tui: TUI, theme: Theme, keys: KeybindingsManager, done: (result: T) => void) => Component & { dispose?(): void };
 export interface PopupOptions {
   /** Views with their own search/editor keep ownership of printable keys. */
@@ -91,5 +99,5 @@ export function popup<T>(ctx: ExtensionContext, factory: Factory<T>, options: Po
         return [header, ...body, footer].slice(0, height).map((line) => truncateToWidth(line, width));
       }
     };
-  }, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%", margin: 0 } });
+  }, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%", margin: 0, visible: () => priorityPopups === 0 } });
 }

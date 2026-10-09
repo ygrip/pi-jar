@@ -93,6 +93,8 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 
 ## Popup navigation
 
+Pi-jar questions (`jar_ask`) sit at the bottom above other pi-jar popups, which resume when the question finishes. Their compact option list supports ↑/↓ selection, PgUp/PgDn or wheel scrolling, and shows descriptions for the selected option only.
+
 Pi-jar popups stay within the terminal viewport, including after resizing. Model, fallback, alias, theme and profile pickers filter as you type; use ↑/↓, PgUp/PgDn or the mouse wheel to move and Enter to choose. In Roles and Tasks, press `/` to search the full list, Enter to apply, and Esc while searching to clear it. Other pi-jar views support `/` to filter popup content (History and Changes retain their own search). Oversized popup chrome scrolls with the wheel or Ctrl+PgUp/PgDn.
 
 The task widget starts collapsed to a one-line summary. In fullscreen, click its heading to expand/collapse and wheel-scroll the expanded list. It uses at most a quarter of the terminal height. In regular mode use `/jar tasks expand`, `/jar tasks collapse`, or `/jar tasks scroll N`; `/jar tasks` opens the full editor, where ←/→ folds/unfolds a parent's subtasks.

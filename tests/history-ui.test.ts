@@ -16,7 +16,8 @@ async function setup(entries: unknown[]) {
   const ctx = {
     hasUI: true, mode: "tui", sessionManager: { getBranch() { reads++; return entries; } },
     ui: { async custom(factory: Function, options: unknown) {
-      assert.deepEqual(options, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%", margin: 0 } });
+      assert.equal(typeof (options as any).overlayOptions.visible, "function");
+      assert.deepEqual({ ...(options as any), overlayOptions: { ...(options as any).overlayOptions, visible: undefined } }, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%", margin: 0, visible: undefined } });
       pane = factory({ requestRender() { renders++; } }, plain, {}, () => { done = true; });
     } }
   };

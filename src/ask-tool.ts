@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { popup } from "./popup.ts";
-import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { acquirePopupPriority } from "./popup.ts";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type OverlayHandle, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { cleanText } from "./status.ts";
 
@@ -34,7 +34,9 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
   })).filter((option) => !!option.label);
   if (!ctx.hasUI || ctx.mode !== "tui" || signal?.aborted) return { kind: "cancel" };
   let abort: (() => void) | undefined;
-  try { return await popup<PickResult>(ctx, (tui, theme, _keys, complete) => {
+  const release = acquirePopupPriority();
+  let handle: OverlayHandle | undefined;
+  try { return await ctx.ui.custom<PickResult>((tui, theme, _keys, complete) => {
     const done = (result: PickResult) => { if (abort) signal?.removeEventListener("abort", abort); complete(result); };
     abort = () => done({ kind: "cancel" });
     signal?.addEventListener("abort", abort, { once: true });
@@ -51,6 +53,8 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
     let hitRows: number[] = [];
     let scroll = 0;
     let lastSelected = selected;
+    let page = 10;
+    let reveal = false;
     const totalRows = () => options.length + actions.length;
     const choose = () => {
       if (selected < options.length) {
@@ -72,6 +76,10 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
         if (matchesKey(data, Key.escape)) return done({ kind: "cancel" });
         if (matchesKey(data, Key.up)) selected = (selected + totalRows() - 1) % totalRows();
         else if (matchesKey(data, Key.down)) selected = (selected + 1) % totalRows();
+        else if (matchesKey(data, Key.pageDown)) { scroll += page; }
+        else if (matchesKey(data, Key.pageUp)) { scroll = Math.max(0, scroll - page); }
+        else if (matchesKey(data, Key.home)) { selected = 0; reveal = true; }
+        else if (matchesKey(data, Key.end)) { selected = totalRows() - 1; reveal = true; }
         else if (multi && data === "a") {
           // Select all, or clear when everything is already checked.
           if (checked.size === options.length) checked.clear(); else options.forEach((_option, at) => checked.add(at));
@@ -95,14 +103,14 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
         return { handled: true };
       },
       render(width: number): string[] {
+        // Pi exposes focus order rather than a numeric z-index; focus brings this overlay to the front.
+        if (handle && !handle.isFocused()) handle.focus();
         hitRows = [];
+        const height = Math.max(1, tui.terminal?.rows ?? process.stdout.rows ?? 24);
         const inner = Math.max(1, width - 4);
         const badge = "◆ QUESTION " + String(index + 1) + "/" + String(total) + (multi ? " · MULTI SELECT" : "");
-        const title = question.header ? cleanText(question.header, 48) : "Clarification";
-        const lines: string[] = [
-          fit(theme.fg("accent", "╭─ " + badge + " ─"), width),
-          fit(theme.fg("muted", "│ " + title), width)
-        ];
+        const title = question.header ? " · " + cleanText(question.header, 48) : "";
+        const lines: string[] = [fit(theme.fg("accent", "╭─ " + badge + title), width)];
         const content: { line: string; target?: number }[] = [];
         for (const row of wrapTextWithAnsi(cleanText(question.question, 900), inner)) content.push({ line: fit("│ " + row, width) });
         content.push({ line: fit(theme.fg("dim", "├" + "─".repeat(Math.max(0, width - 1))), width) });
@@ -111,7 +119,11 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
           const marker = multi ? (checked.has(at) ? "☑" : "☐") : (active ? "●" : "○");
           const number = String(at + 1).padStart(2, " ") + ".";
           content.push({ target: at, line: fit(theme.fg(active ? "accent" : "muted", "│ " + (active ? "❯ " : "  ") + marker + " " + number + " " + option.label), width) });
-          if (option.description) content.push({ target: at, line: fit(theme.fg("dim", "│      " + option.description), width) });
+          if (option.description && active) {
+            for (const description of wrapTextWithAnsi(option.description, Math.max(1, inner - 6)).slice(0, 2)) {
+              content.push({ target: at, line: fit(theme.fg("dim", "│      " + description), width) });
+            }
+          }
         });
         actions.forEach((action, at) => {
           const row = options.length + at;
@@ -120,24 +132,36 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
           const chip = "[ " + action.icon + " " + label + " ]";
           content.push({ target: row, line: fit(theme.fg(active ? "accent" : "dim", "│ " + (active ? "❯ " : "  ") + chip), width) });
         });
-        const page = Math.max(3, Math.min(16, (process.stdout.rows ?? 24) - 5));
-        if (selected !== lastSelected) {
+        // One viewport owns all question text/options/actions: no nested generic popup scrolling.
+        page = Math.max(1, Math.min(12, height - 2));
+        if (selected !== lastSelected || reveal) {
           const target = content.findIndex((row) => row.target === selected);
           if (target < scroll) scroll = target;
           else if (target >= scroll + page) scroll = target - page + 1;
           lastSelected = selected;
+          reveal = false;
         }
         scroll = Math.max(0, Math.min(scroll, Math.max(0, content.length - page)));
         content.slice(scroll, scroll + page).forEach((row) => {
           if (row.target !== undefined) hitRows[lines.length] = row.target;
           lines.push(row.line);
         });
-        const hint = multi ? `${checked.size}/${options.length} checked · ↑↓ move · Space/Enter toggle · a all · Esc cancel` : "↑↓ move · Enter choose · wheel scroll · Esc cancel";
+        const hint = multi ? `${checked.size}/${options.length} checked · ↑↓ · Space toggle · Enter · a all · Esc` : "↑↓ choose · Enter · Pg/wheel scroll · Esc";
         lines.push(fit(theme.fg("dim", `╰─ ${scroll + 1}–${Math.min(scroll + page, content.length)}/${content.length} · ${hint}`), width));
-        return lines.map((line) => visibleWidth(line) <= width ? line : fit(line, width));
+        if (height <= 2) {
+          const body = lines.slice(1, 1 + page);
+          const remapped = body.map((_line, row) => hitRows[row + 1]);
+          hitRows = remapped;
+          return body.slice(0, height).map((line) => fit(line, width));
+        }
+        return lines.slice(0, height).map((line) => visibleWidth(line) <= width ? line : fit(line, width));
       }
     };
-  }); } finally { if (abort) signal?.removeEventListener("abort", abort); }
+  }, {
+    overlay: true,
+    overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 0 },
+    onHandle(value) { handle = value; handle.focus(); }
+  }); } finally { release(); if (abort) signal?.removeEventListener("abort", abort); }
 }
 
 export async function askOne(ctx: ExtensionContext, question: AskQuestion, index = 0, total = 1, signal?: AbortSignal): Promise<AskAnswer> {
