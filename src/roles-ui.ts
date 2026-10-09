@@ -1,6 +1,7 @@
 import type { ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, stripTerminalSequences, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { promptText } from "./dialogs.ts";
+import { Input, Key, matchesKey, stripTerminalSequences, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { promptText, selectPopup } from "./dialogs.ts";
+import { popup } from "./popup.ts";
 import { isRoleName, normalizeSpec, premiumRoleWarnings, THINKING, type ModelRoleManager, type RoleRow } from "./model-roles.ts";
 import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
 
@@ -38,19 +39,31 @@ function detail(row: RoleRow, active: string | undefined): [ThemeColor, string][
 }
 
 async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initial: number): Promise<{ action: RoleAction; index: number } | undefined> {
-  return ctx.ui.custom<{ action: RoleAction; index: number } | undefined>((tui, theme, _keys, done) => {
+  return popup<{ action: RoleAction; index: number } | undefined>(ctx, (tui, theme, _keys, done) => {
     let selected = initial;
     let scroll = 0;
     let layout = { top: 1, rows: 0, leftWidth: 0, bodyX: 2, footerTop: 0 };
     let width = 80;
-    const rows = () => roles.list();
+    const input = new Input({ prompt: "/ ", placeholder: "Filter roles" });
+    let searching = false;
+    const rows = () => roles.list().filter((row) => `${row.role} ${row.label} ${row.spec ?? ""}`.toLocaleLowerCase().includes(input.getValue().trim().toLocaleLowerCase()));
+    input.onSubmit = () => { searching = false; input.focused = false; };
+    input.onEscape = () => { searching = false; input.focused = false; input.setValue(""); selected = 0; scroll = 0; };
     // Read once per screen: every action closes the screen, and reopening it re-checks against the current model.
     const warnings = premiumRoleWarnings(roles, ctx);
-    const finish = (action: RoleAction) => done({ action, index: selected });
+    const finish = (action: RoleAction) => {
+      const row = rows()[selected];
+      if (row) done({ action, index: roles.list().findIndex((item) => item.role === row.role) });
+    };
     return {
-      invalidate() {},
+      get focused() { return input.focused; },
+      set focused(value: boolean) { input.focused = searching && value; },
+      invalidate() { input.invalidate(); },
       handleInput(data: string) {
+        if (searching) { input.handleInput(data); selected = 0; scroll = 0; tui.requestRender(); return; }
+        if (data === "/") { searching = true; input.focused = true; tui.requestRender(); return; }
         const count = rows().length;
+        if (!count && !matchesKey(data, Key.escape)) return;
         if (matchesKey(data, Key.escape) || data === "q") return done(undefined);
         if (matchesKey(data, Key.up) || data === "k") selected = (selected + count - 1) % count;
         else if (matchesKey(data, Key.down) || data === "j") selected = (selected + 1) % count;
@@ -93,7 +106,8 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
           const mark = row.error ? "⚠" : row.resolved ? "●" : "○";
           return theme.fg(current ? "accent" : row.resolved ? "muted" : "dim", (current ? "❯ " : "  ") + mark + " " + row.role + (active === row.role ? " *" : ""));
         });
-        const row = list[selected]!;
+        const row = list[selected];
+        if (!row) return [theme.fg("accent", "pi-jar · roles"), ...input.render(width), theme.fg("dim", "No matching roles · / edit filter · Esc close")];
         const info = detail(row, active).map(([color, text]) => theme.fg(color, text));
         // Narrow terminals collapse the sidebar into a pager header above the details.
         const narrow = sidebarWidth(width) === 0;
@@ -103,13 +117,13 @@ async function roleScreen(ctx: ExtensionContext, roles: ModelRoleManager, initia
         const body = [...header, ...warnings.map((text) => theme.fg("warning", text)), ...info];
         const split = splitFrame(theme, width, "pi-jar · roles", narrow ? [] : left, body, [
           ...actions,
-          theme.fg("dim", "↑↓ choose role · press a key or click an action · Esc close")
+          searching ? input.render(width)[0]! : theme.fg("dim", "↑↓ choose role · / filter roles · press a key or click an action · Esc close")
         ], height);
         layout = split.layout;
         return split.lines;
       }
     };
-  }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
+  }, { filter: false });
 }
 
 /** Keyboard- and pointer-driven model role manager. */
@@ -146,7 +160,7 @@ async function applyAction(ctx: ExtensionContext, roles: ModelRoleManager, row: 
       const models = ctx.modelRegistry.getAvailable().slice().sort((a, b) => (a.provider + "/" + a.id).localeCompare(b.provider + "/" + b.id));
       if (!models.length) { ctx.ui.notify("No authenticated models are currently available", "warning"); return; }
       const labels = models.map((model) => model.provider + "/" + model.id);
-      const selected = await ctx.ui.select("Model for " + row.role, labels);
+      const selected = await selectPopup(ctx, "Model for " + row.role, labels);
       if (selected) roles.update(row.role, selected + effort(), scope);
       return;
     }
@@ -154,20 +168,20 @@ async function applyAction(ctx: ExtensionContext, roles: ModelRoleManager, row: 
       const models = ctx.modelRegistry.getAvailable().slice().sort((a, b) => (a.provider + "/" + a.id).localeCompare(b.provider + "/" + b.id));
       if (!models.length) { ctx.ui.notify("No authenticated models are currently available", "warning"); return; }
       const choices = ["Clear fallback", ...models.map((model) => model.provider + "/" + model.id)];
-      const selected = await ctx.ui.select("Fallback model for " + row.role, choices);
+      const selected = await selectPopup(ctx, "Fallback model for " + row.role, choices);
       if (!selected) return;
       roles.updateFallbacks(row.role, selected === "Clear fallback" ? [] : [selected], scope);
       return;
     }
     case "alias": {
       const targets = roles.list().filter((item) => item.role !== row.role).map((item) => "@" + item.role);
-      const selected = await ctx.ui.select("Alias " + row.role + " to", targets);
+      const selected = await selectPopup(ctx, "Alias " + row.role + " to", targets);
       if (selected) roles.update(row.role, selected + effort(), scope);
       return;
     }
     case "thinking": {
       if (!row.spec) { ctx.ui.notify("Assign a model or alias first", "warning"); return; }
-      const selected = await ctx.ui.select("Thinking effort for " + row.role, ["follow current", ...THINKING]);
+      const selected = await selectPopup(ctx, "Thinking effort for " + row.role, ["follow current", ...THINKING]);
       if (selected) roles.update(row.role, base() + (selected === "follow current" ? "" : ":" + selected), scope);
       return;
     }

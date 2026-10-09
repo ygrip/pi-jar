@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { duration, leafTodos, type DelegateRegistry, type DelegateRun, type SubagentRecord, type TranscriptEntry } from "./delegate.ts";
 import { safeLine } from "./diff-view.ts";
@@ -250,7 +251,7 @@ export async function openActivityView(ctx: ExtensionContext, sources: ActivityS
     ctx.ui.notify("pi-jar: nothing running (subagents come from jar_delegate, shells from jar_shell)", "info");
     return;
   }
-  await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+  await popup<void>(ctx, (tui, theme, _keys, done) => {
     let items = opening;
     let at = initial ? items.findIndex((item) => item.kind !== "header" && item.kind === initial.kind && item.id === initial.id) : -1;
     if (at < 0) at = items.findIndex((item) => item.kind !== "header" && item.status === "running");
@@ -541,5 +542,5 @@ ctx.ui.notify("pi-jar: " + (error instanceof Error ? error.message : String(erro
       }
     };
     return component;
-  }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
+  });
 }

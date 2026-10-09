@@ -66,7 +66,7 @@ export function splitFrame(theme: SplitTheme, width: number, title: string, left
   for (const line of footer) lines.push(dim("│ ") + pad(padded.footer, line, w - 4) + dim(" │"));
   lines.push(dim("╰" + "─".repeat(w - 2) + "╯"));
   // Every row is assembled from exact-width parts; only a sidebar too wide for the frame can overflow.
-  const fitted = bodyWidth < 0 ? lines.map((line) => truncateToWidth(line, w)) : lines;
+  const fitted = bodyWidth < 0 || width < w ? lines.map((line) => truncateToWidth(line, Math.max(0, width))) : lines;
   const layout = { top: 1, rows, leftWidth: split ? leftWidth : 0, bodyX: split ? leftWidth + 4 : 2, footerTop };
   previous = { key, left: left.slice(0, rows), right: right.slice(0, rows), footer: footer.slice(), lines: fitted, layout };
   return { lines: fitted.slice(), layout: { ...layout } };
@@ -74,7 +74,7 @@ export function splitFrame(theme: SplitTheme, width: number, title: string, left
 
 /** Available content rows for a full-height overlay with `chrome` fixed rows. */
 export function contentRows(chrome: number, min = 4): number {
-  return Math.max(min, (process.stdout.rows ?? 24) - chrome);
+  return Math.max(1, (process.stdout.rows ?? 24) - chrome);
 }
 
 /**

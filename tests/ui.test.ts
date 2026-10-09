@@ -1,3 +1,4 @@
+import { pickPopup, popupTheme } from "./popup-fixture.ts";
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -141,7 +142,12 @@ test("hub dispatches only installed native managers and never invents unavailabl
         if (factory) widgets.set(key, factory({ requestRender() {} }, plain));
         else widgets.delete(key);
       },
-      select(_prompt: string, choices: string[]) { selectChoices = choices; return Promise.resolve(choices[0]); }
+      custom(factory: Function) {
+        const component = factory({ requestRender() {} }, popupTheme, {}, () => {});
+        const lines: string[] = component.render(120);
+        selectChoices = lines.filter((line) => line.startsWith("❯ ")).map((line) => line.slice(2));
+        return Promise.resolve(pickPopup(factory, ""));
+      }
     }
   };
   piJar(pi as unknown as Parameters<typeof piJar>[0]);

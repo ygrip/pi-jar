@@ -1,3 +1,4 @@
+import { pickPopup } from "./popup-fixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -143,7 +144,7 @@ test("new profiles ask only name and theme; cancellation and invalid names leave
   const asked: string[] = [];
   const makeCtx = (answers: unknown[]) => ({ hasUI: true, mode: "tui", ui: {
     input: async (title: string) => { asked.push(title); return answers.shift(); },
-    select: async (title: string) => { asked.push(title); return answers.shift(); },
+    custom: async (factory: Function) => { asked.push("theme"); return pickPopup(factory, answers.shift()); },
     confirm: async () => assert.fail("creation needs no confirmation step"),
     notify() {}
   } });

@@ -64,7 +64,8 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | `/jar` · `/jar settings` | Visual and workflow preferences. |
 | `/jar status` | One-line status summary. |
 | `/jar perf` | Long-session diagnostics on demand: branch entries, context sampling, parent and child RSS, retained/hibernated subagents and recovery worktrees, render requests vs. frames, shell output, discussion and quota cache. |
-| `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Human view/editor for the agent's checklist. |
+| `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Searchable, scrollable checklist; ←/→ folds/unfolds subtasks. |
+| `/jar tasks collapse\|expand\|toggle` · `/jar tasks scroll N` | Collapse/expand the compact task widget or scroll it by N rows. |
 | `/jar history` | Read-only conversation timeline for the active branch. |
 | `/diff` | Review, accept or revert the files the agent changed. |
 | `/jar activity` · `/jar shells` | Subagents and background shells: live transcript/output, stop or kill. |
@@ -89,6 +90,12 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> | Review agent changes (`/diff`) |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> | Search earlier prompts into the composer |
 | <kbd>Tab</kbd> / <kbd>→</kbd> in an empty composer | Accept the dim suggestion into the input (it is not sent) |
+
+## Popup navigation
+
+Pi-jar popups stay within the terminal viewport, including after resizing. Model, fallback, alias, theme and profile pickers filter as you type; use ↑/↓, PgUp/PgDn or the mouse wheel to move and Enter to choose. In Roles and Tasks, press `/` to search the full list, Enter to apply, and Esc while searching to clear it. Other pi-jar views support `/` to filter popup content (History and Changes retain their own search). Oversized popup chrome scrolls with the wheel or Ctrl+PgUp/PgDn.
+
+The task widget starts collapsed to a one-line summary. In fullscreen, click its heading to expand/collapse and wheel-scroll the expanded list. It uses at most a quarter of the terminal height. In regular mode use `/jar tasks expand`, `/jar tasks collapse`, or `/jar tasks scroll N`; `/jar tasks` opens the full editor, where ←/→ folds/unfolds a parent's subtasks.
 
 ## Profiles
 

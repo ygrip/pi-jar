@@ -1,3 +1,4 @@
+import { pickPopup } from "./popup-fixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -161,7 +162,10 @@ const createViaCommand = async (h: any, answers: string[]) => {
   const screens: string[] = [];
   h.ctx.ui.input = async () => answers.shift();
   h.ctx.ui.select = async () => answers.shift();
-  h.ctx.ui.custom = async () => { screens.push("roles"); return undefined; };
+  h.ctx.ui.custom = async (factory: Function) => {
+    if (answers.length) return pickPopup(factory, answers.shift());
+    screens.push("roles"); return undefined;
+  };
   await h.commands.get("profiles")("new", h.ctx);
   return screens;
 };

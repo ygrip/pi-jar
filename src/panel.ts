@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { RowCache } from "./row-cache.ts";
 
@@ -8,7 +9,7 @@ export interface PanelTab { name: string; render(width: number, fg: Paint): stri
 /** Tabbed, scrollable info panel (Usage / Context / Cache). Tab or click switches tabs; Esc closes. */
 export async function openPanel(ctx: ExtensionContext, tabs: readonly PanelTab[], initial = 0): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
-  await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+  await popup<void>(ctx, (tui, theme, _keys, done) => {
     let tab = Math.max(0, Math.min(tabs.length - 1, initial));
     let scroll = 0;
     let body: string[] = [];
@@ -64,7 +65,7 @@ export async function openPanel(ctx: ExtensionContext, tabs: readonly PanelTab[]
         ];
       }
     };
-  }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
+  });
 }
 
 export const tokens = (value: number): string => value < 1000 ? String(Math.round(value))

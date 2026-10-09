@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { Input, Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { createHistorySnapshot, historyChunk, historyPage, safeHistoryText, type HistoryChunk, type HistoryItem } from "./history.ts";
 import { RowCache } from "./row-cache.ts";
@@ -9,7 +10,7 @@ export async function openJarHistory(ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
   // Capture the active branch ONCE on open. Paging and search operate on this snapshot.
   const snapshot = createHistorySnapshot(sessionBranch(ctx) as ReturnType<typeof ctx.sessionManager.getBranch>);
-  await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+  await popup<void>(ctx, (tui, theme, _keys, done) => {
     let current = historyPage(snapshot);
     let selected = Math.max(0, current.items.length - 1);
     let expanded = false;
@@ -140,5 +141,5 @@ export async function openJarHistory(ctx: ExtensionContext): Promise<void> {
           border("├", "─", "┤"), line(theme.fg("accent", headingDetail)), ...body, help, border("╰", "─", "╯")];
       }
     };
-  }, { overlay: true, overlayOptions: { anchor: "center", width: 92, maxHeight: "80%" } });
+  }, { filter: false });
 }

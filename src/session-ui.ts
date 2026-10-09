@@ -1,4 +1,5 @@
 import type { ExtensionContext, SessionInfo } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { sessionDisplayName } from "./composer.ts";
 import { iconSet, withIcon } from "./icons.ts";
@@ -45,7 +46,7 @@ export async function pickSession(ctx: ExtensionContext, sessions: readonly Sess
     for (const item of indexed) if (terms.every((term) => item.haystack.includes(term))) rows.push(item.session);
     return rows;
   };
-  return ctx.ui.custom<string | undefined>((tui, theme, _keys, done) => {
+  return popup<string | undefined>(ctx, (tui, theme, _keys, done) => {
     let query = initial.slice(0, 100);
     let selected = 0;
     let first = 0;
@@ -151,5 +152,5 @@ export async function pickSession(ctx: ExtensionContext, sessions: readonly Sess
         return available < width ? split.lines.map((line) => truncateToWidth(line, Math.max(0, available))) : split.lines;
       }
     };
-  }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
+  }, { filter: false });
 }

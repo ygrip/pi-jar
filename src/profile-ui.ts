@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { JarProfile, ProfileStore } from "./profiles.ts";
 import type { JarVisualSettings } from "./settings.ts";
+import { selectPopup } from "./dialogs.ts";
 
 export type ProfileAction = "create" | "switch";
 
@@ -35,7 +36,7 @@ export async function promptNewProfile(ctx: ExtensionContext, options: Pick<Prof
   if (options.store.list().some((profile) => profile.name.toLocaleLowerCase() === normalized.toLocaleLowerCase())) {
     ctx.ui.notify("A profile with that name already exists", "warning"); return undefined;
   }
-  const selected = await ctx.ui.select("Choose a theme for " + normalized, [FOLLOW, ...options.themes.filter((item) => item !== "follow")]);
+  const selected = await selectPopup(ctx, "Choose a theme for " + normalized, [FOLLOW, ...options.themes.filter((item) => item !== "follow")]);
   if (!selected) return undefined;
   let profile: JarProfile;
   try { profile = options.create(normalized, selected === FOLLOW ? "follow" : selected); }
@@ -55,7 +56,7 @@ export async function openProfiles(ctx: ExtensionContext, options: ProfileUiOpti
   let preset: Partial<JarVisualSettings> | undefined;
   if (action !== "create") {
     const labels = new Map(options.store.list().map((profile) => [profile.name === active ? `${profile.name} (active)` : profile.name, profile.name]));
-    const choice = await ctx.ui.select(action === "switch" ? "Switch profile" : "Profiles", action === "switch" ? [...labels.keys()] : [CREATE, SWARM, ...labels.keys()]);
+    const choice = await selectPopup(ctx, action === "switch" ? "Switch profile" : "Profiles", action === "switch" ? [...labels.keys()] : [CREATE, SWARM, ...labels.keys()]);
     if (!choice) return;
     if (choice !== CREATE && choice !== SWARM) { await options.select(labels.get(choice)!); return; }
     if (choice === SWARM) preset = SWARM_SETTINGS;

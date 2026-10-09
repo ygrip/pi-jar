@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { cleanText } from "./status.ts";
@@ -33,7 +34,7 @@ async function pickQuestion(ctx: ExtensionContext, question: AskQuestion, index:
   })).filter((option) => !!option.label);
   if (!ctx.hasUI || ctx.mode !== "tui" || signal?.aborted) return { kind: "cancel" };
   let abort: (() => void) | undefined;
-  try { return await ctx.ui.custom<PickResult>((tui, theme, _keys, complete) => {
+  try { return await popup<PickResult>(ctx, (tui, theme, _keys, complete) => {
     const done = (result: PickResult) => { if (abort) signal?.removeEventListener("abort", abort); complete(result); };
     abort = () => done({ kind: "cancel" });
     signal?.addEventListener("abort", abort, { once: true });

@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { fuzzyFilter, Key, matchesKey, truncateToWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { cleanText } from "./status.ts";
 
@@ -49,14 +50,14 @@ export function collectPrompts(entries: readonly unknown[], earlier: readonly { 
 export async function openPromptSearch(ctx: ExtensionContext, prompts: readonly PastPrompt[]): Promise<string | undefined> {
   if (!ctx.hasUI || ctx.mode !== "tui") return undefined;
   if (!prompts.length) { ctx.ui.notify("pi-jar: no earlier prompts yet", "info"); return undefined; }
-  return ctx.ui.custom<string | undefined>((tui, theme, _keys, done) => {
+  return popup<string | undefined>(ctx, (tui, theme, _keys, done) => {
     let query = "";
     let selected = 0;
     let first = 0;
     // pi-tui's fuzzyFilter takes a mutable array; copy once per overlay, not per keystroke.
     const pool: PastPrompt[] = prompts.slice();
     let visible: PastPrompt[] = pool;
-    const rows = 10;
+    let rows = 10;
     const filter = () => { visible = query ? fuzzyFilter(pool, query, (item) => item.text) : pool; selected = 0; first = 0; };
     // Prompts can be several KiB; sanitize each once, not on every repaint.
     const cleaned = new Map<PastPrompt, string>();
@@ -85,6 +86,7 @@ export async function openPromptSearch(ctx: ExtensionContext, prompts: readonly 
       },
       render(width: number): string[] {
         const w = Math.max(20, width);
+        rows = Math.max(1, Math.min(10, (tui.terminal?.rows ?? process.stdout.rows ?? 24) - 3));
         const inner = w - 4;
         if (selected < first) first = selected;
         if (selected >= first + rows) first = selected - rows + 1;
@@ -106,5 +108,5 @@ export async function openPromptSearch(ctx: ExtensionContext, prompts: readonly 
         return lines;
       }
     };
-  }, { overlay: true, overlayOptions: { width: "80%", maxHeight: "60%" } });
+  }, { filter: false });
 }

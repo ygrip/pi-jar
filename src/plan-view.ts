@@ -1,4 +1,5 @@
 import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { Key, Markdown, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { parsePlanSections, type PlanSection } from "./plan-utils.ts";
 import { contentRows, optionList, sidebarWidth, splitFrame } from "./split-view.ts";
@@ -45,7 +46,7 @@ export async function openPlanView(ctx: ExtensionContext, input: PlanViewInput):
   const lines = input.text.replace(/\r/g, "").split("\n");
   const { title, entries } = planEntries(input.text);
   const roleChoices = ["current", ...(input.roles ?? [])];
-  return ctx.ui.custom<PlanViewResult | undefined>((tui, theme, _keys, done) => {
+  return popup<PlanViewResult | undefined>(ctx, (tui, theme, _keys, done) => {
     let selected = 0;
     let focus: Focus = "toc";
     let action = 0;
@@ -145,5 +146,5 @@ export async function openPlanView(ctx: ExtensionContext, input: PlanViewInput):
         return split.lines;
       }
     };
-  }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
+  });
 }

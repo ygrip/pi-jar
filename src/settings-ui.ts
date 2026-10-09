@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { FOOTER_FIELDS, type FooterField } from "./footer-settings.ts";
 import { formatTokens } from "./context-budget.ts";
@@ -34,7 +35,7 @@ export async function openJarSettings(
   const PAGES: Page[] = profiles ? ["appearance", "footer", "pi", "profiles"] : ["appearance", "footer", "pi"];
   let lastPage: Page = "appearance";
   while (true) {
-  const action = await ctx.ui.custom<ProfileAction | undefined>((tui, theme, _keys, done) => {
+  const action = await popup<ProfileAction | undefined>(ctx, (tui, theme, _keys, done) => {
     let page: Page = lastPage;
     let selected = 0;
     let width = 64;

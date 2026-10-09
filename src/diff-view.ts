@@ -1,4 +1,5 @@
 import { getLanguageFromPath, highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { popup } from "./popup.ts";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { coarseLineDiff, diffHunkOffsets, diffLineCount, diffRowCount, diffRowsWindow, diffSplitHunkOffsets, diffSplitRowCount, diffSplitRowsWindow,
   lineDiff, MAX_REVIEW_DIFF_LINES, type ChangeTracker, type DiffOp, type FileChange } from "./changes.ts";
@@ -172,7 +173,7 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
   if (!ctx.hasUI || ctx.mode !== "tui") return;
   let changes = tracker.changes();
   if (!changes.length) { ctx.ui.notify("pi-jar: no agent changes to review", "info"); return; }
-  await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+  await popup<void>(ctx, (tui, theme, _keys, done) => {
     let selected = 0;
     let scroll = 0;
     let listScroll = 0;
@@ -386,7 +387,7 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
       }
     };
     return component;
-  }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } });
+  }, { filter: false });
 }
 
 /** Track edit/write targets before they run, and expose `/diff` plus ctrl+alt+d. */

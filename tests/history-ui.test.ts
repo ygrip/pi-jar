@@ -16,7 +16,7 @@ async function setup(entries: unknown[]) {
   const ctx = {
     hasUI: true, mode: "tui", sessionManager: { getBranch() { reads++; return entries; } },
     ui: { async custom(factory: Function, options: unknown) {
-      assert.deepEqual(options, { overlay: true, overlayOptions: { anchor: "center", width: 92, maxHeight: "80%" } });
+      assert.deepEqual(options, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%", margin: 0 } });
       pane = factory({ requestRender() { renders++; } }, plain, {}, () => { done = true; });
     } }
   };

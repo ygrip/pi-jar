@@ -1,3 +1,4 @@
+import { pickPopup, popupTheme } from "./popup-fixture.ts";
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -256,9 +257,10 @@ test("footer menu toggles and persists fields, refreshes the render, and exits o
         setFooter: (factory: Function) => { footer = factory({ requestRender() { renders++; } }, theme, {
           getExtensionStatuses: () => new Map(), getGitBranch: () => null, onBranchChange: () => () => {}
         }); },
-        select: async (_title: string, options: string[]) => {
-          assert.ok(options.includes("Done"));
-          return choices.shift();
+        custom: async (factory: Function) => {
+          const component = factory({ requestRender() {} }, popupTheme, {}, () => {});
+          assert.ok(component.render(120).join("\n").includes("Done"));
+          return pickPopup(factory, choices.shift());
         }
       }
     };

@@ -10,7 +10,8 @@ import type { DelegateController } from "../src/delegate.ts";
 import { ComposerStyle } from "../src/composer.ts";
 import { installCompactBuiltinTools } from "../src/compact-tools.ts";
 import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
-import { promptText } from "../src/dialogs.ts";
+import { promptText, selectPopup } from "../src/dialogs.ts";
+import { taskWidget, type TaskWidgetState } from "../src/task-widget.ts";
 import { renderFooterLayout, type ActivityState, type FooterActivity, type FooterHit, type FooterTarget } from "../src/footer.ts";
 import { openJarHistory } from "../src/history-ui.ts";
 import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
@@ -35,8 +36,8 @@ import { registerSuggestions, SuggestionState } from "../src/suggest.ts";
 import { createDemoRoles } from "../src/roles.ts";
 import { ACTIVE_STATES, cleanText, collectStatuses, type JarRole } from "../src/status.ts";
 import { manageTasks } from "../src/tasks-ui.ts";
-import { registerTaskTool, todoRow } from "../src/task-tool.ts";
-import { TASK_ENTRY, TodoStore, todoProgress, todoTotals } from "../src/tasks.ts";
+import { registerTaskTool } from "../src/task-tool.ts";
+import { TASK_ENTRY, TodoStore, todoTotals } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { branchCalls, compactForBudget, CONTEXT_CONTINUATION, ContextBudgetGuard, providerCall, resumeAfterBudget } from "../src/context-budget.ts";
 import { WorkingState } from "../src/working.ts";
@@ -168,6 +169,7 @@ export default function piJar(pi: ExtensionAPI): void {
 
   // A finished list stays visible (all struck through) until the user's next prompt, like Claude.
   let todosAcknowledged = false;
+  const taskWidgetState: TaskWidgetState = { expanded: false, scroll: undefined };
   const updateTaskWidget = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui") return;
     const items = todos?.all() ?? [];
@@ -176,36 +178,8 @@ export default function piJar(pi: ExtensionAPI): void {
     const visible = enabled && items.length > 0 && (open.length > 0 || !todosAcknowledged);
     try {
       // Rows are rebuilt only when the list changes (every change reinstalls the widget), the width or the theme.
-      ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (_tui, theme) => {
-        let memo: { width: number; sample: string; lines: string[] } | undefined;
-        return {
-          invalidate() { memo = undefined; },
-          render(width: number) {
-            const colors = ctx.ui.theme ?? theme;
-            const sample = colors.fg("accent", "·") + colors.fg("dim", "·");
-            if (memo && memo.width === width && memo.sample === sample) return memo.lines.slice();
-            const all = todos?.all() ?? [];
-            const { done, total } = todoTotals(all);
-            const parents = new Set<string>();
-            for (const item of all) if (item.parentId) parents.add(item.parentId);
-            // Show a window of up to 8 rows that keeps the running leaf (or next open one) in view.
-            const running = all.findIndex((item) => item.status === "in_progress" && !parents.has(item.id));
-            const focus = Math.max(0, running >= 0 ? running : all.findIndex((item) => !item.done && !parents.has(item.id)));
-            const start = Math.max(0, Math.min(focus - 2, all.length - 8));
-            const shown = all.slice(start, start + 8);
-            const rows = [
-              colors.fg("accent", "Tasks") + colors.fg("dim", ` · ${done}/${total} done` + (done === total ? " · all complete" : "") + " · /jar tasks"),
-              ...(start > 0 ? [colors.fg("dim", `  … ${start} earlier`)] : []),
-              ...shown.map((item) => todoRow(item, (color, text) => colors.fg(color, text), (text) => colors.bold(text), parents.has(item.id) ? todoProgress(all, item.id) : undefined)),
-              ...(start + shown.length < all.length ? [colors.fg("dim", `  … +${all.length - start - shown.length} more`)] : [])
-            ];
-            // Pi inserts a spacer before widgets, but not between widgets and the composer.
-            const lines = [...rows.map((line) => truncateToWidth(line, Math.max(0, width))), truncateToWidth(" ", Math.max(0, width))];
-            memo = { width, sample, lines };
-            return lines.slice();
-          }
-        };
-      });
+      ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (tui, theme) =>
+        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState));
     } catch { /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
   };
   registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
@@ -1185,7 +1159,16 @@ export default function piJar(pi: ExtensionAPI): void {
         return;
       }
       if (command === "tasks" || command.startsWith("tasks ")) {
-        if (todos) await manageTasks(args.trim().slice(5).trim(), ctx, todos, () => updateTaskWidget(ctx));
+        const taskArgs = args.trim().slice(5).trim();
+        if (["collapse", "expand", "toggle"].includes(taskArgs)) {
+          taskWidgetState.expanded = taskArgs === "toggle" ? !taskWidgetState.expanded : taskArgs === "expand";
+          taskWidgetState.scroll = undefined;
+          updateTaskWidget(ctx);
+        } else if (/^scroll -?\d+$/.test(taskArgs)) {
+          taskWidgetState.expanded = true;
+          taskWidgetState.scroll = Math.max(0, (taskWidgetState.scroll ?? 0) + Number(taskArgs.split(" ")[1]));
+          updateTaskWidget(ctx);
+        } else if (todos) await manageTasks(taskArgs, ctx, todos, () => updateTaskWidget(ctx));
         return;
       }
       if (command === "footer") {
@@ -1201,7 +1184,7 @@ export default function piJar(pi: ExtensionAPI): void {
         };
         while (true) {
           const options = FOOTER_FIELDS.map((field) => `${footerSettings[field] ? "[x]" : "[ ]"} ${labels[field]}`);
-          const selected = await ctx.ui.select("pi-jar · footer visibility", [...options, "Done"]);
+          const selected = await selectPopup(ctx, "pi-jar · footer visibility", [...options, "Done"]);
           const index = options.indexOf(selected ?? "");
           if (index < 0) break;
           const field = FOOTER_FIELDS[index]!;
@@ -1254,7 +1237,7 @@ export default function piJar(pi: ExtensionAPI): void {
           { name: "subagents-fleet", label: "Subagents · Fleet (/subagents-fleet)" }
         ].filter((entry) => pi.getCommands().some((item) => item.name === entry.name && item.source === "extension"));
         if (!native.length) { ctx.ui.notify("No task or subagent manager is installed", "info"); return; }
-        const selected = await ctx.ui.select("pi-jar · open existing manager", native.map((item) => item.label));
+        const selected = await selectPopup(ctx, "pi-jar · open existing manager", native.map((item) => item.label));
         const target = native.find((item) => item.label === selected);
         if (target && pi.getCommands().some((item) => item.name === target.name && item.source === "extension")) {
           pi.sendUserMessage(`/${target.name}`, { expandPromptTemplates: true });
