@@ -54,7 +54,8 @@ import { ContextSampler, formatPerf, LARGE_SESSION_ENTRIES, processRss, RenderSc
 import { registerChangeReview } from "../src/diff-view.ts";
 import { registerShells, ShellManager, type ShellEvent, type ShellJob } from "../src/shells.ts";
 import { registerShellNotifications } from "../src/shell-notifications.ts";
-import { CHILD_TOOLS_ENV, childToolAllowlist, RECURSIVE_TOOLS, worktreeToolViolation } from "../src/subagent-tools.ts";
+import { loadResourceCatalog } from "../src/subagent-resources.ts";
+import { CHILD_TOOLS_ENV, childToolAllowlist, loadSubagentConfig, RECURSIVE_TOOLS, worktreeToolViolation } from "../src/subagent-tools.ts";
 import { hopefulWelcomeMessage, welcomeHit, welcomeLines, type WelcomeAction } from "../src/welcome.ts";
 
 const WELCOME_KEY = "pi-jar.welcome";
@@ -351,6 +352,8 @@ export default function piJar(pi: ExtensionAPI): void {
     discussionRetire: (key) => discussion?.retire(key),
     discussionUnread: (key) => discussion?.unreadFor(key) ?? 0,
     discussionDigest: () => discussion?.digest(),
+    getSubagentConfig: () => loadSubagentConfig(getAgentDir()),
+    loadResources: (cwd) => loadResourceCatalog(cwd, getAgentDir()),
     getMaxSubagents: () => visualSettings.maxSubagents, onController: (controller) => { delegateController = controller; } });
   if (!delegatedChild) registerCouncil(pi, () => delegateController, () => visualSettings.maxSubagents);
   const planMode = new PlanMode(pi, () => todos, modelRoles, updateTaskWidget);

@@ -62,7 +62,7 @@ Hidden context messages (`pi-jar.plan-context`, `pi-jar.plan-reminder`, `pi-jar.
 | `jar_goal` | `get`, `complete` (with evidence, audit phase only), `block`; active only while a goal runs |
 | `jar_suggest` | one next-prompt suggestion shown as composer ghost text; active only when suggestions are enabled |
 | `jar_shell` | background shells: `start` (`command`, `name`, `watch`, `notify`, `purpose`, `waitMs`), `list`, `peek`, `wait`, `output` (new lines; `all`), `kill` |
-| `jar_delegate` | retained subagents within the configured pool (`tasks: [{task, name?, role?, mode?, tools?, inheritTools?}]`) |
+| `jar_delegate` | retained subagents within the configured pool (`tasks: [{task, name?, role?, mode?, tools?, inheritTools?, skills?}]`) |
 | `jar_subagent` | moderator control: `peek`, `report`, `steer`, `ask`, `pause`, `resume`, `stop`, `discard` |
 | `jar_council` | exceptional scout vote with strict majority; never implements |
 | `jar_discuss` | parent-brokered Q/A between moderator and subagents |

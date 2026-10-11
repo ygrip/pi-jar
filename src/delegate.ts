@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { signalProcessTree } from "./async-process.ts";
-import { CHILD_TOOLS_ENV, RECURSIVE_TOOLS, WEB_TOOLS } from "./subagent-tools.ts";
+import { CHILD_TOOLS_ENV, EMPTY_SUBAGENT_CONFIG, parseRules, RECURSIVE_TOOLS, SHELL_TOOLS, SUBAGENT_CONFIG_FILE, WEB_TOOLS, type RuleList, type SubagentConfig } from "./subagent-tools.ts";
+import { planExtensions, planSkills, type ExtensionPlan, type ResourceCatalog } from "./subagent-resources.ts";
 import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -37,8 +38,9 @@ export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "jar_todo", "jar_d
 export const WORKTREE_TOOLS = ["read", "edit", "write", "multi_file_edit", "grep", "find", "ls", "jar_todo", "jar_discuss"] as const;
 const READ_ONLY_SAFE_TOOLS = new Set<string>([...READ_ONLY_TOOLS, ...WEB_TOOLS, "ffgrep", "fffind", "lsp_diagnostics", "obs_recall"]);
 const WORKTREE_SAFE_TOOLS = new Set<string>([...WORKTREE_TOOLS, ...WEB_TOOLS]);
-const allowedInMode = (mode: DelegateExecutionMode, name: string) => !RECURSIVE_TOOLS.has(name)
-  && (mode === "direct" || (mode === "worktree" ? WORKTREE_SAFE_TOOLS.has(name) : READ_ONLY_SAFE_TOOLS.has(name)));
+/** Inheritance filter: mode-safe tools plus the user's trusted extras from pi-jar-subagents.json. */
+const allowedInMode = (mode: DelegateExecutionMode, name: string, trusted: ReadonlySet<string> = new Set()) => !RECURSIVE_TOOLS.has(name)
+  && (mode === "direct" || trusted.has(name) || (mode === "worktree" ? WORKTREE_SAFE_TOOLS.has(name) : READ_ONLY_SAFE_TOOLS.has(name)));
 export type DelegateMode = "scout" | "fork" | "worktree";
 type DelegateExecutionMode = DelegateMode | "direct";
 const MAX_OUTPUT_CHARS = 12_000;
@@ -169,24 +171,52 @@ export interface DelegateSessionOptions {
   tools?: readonly string[];
 }
 
+/** The running pi-jar entry point; children always load this copy explicitly. */
+export const OWN_EXTENSION = fileURLToPath(new URL("../extensions/index.ts", import.meta.url));
+
+/** Extension and skill choices for one child, planned from pi-jar-subagents.json and the task. */
+export interface ChildResources {
+  extensions?: ExtensionPlan;
+  /** Exact skill paths (`--no-skills --skill ...`); undefined keeps Pi's normal skill discovery. */
+  skills?: readonly string[];
+}
+
 /** CLI arguments for one subagent: an ephemeral one-shot, a private resumable session, or a real Pi session fork. */
 export function delegateArgs(model: string | undefined, thinking: string | undefined, write: boolean, argv = process.argv,
-  session?: DelegateSessionOptions, toolOverride?: readonly string[]): string[] {
+  session?: DelegateSessionOptions, toolOverride?: readonly string[], resources: ChildResources = {}): string[] {
   const sessionArgs = !session ? ["--no-session"]
     : session.resume ? ["--session", session.resume, "--session-dir", session.sessionDir]
     : session.source ? ["--fork", session.source, "--session-dir", session.sessionDir]
     : ["--session-dir", session.sessionDir];
   const extensions = extensionFlags(argv);
   const tools = session?.tools ?? toolOverride ?? (!write ? READ_ONLY_TOOLS : undefined);
-  const ownExtension = fileURLToPath(new URL("../extensions/index.ts", import.meta.url));
+  const ownExtension = OWN_EXTENSION;
+  const plan = resources.extensions;
+  const load = (path: string) => { if (!extensions.includes(path)) extensions.push("--extension", path); };
+  const parentDiscovers = !extensions.some(flag => flag === "-ne" || flag === "--no-extensions");
   // Default read-only children need only core file tools and pi-jar. Avoid importing every
   // personal extension (and opening unused MCP/provider connections) for each scout.
   // Explicit extension flags and optional inherited tools retain the parent's full setup.
   const lean = !write && extensions.length === 0 && tools?.every(tool => (READ_ONLY_TOOLS as readonly string[]).includes(tool));
-  if (lean) extensions.push("--no-extensions", "--extension", ownExtension);
-  // Worktree cwd/session forks (resumed ones too) do not inherit project extension discovery from the parent.
-  else if (session?.source && !extensions.includes(ownExtension)) extensions.push("--extension", ownExtension);
+  if (lean) {
+    extensions.push("--no-extensions", "--extension", ownExtension);
+    // User-allowed essentials (e.g. a provider auth extension) that lean children still need.
+    for (const path of plan?.lean ?? []) load(path);
+  } else if (plan?.explicit && parentDiscovers) {
+    // Something is disallowed: replace discovery with the parent's resolved list minus the disallowed entries.
+    extensions.push("--no-extensions");
+    load(ownExtension);
+    for (const path of plan.explicit) load(path);
+  } else {
+    // Worktree cwd/session forks (resumed ones too) do not inherit project extension discovery from the parent.
+    if (session?.source) load(ownExtension);
+    for (const path of plan?.add ?? []) load(path);
+  }
   const args = ["--mode", "rpc", ...sessionArgs, ...extensions];
+  if (resources.skills) {
+    args.push("--no-skills");
+    for (const path of resources.skills) args.push("--skill", path);
+  }
   if (model) args.push("--model", model);
   if (thinking) args.push("--thinking", thinking);
   if (tools) args.push("--tools", tools.join(","));
@@ -1186,8 +1216,10 @@ const Parameters = Type.Object({
     role: Type.Optional(Type.String({ description: "pi-jar role override; defaults by mode (scout→scout, fork→reviewer, worktree→worker), then role fallbacks/current model." })),
     mode: Type.Optional(DelegateModeSchema),
     tools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), { minItems: 1, maxItems: 64, uniqueItems: true,
-      description: "Explicit child tool allowlist; grant narrowly. scout/fork stay read-only; worktree accepts only path-guarded file tools; web/browser tools only when active here." })),
-    inheritTools: Type.Optional(Type.Boolean({ description: "Inherit your active tools, filtered by mode safety; recursive delegation tools are always removed." }))
+      description: "Child tools. `name`/`+name` entries form an exact list (replaces mode defaults; include read etc.); any tool active here is honored, e.g. MCP mom_search; mutating tools bypass scout/fork read-only. Only `-name` entries subtract from the defaults (or inherited tools). User-disallowed tools and worktree shells are rejected." })),
+    inheritTools: Type.Optional(Type.Boolean({ description: "Inherit your active tools, filtered by mode safety plus user-trusted extras; recursive delegation tools are always removed." })),
+    skills: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 64, uniqueItems: true,
+      description: "Skills the child may load, by name or path. `name`/`+name` entries (or []) form an exact list; only `-name` entries remove from the defaults. Omit to keep defaults. User-disallowed skills are rejected." }))
   }), { minItems: 1, maxItems: 16 }),
   mode: Type.Optional(DelegateModeSchema),
   write: Type.Optional(Type.Boolean({ description: "Deprecated: true = legacy shared-workspace editing; prefer mode=\"worktree\"." }))
@@ -1219,6 +1251,10 @@ export interface DelegateController {
 export interface DelegateOptions {
   /** Snapshot names of tools active in the parent session. */
   getActiveToolNames?: () => readonly string[];
+  /** Tool/extension/skill allow (+) and disallow (-) rules (pi-jar-subagents.json); read on every launch, may throw on bad config. */
+  getSubagentConfig?: () => SubagentConfig;
+  /** The parent's resolved extensions and skills; needed only when extension/skill rules apply. */
+  loadResources?: (cwd: string) => Promise<ResourceCatalog>;
   /** Allowed sizes: 2, 4, 6, 8, 16; defaults to MAX_DELEGATES. Read on every launch. */
   getMaxSubagents?: () => number;
   /** Shares the delegate lifecycle and capacity with scout orchestration. */
@@ -1472,32 +1508,77 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         } catch { return undefined; }
       };
       const activeNames = parentToolNames();
+      let config: SubagentConfig;
+      try { config = options.getSubagentConfig?.() ?? EMPTY_SUBAGENT_CONFIG; }
+      catch (error) {
+        return { content: [{ type: "text", text: `Cannot read subagent config: ${(error as Error).message}` }], details: { runs: [], write: false }, isError: true };
+      }
+      const trusted = new Set(config.tools.allow);
+      const disallowed = new Set(config.tools.deny);
       const defaultWorktreeTools = WORKTREE_TOOLS.filter(name => name !== "multi_file_edit" || activeNames?.includes(name));
+      const toolPlans: Array<readonly string[] | undefined> = [];
+      const skillRules: Array<RuleList | undefined> = [];
       for (const [index, item] of requested.entries()) {
         const mode = item.mode ?? params.mode ?? (params.write === true ? "direct" : "scout");
-        const selected = item.tools ?? (item.inheritTools && activeNames ? activeNames.filter(name =>
-          allowedInMode(mode, name)) : undefined);
+        let rules: RuleList | undefined;
+        try {
+          rules = item.tools ? parseRules(item.tools, `Task ${index + 1}: tools`) : undefined;
+          skillRules.push(item.skills ? parseRules(item.skills, `Task ${index + 1}: skills`) : undefined);
+        } catch (error) {
+          return { content: [{ type: "text", text: (error as Error).message }], details: { runs: [], write: false }, isError: true };
+        }
         if ((item.inheritTools || item.tools) && !activeNames) {
           return { content: [{ type: "text", text: `Task ${index + 1}: this Pi host does not expose active tool names; configurable tools cannot be validated. Use default tools or a host with getActiveTools().` }], details: { runs: [], write: false }, isError: true };
         }
-        if (item.inheritTools && !selected?.length) {
-          return { content: [{ type: "text", text: `Task ${index + 1}: no active tools remain after applying ${mode} safety filters. Choose explicit safe tools or use the mode defaults.` }], details: { runs: [], write: false }, isError: true };
+        const inherited = item.inheritTools && activeNames ? activeNames.filter(name => allowedInMode(mode, name, trusted) && !disallowed.has(name)) : undefined;
+        const defaults = inherited ?? (mode === "worktree" ? defaultWorktreeTools : mode === "direct" ? undefined : [...READ_ONLY_TOOLS]);
+        const explicit = rules?.allow.length ? rules.allow : undefined;
+        let selected: readonly string[] | undefined;
+        if (explicit) selected = explicit;
+        else if (rules) {
+          if (!defaults) return { content: [{ type: "text", text: `Task ${index + 1}: direct mode has no default tool list to subtract from; list the tools to grant.` }], details: { runs: [], write: false }, isError: true };
+          selected = defaults.filter(name => !rules!.deny.includes(name));
+        } else selected = inherited ?? (defaults?.some(name => disallowed.has(name)) ? defaults.filter(name => !disallowed.has(name)) : undefined);
+        if ((item.inheritTools || rules) && !selected?.length) {
+          return { content: [{ type: "text", text: `Task ${index + 1}: no tools remain after applying ${mode} safety filters and disallow rules. Choose explicit tools or use the mode defaults.` }], details: { runs: [], write: false }, isError: true };
         }
         if (selected) {
-          if (activeNames) {
-            const missing = selected.filter(name => !activeNames.includes(name));
+          const blocked = selected.filter(name => disallowed.has(name));
+          if (blocked.length) return { content: [{ type: "text", text: `Task ${index + 1}: tools disallowed by ${SUBAGENT_CONFIG_FILE}: ${blocked.join(", ")}.` }], details: { runs: [], write: false }, isError: true };
+          if (explicit && activeNames) {
+            const missing = explicit.filter(name => !activeNames.includes(name));
             if (missing.length) return { content: [{ type: "text", text: `Task ${index + 1}: tools are not currently active in the parent: ${missing.join(", ")}. Enable their extensions/tools first.` }], details: { runs: [], write: false }, isError: true };
-          } else if (item.inheritTools) {
-            return { content: [{ type: "text", text: `Task ${index + 1}: cannot resolve inherited tools from this Pi host.` }], details: { runs: [], write: false }, isError: true };
           }
           const recursive = selected.filter(name => RECURSIVE_TOOLS.has(name));
           if (recursive.length) return { content: [{ type: "text", text: `Task ${index + 1}: recursive delegation tools are never available to subagents: ${recursive.join(", ")}.` }], details: { runs: [], write: false }, isError: true };
-          if ((mode === "scout" || mode === "fork") && selected.some(name => !READ_ONLY_SAFE_TOOLS.has(name))) {
-            return { content: [{ type: "text", text: `Task ${index + 1}: ${mode} is read-only; remove edit/write/shell tools or use mode="worktree" for sandboxed code changes.` }], details: { runs: [], write: false }, isError: true };
-          }
+          // Explicit `tools` are the moderator's deliberate grant: any active non-recursive tool is honored.
+          // Only the worktree sandbox keeps its hard boundary, since a shell would escape the path guard.
           if (mode === "worktree") {
-            const unsafe = selected.filter(name => !WORKTREE_SAFE_TOOLS.has(name));
-            if (unsafe.length) return { content: [{ type: "text", text: `Task ${index + 1}: worktree cannot safely use tools outside its path-guarded allowlist: ${unsafe.join(", ")}. Arbitrary extension tools remain disabled unless the worktree boundary validates them.` }], details: { runs: [], write: false }, isError: true };
+            const unsafe = selected.filter(name => SHELL_TOOLS.has(name));
+            if (unsafe.length) return { content: [{ type: "text", text: `Task ${index + 1}: worktree subagents cannot run shell tools (${unsafe.join(", ")}); edits stay inside path-guarded file tools.` }], details: { runs: [], write: false }, isError: true };
+          }
+        }
+        toolPlans.push(selected);
+      }
+      // Extension/skill rules need the parent's resolved resources; plain launches skip that work.
+      let extensionPlan: ExtensionPlan | undefined;
+      const skillPlans: Array<readonly string[] | undefined> = requested.map(() => undefined);
+      const ruled = (rules: RuleList) => rules.allow.length > 0 || rules.deny.length > 0;
+      if (ruled(config.extensions) || ruled(config.skills) || skillRules.some(Boolean)) {
+        if (!options.loadResources) {
+          return { content: [{ type: "text", text: "This Pi host cannot resolve extensions/skills for subagents; remove extension/skill rules." }], details: { runs: [], write: false }, isError: true };
+        }
+        let catalog: ResourceCatalog;
+        try {
+          catalog = await options.loadResources(ctx.cwd);
+          if (ruled(config.extensions)) extensionPlan = planExtensions(config.extensions, catalog, OWN_EXTENSION);
+        } catch (error) {
+          return { content: [{ type: "text", text: `Cannot plan subagent extensions: ${(error as Error).message}` }], details: { runs: [], write: false }, isError: true };
+        }
+        for (const [index, rules] of skillRules.entries()) {
+          try { skillPlans[index] = planSkills(config.skills, rules, catalog, SUBAGENT_CONFIG_FILE); }
+          catch (error) {
+            return { content: [{ type: "text", text: `Task ${index + 1}: ${(error as Error).message}` }], details: { runs: [], write: false }, isError: true };
           }
         }
       }
@@ -1519,8 +1600,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       const toolsByRun = new Map<number, readonly string[] | undefined>();
       const runs: DelegateRun[] = requested.map((item, index) => {
         const mode: DelegateExecutionMode = item.mode ?? defaultMode;
-        toolsByRun.set(index + 1, item.tools ?? (item.inheritTools && activeNames ? activeNames.filter(name =>
-          allowedInMode(mode, name)) : mode === "worktree" ? defaultWorktreeTools : undefined));
+        toolsByRun.set(index + 1, toolPlans[index] ?? (mode === "worktree" ? defaultWorktreeTools : undefined));
         const role = cleanText(item.role ?? roleForMode(mode), 32) || roleForMode(mode);
         const candidates = [...roleCandidates(role), ...roleCandidates("default")];
         const selected = candidates.find((candidate) => available.has(candidate.provider + "/" + candidate.model));
@@ -1684,7 +1764,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         // Read at every spawn, so a relaunch after hibernation reaches the current discussion broker.
         hooks.env = () => ({ ...env, ...discussionEnv(key, run.name) });
         const argsFor = (resume?: string) => delegateArgs(run.model, thinkingByRun.get(run.index), write, process.argv,
-          session && resume ? { ...session, resume } : session, run.mode === "scout" ? toolsByRun.get(run.index) : undefined);
+          session && resume ? { ...session, resume } : session, run.mode === "scout" ? toolsByRun.get(run.index) : undefined,
+          { ...(extensionPlan ? { extensions: extensionPlan } : {}), ...(skillPlans[run.index - 1] ? { skills: skillPlans[run.index - 1] } : {}) });
         if (session) {
           const own = session.sessionDir;
           // Only ever continue this child's own private session, never a file it reports elsewhere.

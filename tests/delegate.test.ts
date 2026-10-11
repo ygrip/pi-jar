@@ -84,6 +84,20 @@ test("default scouts load only pi-jar while optional tools and explicit parent e
   assert.ok(explicit.includes("/custom.ts"));
   const writer = delegateArgs(undefined, undefined, true, plain, { source: "/parent.jsonl", sessionDir: "/child", tools: WORKTREE_TOOLS });
   assert.ok(!writer.includes("--no-extensions"), "writers keep multi_file_edit and other required plugins");
+  const withAuth = delegateArgs(undefined, undefined, false, plain, undefined, undefined, { extensions: { lean: ["/auth/index.ts"], add: ["/x.ts"] } });
+  assert.ok(withAuth.includes("--no-extensions") && !withAuth.includes("/x.ts"));
+  assert.equal(withAuth[withAuth.indexOf("/auth/index.ts") - 1], "--extension", "lean children still load configured essentials");
+  const added = delegateArgs(undefined, undefined, false, plain, undefined, ["read", "mom_search"], { extensions: { lean: [], add: ["/x.ts"] } });
+  assert.ok(!added.includes("--no-extensions") && added[added.indexOf("/x.ts") - 1] === "--extension", "discovering children get allowed extras");
+  const denied = delegateArgs(undefined, undefined, false, plain, undefined, ["read", "mom_search"], { extensions: { lean: [], add: [], explicit: ["/a.ts", "/b.ts"] } });
+  assert.ok(denied.includes("--no-extensions") && denied.includes("/a.ts") && denied.includes("/b.ts"), "a disallow switches to the explicit list");
+  assert.ok(denied[denied.indexOf("--no-extensions") + 2]!.endsWith("/extensions/index.ts"), "the running pi-jar is always loaded");
+  const parentNe = delegateArgs(undefined, undefined, false, [...plain, "-ne"], undefined, ["read", "mom_search"], { extensions: { lean: [], add: [], explicit: ["/a.ts"] } });
+  assert.ok(!parentNe.includes("/a.ts"), "a parent without discovery never gains discovered extensions");
+  const skills = delegateArgs(undefined, undefined, false, plain, undefined, undefined, { skills: ["/s/mom/SKILL.md"] });
+  assert.deepEqual(skills.slice(skills.indexOf("--no-skills"), skills.indexOf("--no-skills") + 3), ["--no-skills", "--skill", "/s/mom/SKILL.md"]);
+  assert.ok(!scout.includes("--no-skills"), "no skill rules keep normal discovery");
+  assert.ok(!optional.includes("/auth/index.ts"));
 });
 
 test("explicit active web tools and filtered parent inheritance produce per-child allowlists", async () => {
@@ -110,22 +124,100 @@ test("explicit active web tools and filtered parent inheritance produce per-chil
   await host.registry.stop(host.registry.records()[0]!.key);
 });
 
-test("custom subagent tools validate active names and cannot widen unsafe modes", async () => {
+test("custom subagent tools validate active names, never recurse and keep shells out of worktrees", async () => {
   const fake = fakeSpawn(child => { say(child, "ready"); settle(child); });
   const host = moderatorHost(fake.spawn, ["read", "edit", "bash", "multi_file_edit", "web_search", "jar_delegate"]);
   const missing = await host.delegate.execute("d", { tasks: [{ task: "x", tools: ["not_active"] }] }, undefined, undefined, quiet);
   assert.equal(missing.isError, true);
   assert.match(missing.content[0]!.text, /not currently active/);
-  const readOnly = await host.delegate.execute("d", { tasks: [{ task: "x", mode: "scout", tools: ["read", "edit"] }] }, undefined, undefined, quiet);
-  assert.equal(readOnly.isError, true);
-  assert.match(readOnly.content[0]!.text, /read-only/);
   const recursive = await host.delegate.execute("d", { tasks: [{ task: "x", mode: "fork", tools: ["read", "jar_delegate"] }] }, undefined, undefined, quiet);
   assert.equal(recursive.isError, true);
   assert.match(recursive.content[0]!.text, /recursive delegation/);
   const unguarded = await host.delegate.execute("d", { tasks: [{ task: "x", mode: "worktree", tools: ["read", "bash"] }] }, undefined, undefined, quiet);
   assert.equal(unguarded.isError, true);
-  assert.match(unguarded.content[0]!.text, /path-guarded|bash/);
+  assert.match(unguarded.content[0]!.text, /shell tools \(bash\)/);
   assert.equal(fake.calls.length, 0, "rejected capability sets must not spawn a child");
+});
+
+test("explicit tools are honored as granted and trusted config extras join inheritance", async () => {
+  const fake = fakeSpawn(child => { say(child, "ready"); settle(child); });
+  const active = [...READ_ONLY_TOOLS, "mom_search", "punakawan_project", "edit", "bash"];
+  const catalog = { extensions: [{ path: "/auth.ts", enabled: true, source: "npm:auth" }], skills: [] };
+  const host = moderatorHost(fake.spawn, active, { getSubagentConfig: () => ({ tools: { allow: ["mom_search"], deny: [] },
+    extensions: { allow: ["/auth.ts"], deny: [] }, skills: { allow: [], deny: [] } }), loadResources: async () => catalog });
+  const explicit = await host.delegate.execute("d1", {
+    tasks: [{ task: "recall", mode: "scout", tools: ["read", "mom_search", "punakawan_project"] }]
+  }, undefined, undefined, quiet);
+  assert.match(explicit.content[0]!.text, /launch is asynchronous/);
+  await tick();
+  assert.equal(fake.calls[0]!.args.at(-1), "read,mom_search,punakawan_project");
+  assert.ok(!fake.calls[0]!.args.includes("--no-extensions"), "MCP tools need full extension discovery");
+  await host.registry.stop(host.registry.records()[0]!.key);
+
+  await host.delegate.execute("d2", { tasks: [{ task: "recall", mode: "scout", inheritTools: true }] }, undefined, undefined, quiet);
+  await tick();
+  const inherited = fake.calls[1]!.args.at(-1)!.split(",");
+  assert.ok(inherited.includes("mom_search"), "trusted extras are inherited");
+  for (const forbidden of ["punakawan_project", "edit", "bash"]) assert.ok(!inherited.includes(forbidden), `${forbidden} is not inherited`);
+  await host.registry.stop(host.registry.records()[0]!.key);
+
+  await host.delegate.execute("d3", { tasks: [{ task: "look" }] }, undefined, undefined, quiet);
+  await tick();
+  const lean = fake.calls[2]!.args;
+  assert.ok(lean.includes("--no-extensions") && lean.includes("/auth.ts"), "lean scouts load configured extensions");
+  await host.registry.stop(host.registry.records()[0]!.key);
+
+  const broken = moderatorHost(fake.spawn, active, { getSubagentConfig: () => { throw new Error("bad json"); } });
+  const failed = await broken.delegate.execute("d4", { tasks: [{ task: "x" }] }, undefined, undefined, quiet);
+  assert.equal(failed.isError, true);
+  assert.match(failed.content[0]!.text, /Cannot read subagent config: bad json/);
+});
+
+test("tool and skill +/- rules: exact lists, subtraction from defaults, and user disallows win", async () => {
+  const fake = fakeSpawn(child => { say(child, "ready"); settle(child); });
+  const active = [...READ_ONLY_TOOLS, "mom_search", "punakawan_connector_call", "bash"];
+  const skill = (name: string, enabled = true) => ({ path: `/skills/${name}/SKILL.md`, enabled, source: "auto" });
+  const catalog = {
+    extensions: [{ path: "/ext/web.ts", enabled: true, source: "npm:pi-web-access", packageRoot: "/ext" }, { path: "/ext/auth.ts", enabled: true, source: "npm:@g/auth" }],
+    skills: [skill("mom"), skill("punakawan"), skill("lavish"), skill("antislop", false)]
+  };
+  const config = { tools: { allow: [], deny: ["punakawan_connector_call"] }, extensions: { allow: [], deny: ["pi-web-access"] },
+    skills: { allow: ["antislop"], deny: ["lavish"] } };
+  const host = moderatorHost(fake.spawn, active, { getSubagentConfig: () => config, loadResources: async () => catalog });
+  const run = async (task: Record<string, unknown>) => {
+    const before = fake.calls.length;
+    const result = await host.delegate.execute("d", { tasks: [{ task: "x", ...task }] }, undefined, undefined, quiet);
+    await tick();
+    for (const record of host.registry.records()) await host.registry.stop(record.key);
+    return { result, args: fake.calls.length > before ? fake.calls.at(-1)!.args : undefined };
+  };
+  const skillsOf = (args: string[]) => args.flatMap((arg, index) => args[index - 1] === "--skill" ? [arg] : []);
+
+  const subtract = await run({ tools: ["-jar_discuss"] });
+  assert.equal(subtract.args!.at(-1), READ_ONLY_TOOLS.filter(name => name !== "jar_discuss").join(","), "only - entries subtract from defaults");
+  assert.deepEqual(skillsOf(subtract.args!), ["/skills/mom/SKILL.md", "/skills/punakawan/SKILL.md", "/skills/antislop/SKILL.md"], "config +/- shape default skills");
+
+  const exact = await run({ tools: ["read", "mom_search", "-bash"], skills: ["mom"] });
+  assert.equal(exact.args!.at(-1), "read,mom_search");
+  assert.deepEqual(skillsOf(exact.args!), ["/skills/mom/SKILL.md"]);
+  const explicitExt = exact.args!.flatMap((arg, index) => exact.args![index - 1] === "--extension" ? [arg] : []);
+  assert.ok(exact.args!.includes("--no-extensions") && explicitExt.includes("/ext/auth.ts") && !explicitExt.includes("/ext/web.ts"), "disallowed extensions are dropped");
+
+  const minusSkill = await run({ skills: ["-punakawan"] });
+  assert.deepEqual(skillsOf(minusSkill.args!), ["/skills/mom/SKILL.md", "/skills/antislop/SKILL.md"]);
+  const none = await run({ skills: [] });
+  assert.ok(none.args!.includes("--no-skills") && !skillsOf(none.args!).length, "[] means no skills");
+
+  const blockedTool = await run({ tools: ["read", "punakawan_connector_call"] });
+  assert.equal(blockedTool.result.isError, true);
+  assert.match(blockedTool.result.content[0]!.text, /disallowed by pi-jar-subagents\.json: punakawan_connector_call/);
+  const blockedSkill = await run({ skills: ["lavish"] });
+  assert.equal(blockedSkill.result.isError, true);
+  assert.match(blockedSkill.result.content[0]!.text, /Task 1: skills disallowed by pi-jar-subagents\.json: lavish/);
+  const unknown = await run({ skills: ["nope"] });
+  assert.match(unknown.result.content[0]!.text, /unknown skill "nope"/);
+  const inherited = await run({ inheritTools: true });
+  assert.ok(!inherited.args!.at(-1)!.split(",").includes("punakawan_connector_call"));
 });
 
 test("tool inheritance fails clearly when the Pi host cannot enumerate active tools", async () => {
