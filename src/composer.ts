@@ -55,7 +55,10 @@ export function sessionDisplayName(name?: string, id?: string): string {
   return `${first}-${last}`;
 }
 
+/** Empty-cell cursor: pi-tui ≤1.1 paints it inline; 1.2+ wraps it in fake-cursor APC markers resolved at render time. */
 const CURSOR = "\x1b[7m \x1b[0m";
+const FAKE_CURSOR = "\x1b_pi:fc\x07 \x1b_pi:/fc\x07";
+const hasCursor = (row: string) => row.includes(FAKE_CURSOR) || row.includes(CURSOR);
 const BORDER = /^─+(?:\s*[↑↓]\s*\d+\s*more\s*─*)?$/;
 /** Index of the editor's bottom border: known row count when available, else the first plain border row. */
 function bottomBorderIndex(lines: readonly string[], visibleRows?: number): number {
@@ -125,7 +128,7 @@ export function roundedInput(lines: string[], width: number, focused: boolean, t
   const fit = (text: string) => fittedLines.get(text, (value) => truncateToWidth(value, width));
   const content = lines.slice(1, bottom).map((line, index) => {
     let row = line;
-    if (index === 0 && options.ghost && row.includes(CURSOR)) {
+    if (index === 0 && options.ghost && hasCursor(row)) {
       const base = row.replace(/ +$/, "");
       const room = inner - visibleWidth(base);
       // ascii's tab "icon" is already the word.
