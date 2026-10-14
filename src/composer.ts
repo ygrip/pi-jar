@@ -318,6 +318,7 @@ export class ComposerStyle {
   private phase: WorkingPhase = "idle";
   private animations = true;
   private mascotOn = true;
+  private tasksVisible = false;
   private session = "";
   private profile = "Default";
   private cwd = process.cwd();
@@ -338,16 +339,7 @@ export class ComposerStyle {
       const mood = this.animations ? this.mascot.mood() : "idle";
       return paintFace(mascotFace(mood), mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined);
     },
-    perch: (width) => {
-      if (!this.mascotOn || width < 40) return undefined;
-      const mood = this.animations ? this.mascot.mood() : "idle";
-      const frame = this.animations ? Math.floor(Date.now() / COMPOSER_ACTIVE_INTERVAL_MS) : 0;
-      if (this.fullSprite(width)) {
-        return mascotPerch(mood, frame, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined)
-          .map(row => "   " + row);
-      }
-      return ["   " + paintTip(mascotTip(mood, frame), mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined)];
-    },
+    perch: (width) => this.tasksVisible ? undefined : this.renderMascot(width),
     session: () => this.session,
     profile: () => this.profile,
     ghost: () => this.suggestions?.text,
@@ -373,6 +365,20 @@ export class ComposerStyle {
       return this.chips.chips.map((chip) => this.colors?.fg("accent", chip) ?? chip).join(this.colors?.fg("dim", "   ") ?? "   ");
     }
   };
+
+  /** Tasks share the mascot's perch instead of reserving a separate vertical widget. */
+  setTasksVisible(visible: boolean): void { this.tasksVisible = visible; }
+  pokeMascot(): void { this.decor.poke(); }
+  renderMascot(width: number): string[] | undefined {
+    if (!this.mascotOn || width < 40) return undefined;
+    const mood = this.animations ? this.mascot.mood() : "idle";
+    const frame = this.animations ? Math.floor(Date.now() / COMPOSER_ACTIVE_INTERVAL_MS) : 0;
+    if (this.fullSprite(width)) {
+      return mascotPerch(mood, frame, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined)
+        .map(row => "   " + row);
+    }
+    return ["   " + paintTip(mascotTip(mood, frame), mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined)];
+  }
 
   /** Keep short/narrow terminals usable; the pet and mood spark reserve six rows. */
   private fullSprite(width: number): boolean {

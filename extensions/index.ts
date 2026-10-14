@@ -168,10 +168,13 @@ export default function piJar(pi: ExtensionAPI): void {
     if (open.length) todosAcknowledged = false;
     const visible = enabled && items.length > 0 && (open.length > 0 || !todosAcknowledged);
     try {
-      // Rows are rebuilt only when the list changes (every change reinstalls the widget), the width or the theme.
       ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (tui, theme) =>
-        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState));
-    } catch { /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
+        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState, {
+          render: (width) => composer.enabled ? composer.renderMascot(width) : undefined,
+          poke: () => composer.pokeMascot()
+        }));
+      composer.setTasksVisible(visible);
+    } catch { composer.setTasksVisible(false); /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
   };
   registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
   let changes: ChangeTracker | undefined;
