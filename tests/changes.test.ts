@@ -8,7 +8,7 @@ import { ChangeTracker, coarseLineDiff, diffHunkOffsets, diffRows, diffRowsWindo
   MAX_REVIEW_DIFF_LINES, MAX_TRACKED_BYTES, MAX_TRACKED_TOTAL_BYTES } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, readChildBaseline, writeChildBaseline } from "../src/child-baselines.ts";
 import { emphasize, inlineChanges } from "../src/diff-inline.ts";
-import { filterChanges, fullReviewRequired, fullReviewSupported, openDiffView, registerChangeReview, renderDiff, safeLine } from "../src/diff-view.ts";
+import { diffBackgrounds, filterChanges, fullReviewRequired, fullReviewSupported, openDiffView, registerChangeReview, renderDiff, safeLine } from "../src/diff-view.ts";
 
 const plain = (_color: string, text: string) => text;
 const workspace = () => realpathSync(mkdtempSync(join(tmpdir(), "pi-jar-changes-")));
@@ -59,12 +59,40 @@ test("intraline emphasis marks changed words and survives styling", () => {
   assert.equal(inlineChanges("abc", "xyz"), undefined, "wholly rewritten lines are not emphasized");
   assert.equal(inlineChanges("same", "same"), undefined);
   assert.equal(emphasize("ab\x1b[31mcdef\x1b[39mgh", [[1, 3], [5, 7]]), "a\x1b[7mb\x1b[31mc\x1b[27mde\x1b[7mf\x1b[39mg\x1b[27mh");
+  assert.equal(emphasize("a\x1b[0mb\x1b[39mc", [[0, 3]]), "\x1b[7ma\x1b[0m\x1b[7mb\x1b[39mc\x1b[27m", "syntax resets must not erase a changed span's emphasis");
   const change = { path: "/x/a.ts", rel: "a.ts", status: "modified" as const, before: "let total = 1;\n", after: "let total = 2;\n", added: 1, removed: 1 };
   const rows = renderDiff(change, 60, plain);
   assert.ok(rows.some(row => row.includes("\x1b[7m2\x1b[27m")) && rows.some(row => row.includes("\x1b[7m1\x1b[27m")));
   const wrapped = renderDiff({ ...change, after: "let total = " + "9".repeat(80) + ";\n" }, 40, plain, { wrap: true });
   assert.ok(wrapped.length > renderDiff({ ...change, after: "let total = " + "9".repeat(80) + ";\n" }, 40, plain).length, "wrap shows continuation rows");
   assert.ok(wrapped.every(row => visibleWidth(row) <= 40));
+});
+
+test("OMP-style preview defaults to split and keeps narrow panes unified", () => {
+  const change = { path: "/x/a.ts", rel: "a.ts", status: "modified" as const, before: "const value = compute();\n", after: "const value = computeFast();\n", added: 1, removed: 1 };
+  const split = renderDiff(change, 100, plain).map(stripTerminalSequences);
+  assert.match(split[0]!, /^Before\s+│ After$/);
+  assert.ok(split.some(row => row.includes("compute();") && row.includes("computeFast();")), "replacements share a split row");
+  const narrow = renderDiff(change, 60, plain, { unified: false }).map(stripTerminalSequences);
+  assert.ok(narrow.every(row => !row.includes("│") && visibleWidth(row) <= 60), "explicit split also falls back below 70 columns");
+  assert.ok(narrow.some(row => row.includes("-const value")) && narrow.some(row => row.includes("+const value")));
+  assert.ok(renderDiff(change, 100, plain, { unified: true }).every(row => !row.includes("│")), "unified remains selectable");
+});
+
+test("OMP backgrounds derive from the native palette and preserve stronger word marks across syntax resets", () => {
+  const paint = diffBackgrounds("\x1b[48;2;0;0;0m", "\x1b[38;2;0;200;0m", "\x1b[38;2;200;0;0m")!;
+  assert.equal(paint.tint!("add"), "\x1b[48;2;0;36;0m");
+  assert.equal(paint.strongTint!("remove"), "\x1b[48;2;84;0;0m");
+  const light = diffBackgrounds("\x1b[48;2;255;255;255m", "\x1b[38;2;0;200;0m", "\x1b[38;2;200;0;0m")!;
+  assert.equal(light.tint!("add"), "\x1b[48;2;194;242;194m");
+  assert.equal(light.strongTint!("remove"), "\x1b[48;2;229;133;133m");
+  assert.equal(diffBackgrounds("\x1b[48;5;0m", "\x1b[32m", "\x1b[31m"), undefined, "non-RGB themes retain their existing styling");
+  const change = { path: "/x/a.ts", rel: "a.ts", status: "modified" as const, before: "const value = compute();\n", after: "const value = computeFast();\n", added: 1, removed: 1 };
+  const rows = renderDiff(change, 100, plain, { paint: { ...paint, syntax: text => text.replace("computeFast", "compute\x1b[0mFast") } });
+  const soft = paint.tint!("add"), strong = paint.strongTint!("add");
+  assert.ok(rows.some(row => row.includes(strong + "compute\x1b[0m" + soft + strong + "Fast" + soft)), "syntax resets reapply the active word background");
+  assert.ok(rows.every(row => !row.includes("\x1b[7m") && visibleWidth(row) <= 100));
+  assert.ok(rows.some(row => row.includes(soft + "();" + " ")), "unchanged suffix and padding restore the soft background");
 });
 
 test("tracker captures once, reports added/modified/deleted, accepts and reverts", () => {
@@ -241,7 +269,7 @@ test("large diffs default to a summary and permit an explicitly chosen bounded f
   assert.match(summary.join("\n"), /Summary preview/);
   assert.match(summary.join("\n"), /Press v/);
   const full = renderDiff(change, 100, plain, { fullReview: true, scroll: 500, rows: 20 });
-  assert.ok(full.length <= 22, "the viewport renderer returns a bounded page, not the entire diff");
+  assert.ok(full.length <= 23, "the viewport renderer returns a bounded page plus split/coarse headers, not the entire diff");
   assert.match(full.join("\n"), /Coarse preview/);
   assert.match(full.join("\n"), /old 4/);
   const tooMany = { ...change, before: "x\n".repeat(MAX_REVIEW_DIFF_LINES), after: "y\n".repeat(1) };
@@ -255,7 +283,7 @@ test("rendered diff keeps indentation, strips escapes and fits the pane", () => 
   assert.ok(lines.every((line) => visibleWidth(line) <= 30));
   assert.ok(lines.some((line) => line.includes("   a")), "context keeps indentation");
   assert.ok(lines.some((line) => line.includes("+  bred")));
-  const sideBySide = renderDiff(change, 60, plain, { unified: false });
+  const sideBySide = renderDiff(change, 90, plain, { unified: false });
   assert.ok(sideBySide.some(line => line.includes("│")), "split view separates original and updated columns");
   assert.ok(sideBySide.some(line => line.includes("+")));
   assert.equal(safeLine("a\x07b"), "a·b");
@@ -294,8 +322,12 @@ test("review overlay accepts, confirms reverts and closes when nothing is left; 
     const rendered = component.render(160).map(stripTerminalSequences).join("\n");
     assert.match(rendered, /± CHANGES · 2\/2 files · \+2 −2/);
     assert.match(rendered, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/a\\.ts"), "full absolute path heads the right column");
+    assert.match(rendered, /Before.*After/, "wide review opens with OMP-style split columns");
     assert.match(rendered, /-a/);
     assert.match(rendered, /\+A/);
+    component.handleInput("t");
+    assert.doesNotMatch(component.render(160).map(stripTerminalSequences).join("\n"), /Before.*After/, "t switches to unified rows");
+    component.handleInput("t");
     component.handleInput("/");
     for (const key of "b.ts") component.handleInput(key);
     const searched = component.render(100).map(stripTerminalSequences).join("\n");

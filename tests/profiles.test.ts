@@ -10,29 +10,25 @@ import { promptNewProfile } from "../src/profile-ui.ts";
 
 function temp(run: (dir: string) => void | Promise<void>) { return async () => { const dir = mkdtempSync(join(tmpdir(), "pi-jar-profile-")); try { await run(dir); } finally { rmSync(dir, { recursive: true, force: true }); } }; }
 
-test("context diet is opt-in, profile-specific, and legacy profiles load without rewriting", temp((dir) => {
+test("retired context controls load harmlessly and disappear on the next profile save", temp((dir) => {
   new ProfileStore(dir);
   const file = join(dir, PROFILE_FILE);
   const legacy = JSON.parse(readFileSync(file, "utf8"));
-  delete legacy.profiles[0].settings.contextDiet;
+  legacy.profiles[0].settings.contextDiet = "on";
+  legacy.profiles[0].settings.contextBudget = { softTokens: 120000, action: "compact" };
   const original = JSON.stringify(legacy);
   writeFileSync(file, original);
   const store = new ProfileStore(dir);
-  assert.equal(store.active().settings.contextDiet, false);
-  assert.equal(readFileSync(file, "utf8"), original);
-  store.add("Diet", "dark", { ...defaultVisualSettings(), contextDiet: true });
-  const restarted = new ProfileStore(dir);
-  assert.equal(restarted.list()[0]!.settings.contextDiet, false);
-  assert.equal(restarted.list()[1]!.settings.contextDiet, true);
-}));
-
-test("malformed context-diet preferences are rejected rather than enabled", temp((dir) => {
-  new ProfileStore(dir);
-  const file = join(dir, PROFILE_FILE);
-  const doc = JSON.parse(readFileSync(file, "utf8"));
-  doc.profiles[0].settings.contextDiet = "on";
-  writeFileSync(file, JSON.stringify(doc));
-  assert.throws(() => new ProfileStore(dir), /Malformed profile entry/);
+  assert.equal("contextDiet" in store.active().settings, false);
+  assert.equal("contextBudget" in store.active().settings, false);
+  assert.equal(readFileSync(file, "utf8"), original, "loading does not rewrite user files");
+  store.add("New", "dark", defaultVisualSettings());
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  for (const profile of saved.profiles) {
+    assert.equal("contextDiet" in profile.settings, false);
+    assert.equal("contextBudget" in profile.settings, false);
+  }
+  assert.equal(new ProfileStore(dir).list().length, 2);
 }));
 
 test("cache diagnostics are on by default, saved per profile, and older profiles load without rewriting", temp((dir) => {

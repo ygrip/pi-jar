@@ -40,18 +40,17 @@ Baseline: a 309-call, $6.34 session (`node scripts/session-cost.mjs 01a101ba-…
 
 | Change | Where | Effect |
 | --- | --- | --- |
-| Context budget (`suggest` by default at 120k; opt-in `compact` at a safe point) and average cost per call in the footer | `src/context-budget.ts` | Long sessions are compacted or split before every call re-sends 200k+ |
-| Topic-switch and cold-cache hints | `src/context-budget.ts` | `/new` for unrelated work; `/compact` before re-sending a large expired context |
+| Context controls retired in 0.3.0 | Pi owns compaction; pi-jar meters/diagnostics only observe | No prior-turn pruning, soft-limit notices or budget-triggered abort/compact/resume |
 | `bash` for finite commands; `jar_shell start` `waitMs`; incremental `output` | `src/shells.ts` | Short jobs take one call instead of start → output → wait, and repeated reads don't resend old output |
-| 400-line cap on whole reads of files over 50 KB; opt-in repeated-read stub; diet stubs superseded reads | `src/compact-tools.ts`, `src/context-diet.ts` | Smaller tool results and fewer duplicate reads in the context |
-| Pool default 2 (opt-in Swarm profile: 4); delegate only for ≥2 chunks of ≥10 tool calls | `src/settings.ts`, `src/delegate.ts`, `src/profile-ui.ts` | Fewer moderation round-trips |
+| 400-line cap on whole reads of files over 50 KB; opt-in repeated-read stub | `src/compact-tools.ts` | Smaller new tool results without rewriting previous turns |
+| Pool default 2 (opt-in Swarm profile: 4); route substantial independent tasks before implementation | `src/settings.ts`, `src/delegate.ts`, `src/profile-ui.ts` | Scouts research external references; worktrees implement without duplicate main-agent work |
 | Events: ≤400-char summary + changed files, one message per boundary, discussion mail inlined | `src/delegate.ts`, `src/discussion.ts` | Events shrink from ~1.9 KB to ~0.5 KB; no `list` call to read mail; no echoes of own messages |
 | `/roles` warns when `scout`/`reviewer` run on the main model while a cheaper one is available | `src/model-roles.ts` | Subagent calls move to a cheaper model |
 | Advisor gates off by default; loop threshold 4; re-reads, shell polls and test reruns are never loops | `src/advisor.ts` | No side calls from normal fix loops |
 | Cache-break diagnostics: one notice per costly prompt-cache break, `/cache-breaks`, a per-session JSONL log | `src/cache-breaks.ts`, `src/cache-breaks-view.ts` | The tool list, system section or message that forced a rewrite is named instead of guessed |
 | Rules moved into tool descriptions; `jar_plan_submit`/`jar_goal` active only in their mode | all tool modules, `src/tool-activation.ts` | Smaller fixed prompt (below) |
 
-Fixed prompt that pi-jar contributes, measured from Pi's built system message in RPC mode (same project, same Pi 1.0.4): the `rules` section went from 7,584 to 1,675 characters and `tools` from 1,773 to 1,476; two schemas (~900 characters) are no longer sent outside their mode. Tool descriptions and schemas grew by ~1.1k characters because the guidance moved there. Net: ~5k characters (~1.3k tokens) less on every call. That is modest next to context growth, so the context budget and shell/read changes carry most of the saving.
+Fixed prompt that pi-jar contributes, measured from Pi's built system message in RPC mode (same project, same Pi 1.0.4): the `rules` section went from 7,584 to 1,675 characters and `tools` from 1,773 to 1,476; two schemas (~900 characters) are no longer sent outside their mode. Tool descriptions and schemas grew by ~1.1k characters because the guidance moved there. Net: ~5k characters (~1.3k tokens) less on every call. These historical measurements do not establish current savings; context-budget controls were subsequently removed at the user's request.
 
 Cache breaks: an audit of a $30 session found ~68% of the cost was cache rewrites caused by prompt-prefix changes: tools activated mid-session (the cache read fell to 0 and ~230k tokens were rewritten per call), an extension replacing old tool results with placeholders (the read stuck at a mid-history offset), and one unexplained break at a user-turn boundary. Pi reports *that* a call missed the cache, not why. `src/cache-breaks.ts` fingerprints each provider payload (model, tools, system-prompt sections, messages; hashes and sizes only), finds the first segment where the previous request stopped being a prefix of this one, and joins that with the call's usage; a call whose cache read falls more than 4,096 tokens short of the previous prompt is a costly break. It only observes, and is on by default (`cacheDiagnostics`).
 
@@ -69,11 +68,11 @@ Not done: Pi's compaction thresholds and the user's own settings are left alone;
 
 | Item | Why |
 | --- | --- |
-| 1. Single Context Projector | The four `context` hooks (child automation filter, diet, plan, goal) are each one `customType` scan that allocates only when something is stale — negligible next to request serialization. Merging them couples independent modules for no measurable gain. Revisit only if `/jar perf` shows context hooks in a profile. |
-| 2. Context Diet v2 (`stripper` model, `DietSnapshot`) | A model-written summary replaces exact history with a lossy one, adds a side call per compression and duplicates Pi's own compaction. Needs its own design (fidelity, resumability, cache-hit impact) before code. |
-| 3. Diet-aware delegation | Depends on item 2. Today `scout` already starts fresh and `fork` is an explicit mode; changing the defaults alters subagent results. |
+| 1. Single Context Projector | The workflow `context` hooks (child automation filter, plan, goal) are each one `customType` scan that allocates only when something is stale — negligible next to request serialization. Merging them couples independent modules for no measurable gain. Revisit only if `/jar perf` shows context hooks in a profile. |
+| 2. Context Diet v2 (`stripper` model, `DietSnapshot`) | Retired, not planned: the user requested removal of pi-jar context rewriting as inefficient. Native Pi owns compaction. |
+| 3. Diet-aware delegation | Retired with context diet. `scout` already starts fresh and `fork` explicitly inherits context. |
 | 4. Strict utility roles | Side calls without a role use the current model by design (`askRole`); making them fail or go deterministic breaks advisor and commit messages for users without roles. Addressed instead by the one-time notice above. |
-| 10. Compact workflow history | Rewriting persisted session history is ruled out; provider context is handled by the cache-stable projection above. |
+| 10. Compact workflow history | Rewriting persisted session history is ruled out; pi-jar no longer projects prior-turn provider history. |
 
 ## Success criteria
 

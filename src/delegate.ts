@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { signalProcessTree } from "./async-process.ts";
-import { CHILD_TOOLS_ENV, EMPTY_SUBAGENT_CONFIG, parseRules, RECURSIVE_TOOLS, SHELL_TOOLS, SUBAGENT_CONFIG_FILE, WEB_TOOLS, type RuleList, type SubagentConfig } from "./subagent-tools.ts";
+import { CHILD_SKILL_READS_ENV, CHILD_TOOLS_ENV, skillReadRoots, EMPTY_SUBAGENT_CONFIG, parseRules, RECURSIVE_TOOLS, SHELL_TOOLS, SUBAGENT_CONFIG_FILE, WEB_TOOLS, type RuleList, type SubagentConfig } from "./subagent-tools.ts";
 import { planExtensions, planSkills, type ExtensionPlan, type ResourceCatalog } from "./subagent-resources.ts";
 import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -710,7 +710,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     let child: ChildProcess;
     try {
       const env = { ...process.env };
-      for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, CHILD_TOOLS_ENV, ...DISCUSSION_ENV_KEYS]) delete env[key];
+      for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, CHILD_TOOLS_ENV, CHILD_SKILL_READS_ENV, ...DISCUSSION_ENV_KEYS]) delete env[key];
       child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"], env: { ...env, ...hooks.env?.(), [CHILD_ENV]: "1" } });
     } catch (error) {
       finish("failed", error instanceof Error ? error.message : String(error));
@@ -1387,12 +1387,20 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   pi.on?.("before_agent_start", (_event, ctx) => {
     controllerContext = ctx;
     const retained = registry.records().filter((record) => isRetained(record.run.state));
-    if (!retained.length) return;
+    // Give routing guidance before the first delegation, not only after a fleet exists.
+    // Stable system text avoids accumulating another hidden transcript message on every prompt.
+    const systemPrompt = _event.systemPrompt + "\n\n" + [
+      "[PI-JAR DELEGATION]",
+      "For substantial work, identify independent, bounded tasks before starting tool-heavy implementation. Use jar_delegate when parallel ownership saves work; do small, tightly coupled tasks directly. Do not invent a tool-call count or delegate merely to fill the pool.",
+      "Use scout for fresh research, external documentation and cross-repository discovery; fork for read-only review with conversation context; worktree only for isolated implementation. Worktrees cannot use shells or arbitrary paths outside their workspace. Research inaccessible references with a scout or the main agent, then send relevant findings to the worker.",
+      "Grant needed active tools and skills per task, respecting user allowlists/disallows. Reuse retained agents, avoid duplicate work and polling, and stop worktree agents to reconcile changes before verifying them."
+    ].join("\n");
+    if (!retained.length) return { systemPrompt };
     const fleet = retained.map((record) => {
       const unread = discussionUnread(record.key);
       return `- ${record.key} · ${record.run.name} · ${record.run.state}${unread ? ` · ${plural(unread, "unread discussion message")}` : ""} · ${record.run.role}: ${cleanText(record.run.task, 140)}`;
     }).join("\n");
-    return { message: { customType: "pi-jar.moderator-context", display: false, content: [
+    return { systemPrompt, message: { customType: "pi-jar.moderator-context", display: false, content: [
       "[PI-JAR MODERATOR MODE]",
       "Retained subagents own their delegated tasks: don't duplicate their work. Their turn ends and ask/pause/stop results arrive as pi-jar.subagent events; an accepted receipt is not completion, so keep working and never poll peek.",
       "Hibernated agents are idle with the process closed; resume and ask relaunch them intact. Stop finished workers to reconcile worktree changes into /diff, then synthesize from their reports.",
@@ -1491,7 +1499,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     description: `Start retained subagents and return immediately; the pool limit counts idle, paused and hibernated agents. fork and worktree inherit this conversation; a worktree's isolated Git changes reach /diff only when you stop it, and at most ${RECOVERY_LIMIT} worktree workspaces may be active or awaiting recovery (resolve with jar_subagent stop or discard). Turn completions arrive as pi-jar.subagent events with a short summary and changed files; jar_subagent report returns a full report. Settled agents hibernate (process closed, context kept) until resumed.`,
     promptSnippet: "Start retained parallel subagents: scout (cheap read-only discovery), fork (read-only review with your context), worktree (isolated implementation).",
     promptGuidelines: [
-      "Delegate only when there are ≥2 independent chunks that each need ≥10 tool calls; otherwise do the work yourself.",
+      "Delegate substantial independent tasks when parallel ownership saves work; handle small or tightly coupled tasks directly. Choose scout for external research, fork for contextual read-only review, and worktree for isolated edits; worktree agents cannot use shells or arbitrary external paths.",
       "After delegating, moderate: completions arrive as pi-jar.subagent events, so keep working and never poll; don't redo delegated work; reuse retained agents (jar_subagent resume) instead of spawning; stop finished workers to apply worktree changes into /diff."
     ],
     parameters: Parameters,
@@ -1564,7 +1572,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       let extensionPlan: ExtensionPlan | undefined;
       const skillPlans: Array<readonly string[] | undefined> = requested.map(() => undefined);
       const ruled = (rules: RuleList) => rules.allow.length > 0 || rules.deny.length > 0;
-      if (ruled(config.extensions) || ruled(config.skills) || skillRules.some(Boolean)) {
+      if (ruled(config.extensions) || ruled(config.skills) || skillRules.some(Boolean)
+        || (options.loadResources && requested.some(item => (item.mode ?? params.mode) === "worktree"))) {
         if (!options.loadResources) {
           return { content: [{ type: "text", text: "This Pi host cannot resolve extensions/skills for subagents; remove extension/skill rules." }], details: { runs: [], write: false }, isError: true };
         }
@@ -1576,7 +1585,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           return { content: [{ type: "text", text: `Cannot plan subagent extensions: ${(error as Error).message}` }], details: { runs: [], write: false }, isError: true };
         }
         for (const [index, rules] of skillRules.entries()) {
-          try { skillPlans[index] = planSkills(config.skills, rules, catalog, SUBAGENT_CONFIG_FILE); }
+          try {
+            skillPlans[index] = planSkills(config.skills, rules, catalog, SUBAGENT_CONFIG_FILE);
+            if ((requested[index]!.mode ?? params.mode) === "worktree" && skillPlans[index] === undefined)
+              skillPlans[index] = catalog.skills.filter(resource => resource.enabled).map(resource => resource.path);
+          }
           catch (error) {
             return { content: [{ type: "text", text: `Task ${index + 1}: ${(error as Error).message}` }], details: { runs: [], write: false }, isError: true };
           }
@@ -1751,6 +1764,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
             run.workspace = worktree.root;
             cwd = worktree.cwd;
             env[CHILD_WORKTREE_ENV] = worktree.root;
+            env[CHILD_SKILL_READS_ENV] = JSON.stringify(skillReadRoots(skillPlans[run.index - 1] ?? []));
           } catch (error) {
             await cleanupPrivate(run.index, true);
             if (discarded.has(index) || stopRequested.has(index)) markStartStopped(run);

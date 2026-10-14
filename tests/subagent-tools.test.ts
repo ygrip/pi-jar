@@ -3,7 +3,42 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { childToolAllowlist, loadSubagentConfig, SUBAGENT_CONFIG_FILE, worktreeToolViolation } from "../src/subagent-tools.ts";
+import { childSkillReadRoots, childToolAllowlist, loadSubagentConfig, skillReadRoots, SUBAGENT_CONFIG_FILE, worktreeToolViolation } from "../src/subagent-tools.ts";
+
+test("granted skill documents and references are read-only and symlink-confined", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pi-jar-skill-guard-"));
+  const root = join(temp, "workspace");
+  const skill = join(temp, "approved");
+  mkdirSync(root); mkdirSync(skill);
+  try {
+    const instructions = join(skill, "SKILL.md");
+    writeFileSync(instructions, "read reference.md");
+    writeFileSync(join(skill, "reference.md"), "trusted reference");
+    writeFileSync(join(temp, "secret.md"), "outside");
+    symlinkSync(join(temp, "secret.md"), join(skill, "escape.md"));
+    const roots = childSkillReadRoots(JSON.stringify(skillReadRoots([instructions])));
+    const check = (name: string, path: string) => worktreeToolViolation(root, root, name, { path }, roots);
+    assert.equal(check("read", instructions), undefined);
+    assert.equal(check("read", join(skill, "reference.md")), undefined);
+    for (const path of [join(temp, "secret.md"), join(skill, "escape.md"), join(skill, "..", "secret.md")])
+      assert.ok(check("read", path));
+    for (const name of ["edit", "write", "grep", "find", "ls"])
+      assert.ok(check(name, instructions), name);
+    assert.ok(worktreeToolViolation(root, root, "read", { path: instructions }), "no grant means no access");
+    assert.ok(worktreeToolViolation(root, root, "bash", { command: "true" }, roots));
+    const standalone = join(temp, "standalone.md"); writeFileSync(standalone, "one file");
+    const exact = skillReadRoots([standalone]);
+    assert.equal(worktreeToolViolation(root, root, "read", { path: standalone }, exact), undefined);
+    assert.ok(worktreeToolViolation(root, root, "read", { path: join(temp, "secret.md") }, exact));
+    const linked = join(temp, "linked"); mkdirSync(linked);
+    symlinkSync(join(temp, "secret.md"), join(linked, "SKILL.md"));
+    const linkedRoots = skillReadRoots([join(linked, "SKILL.md")]);
+    assert.equal(worktreeToolViolation(root, root, "read", { path: join(linked, "SKILL.md") }, linkedRoots), undefined);
+    assert.ok(worktreeToolViolation(root, root, "read", { path: standalone }, linkedRoots), "a linked instruction grants only that file, not its target's parent");
+    for (const invalid of [undefined, "bad json", '{}', '["relative"]', '[42]'])
+      assert.deepEqual(childSkillReadRoots(invalid), []);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
 
 test("child capability parsing fails closed and excludes recursive delegation", () => {
   assert.equal(childToolAllowlist(undefined), undefined);

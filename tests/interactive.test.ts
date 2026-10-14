@@ -325,7 +325,7 @@ test("rounded input fits, shows the ember face and exposes a human session label
   const lines = ["────", "draft", "────"];
   const idle = roundedInput(lines, 40, false, theme as never, paint);
   const focused = roundedInput(lines, 40, true, theme as never, paint, composerIcon("idle"), "ember-trail");
-  assert.ok(focused[0]?.includes("(•ᴗ•)"));
+  assert.ok(focused[0]?.includes("▐▪▄▪▌"));
   assert.ok(focused[0]?.includes("session ember-trail"));
   const widths = new Set<number>();
   for (const phase of ["idle", "generating", "tool", "waiting"] as const) {
@@ -352,7 +352,7 @@ test("rounded input keeps autocomplete rows below the frame and overflow labels 
   const lines = ["─── ↑ 2 more ───", "line a", "line b", "─── ↓ 1 more ───", "  /plan   Plan mode", "  /goal   Goal mode"];
   const framed = plainLines(roundedInput(lines, 60, true, theme as never, undefined, composerIcon("idle"), "s", { hint: "⏎ send" }));
   assert.equal(framed.length, 6);
-  assert.match(framed[0]!, /^╭─ \(•ᴗ•\) · session s .*↑ 2 more ─╮$/);
+  assert.match(framed[0]!, /^╭─ ▐▪▄▪▌ · session s .*↑ 2 more ─╮$/);
   assert.match(framed[1]!, /^│line a\s+│$/);
   assert.match(framed[3]!, /^╰─ ↓ 1 more ─+ ⏎ send ─╯$/);
   assert.equal(framed[4], "   /plan   Plan mode", "autocomplete rows are not wrapped as editor content");
@@ -416,9 +416,10 @@ test("composer restores previous editor and draft, respects later editor owners,
   assert.notEqual(current, original);
   assert.equal(draft, "keep this draft");
   const decorated = current?.({}, theme, {}) as { render(width: number): string[]; setText(text: string): void };
-  assert.ok(titleRow(decorated.render(80)).includes("(•ᴗ•)"));
+  assert.doesNotMatch(titleRow(decorated.render(80)), /Ember|▐|▌/, "the pet needs no name or duplicate face in the border");
   assert.ok(titleRow(decorated.render(80)).includes("(Default) Welcome polish"));
-  assert.match(plainLines(decorated.render(80))[0]!, /^ {3,5}[▴▲∙*·ˇ★]/, "flame tips perch above the face");
+  assert.equal(plainLines(decorated.render(80)).findIndex(row => row.startsWith("╭─")), 6, "five sprite rows and a mood spark sit above the frame");
+  assert.match(plainLines(decorated.render(80))[1]!, /[▄▀]/, "sprite pixels use half-block cells");
   decorated.setText("editing");
   style.disable(ctx as never);
   assert.equal(current, original);
@@ -453,7 +454,7 @@ test("regular composer never captures terminal mouse reporting or scrollback", (
   const style = new ComposerStyle();
   assert.equal(style.enable(ctx as never), true);
   const editor = factory?.(tui, theme, {}) as { render(width: number): string[] };
-  assert.ok(titleRow(editor.render(40)).includes("(•ᴗ•)"));
+  assert.ok(titleRow(editor.render(40)).includes("▐▪▄▪▌"));
   style.disable(ctx as never);
   assert.equal(listeners, 0);
   assert.deepEqual(writes, [], "terminal owns its mouse wheel and selection");
@@ -480,7 +481,7 @@ test("composer face tracks observed phases, refreshes session title, honors moti
   assert.equal(style.enable(ctx as never), true);
   const editor = current?.(tui, theme, {}) as { render(width: number): string[] };
   const title = () => titleRow(editor.render(40));
-  assert.ok(title().includes("(•ᴗ•)") || title().includes("(-ᴗ-)"));
+  assert.ok(title().includes("▐▪▄▪▌") || title().includes("▐─▄─▌"));
   assert.ok(title().includes("(Default) Welcome polish"));
   sessionName = "Flame pass";
   style.refreshSession(ctx as never);
@@ -489,22 +490,23 @@ test("composer face tracks observed phases, refreshes session title, honors moti
   const generatingRedraws = redraws;
   await new Promise((resolve) => setTimeout(resolve, 700));
   assert.equal(redraws, generatingRedraws, "active mascot piggybacks on Pi renders instead of scheduling its own");
-  assert.match(title(), /\((\^ᴗ\^|°ᴗ°)\)/);
+  assert.match(title(), /▐(▀▄▀|▪─▪)▌/);
   style.setActivity("tool", false);
-  assert.ok(title().includes("(•ᴗ•)"), "motion-off shows a calm face");
+  assert.ok(title().includes("▐▪▄▪▌"), "motion-off shows a calm face");
+  assert.match(plainLines(editor.render(40))[0]!, /^ {4}▄█▄/, "motion-off crown is idle too, not the current tool mood");
   const stopped = redraws;
   await new Promise((resolve) => setTimeout(resolve, 520));
   assert.equal(redraws, stopped, "motion-off stops the timer");
   style.setActivity("tool", true);
-  assert.ok(title().includes("(>ᴗ<)"));
+  assert.ok(title().includes("▐>▄<▌"));
   style.flash("error", 1000);
-  assert.ok(title().includes("(×_×)"));
+  assert.ok(title().includes("▐×_×▌"));
   style.setMascot(false);
   style.setActivity("idle", true); // interrupted
   const stoppedAfterInterrupt = redraws;
   await new Promise((resolve) => setTimeout(resolve, 520));
   assert.equal(redraws, stoppedAfterInterrupt, "idle without a mascot needs no timer");
-  assert.doesNotMatch(title(), /ᴗ/, "mascot off hides the face");
+  assert.doesNotMatch(title(), /▐|▌/, "mascot off hides the face");
   style.disable(ctx as never);
   assert.match(editor.render(40)[1] ?? "", /existing draft/);
 });
@@ -518,7 +520,7 @@ test("ember mascot blinks, gets sleepy when idle and shows transient moods", () 
   mascot.setPhase("tool", SLEEPY_AFTER_MS + 2);
   assert.equal(mascot.mood(SLEEPY_AFTER_MS + 3), "tool");
   mascot.flash("complete", 100, SLEEPY_AFTER_MS + 4);
-  assert.equal(mascot.face(SLEEPY_AFTER_MS + 5), "(★ᴗ★)");
+  assert.equal(mascot.face(SLEEPY_AFTER_MS + 5), "▐✦▄✦▌");
   assert.equal(mascot.mood(SLEEPY_AFTER_MS + 200), "tool");
   for (let frame = 0; frame < 6; frame++) assert.equal(visibleWidth(mascot.tip(0, frame)), 5);
 });
@@ -558,8 +560,29 @@ test("native composer auto-expands, accepts ghost suggestions with Tab and maps 
   assert.equal(editor.getText(), "abcdef\nsecXond", "click places the cursor at the pointed cell");
   const poke = editor.handleMouse({ type: "click", button: "left", x: 4, y: 1, screenX: 4, screenY: 1, width: 60, height: lines.length, shift: false, alt: false, ctrl: false });
   assert.ok(poke?.handled, "clicking the face pokes the mascot");
-  assert.match(titleRow(editor.render(60)), /\(\^o\^\)/);
+  assert.match(titleRow(editor.render(60)), /▐▀o▀▌/);
   assert.equal(editor.handleMouse({ type: "drag", button: "left", x: 4, y: row, screenX: 4, screenY: row, width: 60, height: 9, shift: false, alt: false, ctrl: false }), undefined, "drags stay with Pi's selection");
+  tui.terminal.rows = 24;
+  editor.setText("abcdef\nsecond");
+  lines = plainLines(editor.render(60));
+  assert.equal(lines.findIndex(line => line.startsWith("╭─")), 6, "a roomy terminal gets a small pixel pet and mood spark");
+  assert.doesNotMatch(titleRow(editor.render(60)), /Ember|▐|▌/, "the full pet has no extra name label or miniature face");
+  const fullRow = lines.findIndex(line => line.startsWith("│second"));
+  assert.ok(editor.handleMouse({ type: "click", button: "left", x: 4, y: fullRow, screenX: 4, screenY: fullRow, width: 60, height: lines.length, shift: false, alt: false, ctrl: false })?.handled);
+  editor.handleInput("Y");
+  assert.equal(editor.getText(), "abcdef\nsecYond", "the pet and spark rows do not shift the input cursor mapping");
+  assert.ok(editor.handleMouse({ type: "click", button: "left", x: 11, y: 4, screenX: 11, screenY: 4, width: 60, height: lines.length, shift: false, alt: false, ctrl: false })?.handled, "the whole small sprite is clickable");
+  style.setActivity("tool", false);
+  const frozen = editor.render(60).slice(0, 7);
+  style.flash("error");
+  assert.deepEqual(editor.render(60).slice(0, 7), frozen, "motion-off freezes the entire raster despite state changes");
+  editor.setText(Array.from({ length: 30 }, (_, index) => "line " + index).join("\n"));
+  assert.ok(editor.render(60).length <= 24, "draft growth reserves space for the full pet");
+  assert.equal(plainLines(editor.render(59)).findIndex(line => line.startsWith("╭─")), 1, "narrower terminals use the compact crown");
+  tui.terminal.rows = 23;
+  assert.equal(plainLines(editor.render(60)).findIndex(line => line.startsWith("╭─")), 1, "short terminals use the compact crown");
+  style.setMascot(false);
+  assert.equal(plainLines(editor.render(60)).findIndex(line => line.startsWith("╭─")), 0, "mascot off removes every sprite row");
   style.disable(ctx as never);
 });
 

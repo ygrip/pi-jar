@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { DEFAULT_FOOTER_SETTINGS } from "../src/footer-settings.ts";
-import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, SETTINGS_FILE, MAX_SUBAGENT_CHOICES, isMaxSubagents, DEFAULT_CONTEXT_BUDGET } from "../src/settings.ts";
+import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, SETTINGS_FILE, MAX_SUBAGENT_CHOICES, isMaxSubagents } from "../src/settings.ts";
 import { openJarSettings } from "../src/settings-ui.ts";
 
 test("visual preferences ignore retired legacy footer files and validate fields", () => {
@@ -68,20 +68,22 @@ test("max subagents defaults, validates supported choices and persists", () => {
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
-test("context budget and read cache fall back on invalid stored values and persist valid ones", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-jar-budget-settings-"));
+test("retired context controls are ignored while read cache still validates and persists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-jar-retired-settings-"));
   try {
-    assert.deepEqual(loadVisualSettings(dir).contextBudget, DEFAULT_CONTEXT_BUDGET);
     assert.equal(loadVisualSettings(dir).readCache, false);
-    for (const invalid of [null, 120000, { softTokens: 9_999, action: "suggest" }, { softTokens: 120000.5, action: "suggest" },
-      { softTokens: 120000, action: "nag" }, { softTokens: "120000", action: "off" }]) {
-      writeFileSync(join(dir, SETTINGS_FILE), JSON.stringify({ version: 1, contextBudget: invalid, readCache: "yes" }));
-      assert.deepEqual(loadVisualSettings(dir).contextBudget, DEFAULT_CONTEXT_BUDGET);
-      assert.equal(loadVisualSettings(dir).readCache, false);
-    }
-    const settings = { ...defaultVisualSettings(), contextBudget: { softTokens: 150_000, action: "compact" as const }, readCache: true };
+    writeFileSync(join(dir, SETTINGS_FILE), JSON.stringify({ version: 1,
+      contextDiet: true, contextBudget: { softTokens: 120000, action: "compact" }, readCache: "yes" }));
+    const loaded = loadVisualSettings(dir);
+    assert.equal("contextDiet" in loaded, false);
+    assert.equal("contextBudget" in loaded, false);
+    assert.equal(loaded.readCache, false);
+    const settings = { ...loaded, readCache: true };
     saveVisualSettings(dir, settings);
     assert.deepEqual(loadVisualSettings(dir), settings);
+    const saved = JSON.parse(readFileSync(join(dir, SETTINGS_FILE), "utf8"));
+    assert.equal("contextDiet" in saved, false);
+    assert.equal("contextBudget" in saved, false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test("cache diagnostics default on, ignore invalid stored values and persist an explicit off", () => {

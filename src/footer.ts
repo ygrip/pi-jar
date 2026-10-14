@@ -18,8 +18,6 @@ export interface FooterView extends JarStatus {
   cwd?: string;
   settings?: FooterSettings;
   context: string;
-  /** The last call's prompt is past the context budget: the context metric turns amber. */
-  overBudget?: boolean;
   goal?: string;
   /** pi-jar's own short indicators (changes to review), shown before extras. */
   chips?: readonly string[];
@@ -153,8 +151,6 @@ function footerLines(view: FooterView, width: number, theme: FooterTheme, hits: 
   // Context is never dropped; optional metrics move to a second line on medium widths.
   const metrics = [...(show.context ? [context] : []), ...(show.memory && contentWidth >= 90 && memory ? [memory] : []), ...(show.cost && contentWidth >= 52 && cost ? [cost] : []), ...(show.quota && contentWidth >= 90 ? windows : [])];
   let right = theme.fg("dim", metrics.join("  ·  "));
-  // Context always leads the metrics when shown, so only its own color changes past the budget.
-  if (view.overBudget && show.context) right = theme.fg("warning", context) + (metrics.length > 1 ? theme.fg("dim", "  ·  " + metrics.slice(1).join("  ·  ")) : "");
   if (contentWidth < 52 && attention && contentWidth >= 26) {
     const room = Math.max(0, contentWidth - Math.min(visibleWidth(left), 12) - visibleWidth(right) - 4);
     right = theme.fg(primary?.state === "failed" ? "error" : "warning", truncateToWidth(attention, Math.min(room, 14))) + " " + right;

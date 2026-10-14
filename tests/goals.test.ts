@@ -214,6 +214,35 @@ test("the loop pauses on interruption, errors, the round limit, plan mode and bl
   assert.equal(h.goals.current(), undefined);
 });
 
+test("goal continuation uses live tasks even when compacted context omits the original goal message", async () => {
+  const h = harness(5);
+  await h.commands.get("goal")!("Ship the feature", h.ctx);
+  const first = h.todos.add("Implement the feature")!;
+  const initial = await h.events.get("before_agent_start")!({}, h.ctx);
+  assert.match(initial.message.content, /Implement the feature/);
+  h.todos.setDone(first.id, true);
+  h.todos.add("Verify the feature");
+  // Model-visible compaction projection is not the append-only task/goal state.
+  const projected = [{ role: "user", content: "Compaction summary: feature implemented; verification remains." }];
+  assert.equal(await h.events.get("context")!({ messages: projected }, h.ctx), undefined);
+  assert.equal(h.goals.current()?.status, "active");
+  const continued = await h.settle("completed");
+  assert.equal(continued?.continue, true);
+  assert.match(continued.entries[0].content, /Verify the feature/);
+  assert.doesNotMatch(continued.entries[0].content, /\[ \] Implement the feature/);
+});
+
+test("ordinary unfinished tasks do not start a goal loop or restart an aborted run", async () => {
+  const h = harness();
+  h.todos.add("Finish the existing task");
+  await h.events.get("before_agent_start")!({}, h.ctx);
+  assert.equal(await h.settle("completed"), undefined);
+  assert.equal(await h.settle("aborted"), undefined);
+  assert.equal(h.goals.current(), undefined);
+  assert.deepEqual(h.sent, []);
+  assert.equal(h.todos.all()[0]?.status, "pending");
+});
+
 test("goal progress summarizes tasks, rounds and phase", () => {
   const goal = { id: "g", text: "Ship", status: "active" as const, phase: "audit" as const, rounds: 2 };
   const todos = [{ id: "a", title: "A", done: true, status: "completed" as const }, { id: "b", title: "B", done: false, status: "pending" as const }];

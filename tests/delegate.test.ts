@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter, once } from "node:events";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
@@ -10,6 +10,7 @@ import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_BASELINE_ENV, writeChildBaseline } from "../src/child-baselines.ts";
 import { CHILD_ENV, DelegateRegistry, delegateArgs, delegatePrompt, EVENT_SUMMARY_CHARS, eventSummary, MAX_DELEGATES, piInvocation, READ_ONLY_TOOLS, registerDelegate, WORKTREE_TOOLS, type DelegateOptions, type DelegateController, type SubagentStopReport } from "../src/delegate.ts";
 import { CHILD_WORKTREE_ENV, GIT_EXECUTABLE_ENV } from "../src/delegate-worktree.ts";
+import { CHILD_SKILL_READS_ENV, skillReadRoots } from "../src/subagent-tools.ts";
 import { emit, fakeSpawn, say, settle, taskOf, type FakeChild } from "./fake-rpc.ts";
 
 const roles = (map: Record<string, { provider: string; model: string; thinking?: string }>) => ({
@@ -810,6 +811,50 @@ const moderatorHost = (spawn: unknown, activeTools?: string[], options: Delegate
   } as never, roles({}), registry, { ...options, spawnProcess: spawn as never, ...(activeTools ? { getActiveToolNames: () => activeTools } : {}) });
   return { registry, delegate: tools.get("jar_delegate")!, control: tools.get("jar_subagent")!, events, sent };
 };
+
+test("worktree launch grants only selected, deny-filtered skill resources", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-jar-skill-launch-"));
+  const skills = mkdtempSync(join(tmpdir(), "pi-jar-launch-skills-"));
+  const registry = new DelegateRegistry();
+  try {
+    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+    git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+    writeFileSync(join(root, "a.ts"), "initial\n"); git("add", "a.ts"); git("commit", "-m", "initial");
+    const resource = (name: string) => {
+      const dir = join(skills, name); mkdirSync(dir);
+      const path = join(dir, "SKILL.md"); writeFileSync(path, "instructions");
+      return { path, enabled: true, source: "auto" };
+    };
+    const allowed = resource("allowed"), denied = resource("denied");
+    const fake = fakeSpawn(child => { say(child, "ready"); settle(child); });
+    let tool: Tool | undefined;
+    registerDelegate({ registerTool(definition: Tool) { if (definition.name === "jar_delegate") tool = definition; } } as never,
+      roles({}), registry, { spawnProcess: fake.spawn as never,
+        getSubagentConfig: () => ({ tools: { allow: [], deny: [] }, extensions: { allow: [], deny: [] }, skills: { allow: [], deny: ["denied"] } }),
+        loadResources: async () => ({ extensions: [], skills: [allowed, denied] }) });
+    const result = await tool!.execute("d", { mode: "worktree", tasks: [{ task: "inspect" }] }, undefined, undefined,
+      { cwd: root, hasUI: false, sessionManager: { getSessionFile: () => "/tmp/parent.jsonl" } });
+    assert.notEqual(result.isError, true);
+    assert.deepEqual(JSON.parse(fake.calls[0]!.env![CHILD_SKILL_READS_ENV]!), skillReadRoots([allowed.path]));
+    assert.ok(fake.calls[0]!.args.includes(allowed.path));
+    assert.ok(!fake.calls[0]!.args.includes(denied.path));
+  } finally {
+    for (const record of registry.records()) await registry.stop(record.key);
+    rmSync(root, { recursive: true, force: true }); rmSync(skills, { recursive: true, force: true });
+  }
+});
+
+test("delegation routing guidance is present before any agent is launched", () => {
+  const host = moderatorHost(fakeSpawn(() => {}).spawn);
+  const start = host.events.get("before_agent_start") as unknown as (event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string; message?: unknown };
+  const result = start({ systemPrompt: "base system" }, quiet);
+  assert.ok(result.systemPrompt.startsWith("base system\n\n"));
+  assert.match(result.systemPrompt, /identify independent, bounded tasks/);
+  assert.match(result.systemPrompt, /Use scout for fresh research, external documentation/);
+  assert.match(result.systemPrompt, /worktree only for isolated implementation/);
+  assert.doesNotMatch(result.systemPrompt, /≥10|ten tool calls/);
+  assert.equal(result.message, undefined, "initial guidance does not add hidden transcript messages");
+});
 
 test("stale moderator context is pruned on every LLM call while the fleet is retained", async () => {
   const fake = fakeSpawn((child) => { say(child, "ready"); settle(child); });

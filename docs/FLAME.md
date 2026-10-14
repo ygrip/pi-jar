@@ -32,23 +32,26 @@ The welcome ticks every 90 ms only while it is visible and motion is on. On term
 
 ## Ember, the composer mascot (`src/mascot.ts`)
 
-Ember is two layers:
+Ember is an original, shaded **11 × 10 pixel ember pet**, packed into **11 columns × 5 terminal rows** using `▀`/`▄` cells with independently colored upper/lower halves. Its round bulb body has a curled flame tuft, dark outline, orange shadow, golden face and pale highlight. The face sits low and wide for a cute read: small 1 × 2 bean eyes, pink blush and a one-pixel mouth (red and open when happy). Expressions fit within 3 × 2 eye patches. It sits above the composer without an `Ember` name label; the border retains only profile/session context.
 
-- a **face** in the composer's top border — always `( + three glyphs + )`, five columns wide in every mood, so the title never shifts;
-- **flame tips** on the row above the frame, five columns wide, aligned over the face.
+A full pet appears at **60+ columns and 24+ terminal rows**. A fixed extra row above it holds mood sparks: `zzz` for sleep, `✦` for completion and `?` for waiting, blank otherwise. Happy, completed and poked moods squash, hop one terminal row into the spark row, and settle. The spark returns when grounded. Errors pout with puffed cheeks and a short grounded huff; thinking glances sideways. Every pose preserves the same six-row perch, so the editor never jumps. Smaller terminals use a compact five-column face/crown (also with sleepy `zzz`); below 40 columns the crown is omitted. Draft expansion reserves the six-row perch, and mouse coordinates subtract its actual height. Clicking anywhere in the pet pokes it. Turning the mascot off removes every layer.
+
+`mascotPixels()` authors the raster and squash/pout poses; `mascotSprite()` packs it into terminal cells; `mascotSpark()` supplies the fixed-width mood marker; `mascotPerch()` owns the fixed-height hop layout. Truecolor terminals get the eight-color Ember palette; other terminals get corresponding ANSI 256-color cells. No image protocol, image assets, browser overlay, renderer dependency or extra animation loop is required.
+
+### Pixel-pet research
+
+[Pixel-pet](https://github.com/Namenomeaning/pixel-pet) (MIT) uses a real pixel raster—not decorative text faces. Its [`assets/slime.json`](https://github.com/Namenomeaning/pixel-pet/blob/main/plugins/pixel-pet/assets/slime.json) defines a 17 × 11 body, a layered color palette and eye/cheek anchors. [`hooks/pixels.ts`](https://github.com/Namenomeaning/pixel-pet/blob/main/plugins/pixel-pet/hooks/pixels.ts) stamps 3 × 3 expressions, props and companions onto a canvas; `encodeCells()` packs two pixels into each terminal half-block cell. Its SVG renderer is for Desktop.
+
+The initial five-column glyph-only adaptation was rejected during visual review. The revised Ember uses the raster, shading, eye-overlay and half-cell approach with original warm flame artwork; no upstream sprites or code are copied. Reference GIFs and a side-by-side raster comparison were inspected, in addition to layout/state tests. Tool-specific props and companion trails are not included in this version.
 
 Moods come from Pi's observed activity plus local timers:
 
-| Mood | Face | Tips | Trigger |
-| --- | --- | --- | --- |
-| idle | `(•ᴗ•)` | swaying `▴▲▴` | nothing happening |
-| blink | `(-ᴗ-)` | still | 180 ms, every 3–6 s at random |
-| happy / thinking | `(^ᴗ^)` / `(°ᴗ°)` | bouncing / orbiting `∙` | generating (alternates every few seconds) |
-| tool | `(>ᴗ<)` | sparks `*` `·` | a tool is running |
-| waiting | `(•o•)` | `?` | a dialog or question is open |
-| sleepy | `(-ω-)` | dimmed, rising `z` | idle for two minutes |
-| error | `(×_×)` | drooping `ˇ` | a run failed (3 s) |
-| complete | `(★ᴗ★)` | star and sparks | a goal was completed (4 s) |
-| poke | `(^o^)` | bounce | you clicked the face (1.5 s) |
+| Mood | Full-sprite expression | Trigger |
+| --- | --- | --- |
+| idle / blink | single-pixel pupils / short horizontal eyelids | idle; 180 ms blink every 3–6 s |
+| happy / thinking | smiling eyes and mouth / side-looking pupils | generating; alternates every few seconds |
+| tool / waiting | inward-focused eyes / wide eyes and round mouth | running tool / dialog or question |
+| sleepy / error | lowered eyelids / pursed mouth and puffed cheeks | idle for two minutes / failed run (3 s) |
+| complete / poke | sparkling eyes and smile / surprised eyes and mouth | goal complete (4 s) / click (1.5 s) |
 
-Faces and tips are painted from the flame palette (pale-gold eyes, orange shell, redder when upset) or theme colors without 24-bit color. One unref'd 240 ms timer drives expressions, and it requests a render **only when the sprite actually changes**. Motion-off stops the timer and shows a calm face; turning the mascot off removes both layers. Below 40 columns the tips row is dropped.
+Active poses use 600 ms frames driven by Pi's existing render cadence, never a separate active timer. Transient completion, poke and error reactions schedule only their remaining pose frames, ending at the flash deadline. Idle is deliberately calm between exact blink and sleep deadlines. Sleepy idle stops scheduling. Motion-off stops timers and freezes the **entire raster** to idle, even while a tool or error flash is active. Tests cover every pixel frame's dimensions/colors, truecolor and 256-color cells, responsive fallback, draft-height reservation, mouse mapping and motion-off stability. These checks prove mechanics; visual comparison is a separate review.

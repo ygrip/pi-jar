@@ -5,6 +5,21 @@ import { registerTaskTool, todoRow } from "../src/task-tool.ts";
 
 type Result = { content: { text: string }[]; details: { items: { id: string; parentId?: string }[]; total: number; done: number; count: number; truncated?: boolean; current?: string; ids?: { id: string; title: string; parentId?: string }[] } };
 
+test("task guidance resumes authorized work after automatic compaction without installing a forced-turn loop", () => {
+  let tool: { promptGuidelines: string[] } | undefined;
+  let hooks = 0;
+  registerTaskTool({
+    registerTool(definition: unknown) { tool = definition as typeof tool; },
+    on() { hooks++; },
+    sendUserMessage() { assert.fail("a checklist is not authorization to start another turn"); }
+  } as never, () => new TodoStore(() => {}), () => {});
+  assert.ok(tool);
+  const guidance = tool.promptGuidelines.join("\n");
+  assert.match(guidance, /After automatic compaction, resume unfinished authorized work/);
+  assert.match(guidance, /explicit stops or pauses, and blockers/);
+  assert.equal(hooks, 0, "task tracking does not add compaction or settlement retry hooks");
+});
+
 function harness() {
   let tool: { execute(id: string, params: unknown, ...rest: unknown[]): Promise<Result> } | undefined;
   const events: TodoEvent[] = [];

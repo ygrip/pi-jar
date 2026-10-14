@@ -80,7 +80,7 @@ pi-jar registers `/usage`, `/context`, `/cache-breaks` and `/advisor`. Pi keeps 
 
 Every model call re-sends the whole context, so cost grows with session length far more than with the work done (see [EFFICIENCY_PLAN.md](./EFFICIENCY_PLAN.md#session-cost-reduction)). pi-jar never edits these files; apply them yourself if they fit:
 
-- **Compact earlier.** In `~/.pi/agent/settings.json` set `"compaction": { "reserveTokens": 140000, "keepRecentTokens": 20000 }`. With a 272k-window model this compacts around 130k instead of near the limit. pi-jar's context budget (`/jar settings` → Context budget) suggests `/compact` or `/new` at the same point, or compacts at the next finished task when set to `compact`.
+- **Own context explicitly.** Use Pi's `/compact` to carry a summary forward or `/new` for unrelated work. Native auto-compaction is controlled by Pi's settings, not pi-jar. pi-jar no longer strips prior-turn context or enforces a soft limit; it never changes your Pi compaction preferences.
 - **Enable heavy tool packages per project.** A package such as `pi-mono-figma` (~20 tools) sends every schema on every call; enable it only in projects that use it.
 - **Load each MCP server once.** Use codebase-memory either through the lazy `mcp` proxy **or** as direct tools, not both.
 - **Activate tools at startup, not mid-session.** Changing the tool list, the system prompt or an earlier message makes the provider re-process the whole prefix after it: an MCP server or tool package switched on halfway through a long session rewrote ~230k tokens on every call until the cache caught up. pi-jar announces costly cache breaks and `/cache-breaks` lists what changed (see [Cache break diagnostics](../README.md#cache-break-diagnostics)).

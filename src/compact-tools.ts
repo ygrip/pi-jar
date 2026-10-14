@@ -13,7 +13,29 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { isReadStub, readRangeKey, resolveToolPath, type ReadStubDetails } from "./context-diet.ts";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+interface ReadStubDetails { unchangedSinceRead: number }
+const isReadStub = (details: unknown): details is ReadStubDetails => !!details && typeof details === "object"
+  && typeof (details as ReadStubDetails).unchangedSinceRead === "number";
+
+/** Match Pi's native read path spelling without probing the filesystem. */
+function resolveToolPath(path: string, cwd: string): string | undefined {
+  let value = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ");
+  if (value.startsWith("@")) value = value.slice(1);
+  if (value === "~" || value.startsWith("~/")) value = join(homedir(), value.slice(2));
+  else if (value.startsWith("file://")) {
+    try { value = fileURLToPath(value); } catch { return undefined; }
+  }
+  return resolve(cwd, value);
+}
+function readRangeKey(offset: unknown, limit: unknown): string | undefined {
+  const start = offset === undefined ? 1 : typeof offset === "number" ? Math.max(offset, 1) : undefined;
+  if (start === undefined || (limit !== undefined && typeof limit !== "number")) return undefined;
+  return `${start}:${limit ?? ""}`;
+}
 
 type ToolResult = { content: Array<{ type: string; text?: string }>; details?: unknown };
 

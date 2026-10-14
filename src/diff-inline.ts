@@ -61,20 +61,28 @@ const INVERSE_ON = "\x1b[7m";
 const INVERSE_OFF = "\x1b[27m";
 
 /**
- * Insert inverse-video markers around `spans` of the visible text inside an SGR-styled string.
+ * Insert emphasis markers around `spans` of the visible text inside an SGR-styled string.
+ * Defaults to inverse video; background markers can restore the surrounding line tint on exit.
  * Offsets count visible code units, so styling (syntax colours) never shifts the emphasis.
  */
-export function emphasize(styled: string, spans: readonly Span[]): string {
+export function emphasize(styled: string, spans: readonly Span[], markers = { on: INVERSE_ON, off: INVERSE_OFF }): string {
   if (!spans.length) return styled;
   let out = "", visible = 0, span = 0, open = false;
   for (let at = 0; at < styled.length;) {
     SGR.lastIndex = at;
     const escape = SGR.exec(styled);
-    if (escape) { out += escape[0]; at += escape[0].length; continue; }
-    while (span < spans.length && open && visible >= spans[span]![1]) { out += INVERSE_OFF; open = false; span++; }
-    if (span < spans.length && !open && visible >= spans[span]![0]) { out += INVERSE_ON; open = true; }
+    if (escape) {
+      out += escape[0];
+      // Syntax highlighters reset SGR between tokens; keep the changed span visible across them.
+      if (open && (escape[0] === "\x1b[0m" || escape[0] === "\x1b[m"
+        || escape[0] === (markers.on === INVERSE_ON ? INVERSE_OFF : "\x1b[49m"))) out += markers.on;
+      at += escape[0].length;
+      continue;
+    }
+    while (span < spans.length && open && visible >= spans[span]![1]) { out += markers.off; open = false; span++; }
+    if (span < spans.length && !open && visible >= spans[span]![0]) { out += markers.on; open = true; }
     out += styled[at++];
     visible++;
   }
-  return open ? out + INVERSE_OFF : out;
+  return open ? out + markers.off : out;
 }

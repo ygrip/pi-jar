@@ -57,6 +57,23 @@ export interface DiffPaint {
   syntax?: (text: string) => string | undefined;
   /** SGR background sequence that tints a changed line's text. */
   tint?: (kind: "add" | "remove") => string;
+  /** Stronger SGR background for changed words; absent hooks keep inverse-video emphasis. */
+  strongTint?: (kind: "add" | "remove") => string;
+}
+
+/** OMP-style soft/strong backgrounds, derived from native theme truecolor sequences when available. */
+export function diffBackgrounds(canvas: string, added: string, removed: string): Pick<DiffPaint, "tint" | "strongTint"> | undefined {
+  const rgb = (ansi: string) => {
+    const match = /\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m/.exec(ansi);
+    return match ? match.slice(1).map(Number) : undefined;
+  };
+  const base = rgb(canvas), add = rgb(added), remove = rgb(removed);
+  if (!base || !add || !remove || [...base, ...add, ...remove].some(value => value > 255)) return undefined;
+  const light = base[0]! * 0.2126 + base[1]! * 0.7152 + base[2]! * 0.0722 > 127;
+  const mix = (color: number[], amount: number) => `\x1b[48;2;${base.map((value, index) => Math.round(value + (color[index]! - value) * amount)).join(";")}m`;
+  const soft = { add: mix(add, light ? 0.24 : 0.18), remove: mix(remove, light ? 0.24 : 0.18) };
+  const strong = { add: mix(add, light ? 0.48 : 0.42), remove: mix(remove, light ? 0.48 : 0.42) };
+  return { tint: kind => soft[kind], strongTint: kind => strong[kind] };
 }
 
 /** Context sizes cycled by ←/→ (and [/]); Infinity shows whole files. */
@@ -93,7 +110,7 @@ export function renderDiffWindow(change: FileChange, width: number, fg: (color: 
   const rows = Math.max(1, Math.min(options.rows ?? PREVIEW_WINDOW, PREVIEW_WINDOW));
   const scroll = Math.max(0, options.scroll ?? 0);
   const context = options.context ?? 3;
-  const unified = options.unified !== false;
+  const unified = options.unified === true || width < MIN_SPLIT_WIDTH;
   const wrap = options.wrap === true;
   const paint = options.paint ?? {};
   const total = unified ? diffRowCount(ops, context) : diffSplitRowCount(ops, context);
@@ -113,10 +130,12 @@ export function renderDiffWindow(change: FileChange, width: number, fg: (color: 
     const styled = paint.syntax?.(display) ?? fg(KIND_COLOR[kind], display);
     if (bounded || kind === "context" || pair === undefined) return styled;
     const changes = kind === "remove" ? inlineChanges(display, safeLine(pair)) : inlineChanges(safeLine(pair), display);
-    return changes ? emphasize(styled, kind === "remove" ? changes.before : changes.after) : styled;
+    const strong = paint.strongTint?.(kind);
+    return changes ? emphasize(styled, kind === "remove" ? changes.before : changes.after,
+      strong ? { on: strong, off: paint.tint?.(kind) ?? "\x1b[49m" } : undefined) : styled;
   };
   // Rail, numbers and sign, then text truncated or wrapped into the cell; continuation lines keep
-  // the rail only. Truncation emits full resets, so a tint is re-applied after each one.
+  // the rail only. Syntax/wrapping/truncation resets re-apply the surrounding soft tint.
   const cell = (kind: Kind, lead: string, text: string, width: number, pair?: string): string[] => {
     const leadWidth = visibleWidth(lead);
     const textWidth = Math.max(1, width - leadWidth - 2);
@@ -126,7 +145,7 @@ export function renderDiffWindow(change: FileChange, width: number, fg: (color: 
     return (wrap ? wrapTextWithAnsi(styled, textWidth) : [truncateToWidth(styled, textWidth, "…")]).map((body, index) => {
       const prefix = index ? " ".repeat(leadWidth + 1) : fg("dim", lead) + fg(KIND_COLOR[kind], SIGN[kind]);
       const content = body + " ".repeat(Math.max(0, textWidth - visibleWidth(body)));
-      return rail + prefix + (tint ? tint + content.replaceAll(RESET, RESET + tint) : content) + RESET;
+      return rail + prefix + (tint ? tint + content.replace(/\x1b\[(?:0|49)?m/g, reset => reset + tint) : content) + RESET;
     });
   };
   const hunkLine = (text: string, hidden: number | undefined) => truncateToWidth(
@@ -149,7 +168,7 @@ export function renderDiffWindow(change: FileChange, width: number, fg: (color: 
     : "Coarse preview: replacement groups are approximate."));
   if (!unified) {
     const column = Math.max(8, Math.floor((width - 3) / 2));
-    lines.push(truncateToWidth(fg("accent", "Original"), column, "…", true) + fg("dim", " │ ") + fg("accent", "Updated"));
+    lines.push(truncateToWidth(fg("accent", "Before"), column, "…", true) + fg("dim", " │ ") + fg("accent", "After"));
   }
   // Fill the viewport with whole logical rows; a first row taller than the viewport is clipped.
   let used = 0, shown = 0;
@@ -180,7 +199,7 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
     let query = "";
     let searchMode = false;
     let fullReview = false;
-    let unified = true;
+    let unified = false;
     let contextIndex = CONTEXT_STEPS.indexOf(3);
     let wrap = false;
     let bodyRows = 0;
@@ -216,7 +235,11 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
     const paintFor = (change: FileChange): DiffPaint => {
       if (paintCache?.path !== change.path) {
         const language = getLanguageFromPath(change.path);
-        const bg = (theme as { getBgAnsi?: (color: "toolSuccessBg" | "toolErrorBg") => string }).getBgAnsi?.bind(theme);
+        const native = theme as { getBgAnsi?: (color: "toolPendingBg" | "toolSuccessBg" | "toolErrorBg") => string;
+          getFgAnsi?: (color: "toolDiffAdded" | "toolDiffRemoved") => string };
+        const bg = native.getBgAnsi?.bind(theme);
+        const foreground = native.getFgAnsi?.bind(theme);
+        const backgrounds = bg && foreground ? diffBackgrounds(bg("toolPendingBg"), foreground("toolDiffAdded"), foreground("toolDiffRemoved")) : undefined;
         paintCache = { path: change.path, paint: {
           // Per-line highlighting is bounded; very long lines, or a host without Pi's highlighter
           // theme initialised, keep plain diff colours instead of failing the review.
@@ -224,7 +247,7 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
             if (text.length > 1000) return undefined;
             try { return highlightCode(text, language)[0]; } catch { return undefined; }
           } } : {}),
-          ...(bg ? { tint: (kind: "add" | "remove") => bg(kind === "add" ? "toolSuccessBg" : "toolErrorBg") } : {})
+          ...(backgrounds ?? (bg ? { tint: (kind: "add" | "remove") => bg(kind === "add" ? "toolSuccessBg" : "toolErrorBg") } : {}))
         } };
       }
       return paintCache.paint;
@@ -378,7 +401,7 @@ export async function openDiffView(ctx: ExtensionContext, tracker: ChangeTracker
           ...optionList(theme, ACTIONS.map((item) => item.label), -1, ACTIONS.map((item) => item.key)),
           fg(searchMode ? "accent" : "dim", searchMode ? `/${query} · Enter apply · Esc clear`
             : query ? `/${query} · n/N next match · / new search`
-            : `${SEARCH_HINT} · n/p hunk · t split · ←/→ context (${contextLabel()}) · w wrap${wrap ? " on" : ""} · v full`),
+            : `${SEARCH_HINT} · n/p hunk · t ${unified ? "split" : "unified"} · ←/→ context (${contextLabel()}) · w wrap${wrap ? " on" : ""} · v full`),
           message ? fg(armed ? "warning" : "dim", message) : fg("dim", "↑↓ file · PgUp/PgDn/Home/End scroll · a accept · r revert · Esc close")
         ];
         const split = splitFrame(theme, width, title, list, content.slice(0, bodyRows), footer, bodyRows, listWidth);

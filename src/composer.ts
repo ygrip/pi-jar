@@ -1,6 +1,6 @@
 import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type EditorComponent, type EditorTheme, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { Mascot, MASCOT_FACE_WIDTH, mascotFace, paintFace, paintTip, type MascotMood } from "./mascot.ts";
+import { Mascot, MASCOT_FACE_WIDTH, MASCOT_SPRITE_WIDTH, MASCOT_FRAME_MS, mascotFace, mascotTip, mascotPerch, paintFace, paintTip, type MascotMood } from "./mascot.ts";
 import type { SuggestionState } from "./suggest.ts";
 import type { WorkingPhase } from "./working.ts";
 import { imageChip, imageInfo, imagePaths } from "./attachments.ts";
@@ -18,7 +18,7 @@ type MouseEvent = Parameters<NonNullable<EditorComponent["handleMouse"]>>[0];
 const PHASE_MOODS: Record<WorkingPhase, readonly MascotMood[]> = {
   idle: ["idle"], generating: ["happy", "thinking"], tool: ["tool"], waiting: ["waiting"]
 };
-export const COMPOSER_ACTIVE_INTERVAL_MS = 600;
+export const COMPOSER_ACTIVE_INTERVAL_MS = MASCOT_FRAME_MS;
 /** How long composer image chips trust a previous filesystem check for the same draft. */
 const ATTACHMENT_RECHECK_MS = 1000;
 /** Plain one-line face for a phase; every phase has the same width. */
@@ -69,7 +69,7 @@ function bottomBorderIndex(lines: readonly string[], visibleRows?: number): numb
 const overflowLabel = (line: string | undefined) => /[↑↓]\s*\d+\s*more/.exec(stripTerminalSequences(line ?? ""))?.[0];
 
 export interface RoundedInputOptions {
-  /** Active profile shown between the mascot and human session title. */
+  /** Active profile shown beside the human session title. */
   profile?: string;
   /** Dim inline suggestion shown after the cursor when the draft is empty. */
   ghost?: string;
@@ -108,9 +108,10 @@ export function roundedInput(lines: string[], width: number, focused: boolean, t
   if (lastFrame?.key === key && lastFrame.border === border && lastFrame.dim === options.dim && sameLines(lastFrame.lines, lines)) return lastFrame.framed.slice();
   const bottom = bottomBorderIndex(lines, options.visibleRows);
   const inner = width - 2;
+  const prefix = icon ? `${icon} · ` : "";
   const meta = profile !== undefined
-    ? `${icon} · (${profile})${session ? " " + cleanText(session, 120) : ""}`
-    : session ? `${icon} · session ${session}` : icon;
+    ? `${prefix}(${profile})${session ? " " + cleanText(session, 120) : ""}`
+    : session ? `${prefix}session ${session}` : icon;
   const title = truncateToWidth(` ${meta} `, width - 3);
   const paintedTitle = options.paintedIcon && title.includes(icon) ? title.replace(icon, options.paintedIcon) : title;
   const above = overflowLabel(lines[0]);
@@ -146,11 +147,11 @@ export function roundedInput(lines: string[], width: number, focused: boolean, t
 
 export interface ComposerDecor {
   /** Title icon width source (plain text). */
-  icon(): string;
+  icon(width: number): string;
   /** Painted icon, or undefined to use theme border colors. */
-  paintedIcon(): string | undefined;
-  /** Flame-tip row above the frame, or undefined when there is no room. */
-  tip(width: number): string | undefined;
+  paintedIcon(width: number): string | undefined;
+  /** Pixel sprite (or compact crown) above the frame, omitted when there is no room. */
+  perch(width: number): readonly string[] | undefined;
   session(): string;
   profile?(): string;
   ghost(): string | undefined;
@@ -180,13 +181,13 @@ class RoundedEditor extends CustomEditor {
   }
 
   /** Let drafts grow to ~60% of the terminal (Pi's editor caps at 30%) before scrolling. */
-  private renderTall(width: number): string[] {
+  private renderTall(width: number, perchRows: number): string[] {
     const self = this as unknown as { tui?: { terminal?: { rows?: number } } };
     const tui = self.tui;
     const rows = tui?.terminal?.rows;
     if (!tui || !rows || !Number.isFinite(rows)) return super.render(width);
     const tall = new Proxy(tui, { get: (target, key, receiver) => key === "terminal"
-      ? new Proxy(target.terminal!, { get: (term, name) => name === "rows" ? rows * 2 : Reflect.get(term, name, term) })
+      ? new Proxy(target.terminal!, { get: (term, name) => name === "rows" ? Math.max(rows, (rows - (perchRows > 1 ? perchRows : 0)) * 2) : Reflect.get(term, name, term) })
       : Reflect.get(target, key, receiver) });
     try {
       self.tui = tall;
@@ -197,26 +198,25 @@ class RoundedEditor extends CustomEditor {
   }
 
   override render(width: number): string[] {
-    const inner = this.renderTall(width < 8 ? width : width - 2);
+    const perch = width >= 8 ? this.decor.perch(width) ?? [] : [];
+    this.tipRows = perch.length;
+    const inner = this.renderTall(width < 8 ? width : width - 2, perch.length);
     const text = this.getText();
     const empty = text === "";
     const below = this.decor.attachments(text);
     const ghost = empty && !this.isShowingAutocomplete() ? this.decor.ghost() : undefined;
     this.ghostShown = !!ghost;
     const visibleRows = (this as unknown as { renderedVisibleLineCount?: number }).renderedVisibleLineCount;
-    const icon = this.decor.icon();
+    const icon = this.decor.icon(width);
     const session = this.decor.session();
     const hint = this.decor.hint();
-    const paintedIcon = this.decor.paintedIcon();
+    const paintedIcon = this.decor.paintedIcon(width);
     const framed = roundedInput(inner, width, this.focused, this.colors, this.paint, icon, session, {
       ...(ghost ? { ghost } : {}), ...(hint ? { hint } : {}), ...(paintedIcon ? { paintedIcon } : {}),
       ...(visibleRows != null ? { visibleRows } : {}), profile: this.decor.profile?.(), dim: this.decor.dim,
       ...(below ? { below } : {})
     });
-    const tip = width >= 8 ? this.decor.tip(width) : undefined;
-    this.tipRows = tip ? 1 : 0;
-    // The tip is a few painted cells; measuring (cached) skips re-segmenting it on every frame.
-    return tip ? [visibleWidth(tip) <= width ? tip : truncateToWidth(tip, width), ...framed] : framed;
+    return [...perch.map(row => visibleWidth(row) <= width ? row : truncateToWidth(row, width)), ...framed];
   }
 
   override handleInput(data: string): void {
@@ -230,7 +230,9 @@ class RoundedEditor extends CustomEditor {
 
   override handleMouse(event: MouseEvent) {
     const y = event.y - this.tipRows;
-    if ((y === 0 || y < 0) && faceColumns(event.x)) {
+    const inPet = y < 0 ? event.x >= 3 && event.x < 3 + (this.tipRows > 1 ? MASCOT_SPRITE_WIDTH : MASCOT_FACE_WIDTH)
+      : y === 0 && this.decor.icon(event.width).startsWith("▐") && faceColumns(event.x);
+    if (inPet) {
       if (event.type === "click" && event.button === "left") { this.decor.poke(); return { handled: true, focus: true }; }
       return undefined;
     }
@@ -278,16 +280,16 @@ class ThemedEditor implements EditorComponent {
     const text = this.base.getText();
     const ghost = text === "" ? this.decor.ghost() : undefined;
     const below = this.decor.attachments(text);
-    const icon = this.decor.icon();
+    const icon = this.decor.icon(width);
     const session = this.decor.session();
-    const paintedIcon = this.decor.paintedIcon();
+    const paintedIcon = this.decor.paintedIcon(width);
     const framed = roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, icon, session, {
       ...(ghost ? { ghost } : {}), ...(paintedIcon ? { paintedIcon } : {}), profile: this.decor.profile?.(), dim: this.decor.dim,
       ...(below ? { below } : {})
     });
-    const tip = width >= 8 ? this.decor.tip(width) : undefined;
-    this.tipRows = tip ? 1 : 0;
-    return tip ? [visibleWidth(tip) <= width ? tip : truncateToWidth(tip, width), ...framed] : framed;
+    const perch = width >= 8 ? this.decor.perch(width) ?? [] : [];
+    this.tipRows = perch.length;
+    return [...perch.map(row => visibleWidth(row) <= width ? row : truncateToWidth(row, width)), ...framed];
   }
   addToHistory(text: string) { this.base.addToHistory?.(text); }
   insertTextAtCursor(text: string) { this.base.insertTextAtCursor?.(text); }
@@ -297,8 +299,13 @@ class ThemedEditor implements EditorComponent {
   setAutocompleteMaxVisible(value: number) { this.base.setAutocompleteMaxVisible?.(value); }
   handleMouse(event: MouseEvent) {
     const y = event.y - this.tipRows;
+    if ((y < 0 && event.x >= 3 && event.x < 3 + (this.tipRows > 1 ? MASCOT_SPRITE_WIDTH : MASCOT_FACE_WIDTH))
+      || (y === 0 && this.decor.icon(event.width).startsWith("▐") && faceColumns(event.x))) {
+      if (event.type === "click" && event.button === "left") { this.decor.poke(); return { handled: true, focus: true }; }
+      return undefined;
+    }
     if (y < 0) return undefined;
-    return this.base.handleMouse?.({ ...event, y, x: event.x - 1, width: Math.max(1, event.width - 2) });
+    return this.base.handleMouse?.({ ...event, y, x: event.x - 1, width: Math.max(1, event.width - 2), height: Math.max(1, event.height - this.tipRows) });
   }
 }
 
@@ -309,7 +316,6 @@ export class ComposerStyle {
   private tui?: TUI;
   private timer?: ReturnType<typeof setTimeout>;
   private phase: WorkingPhase = "idle";
-  private frame = 0;
   private animations = true;
   private mascotOn = true;
   private session = "";
@@ -324,18 +330,23 @@ export class ComposerStyle {
   private chips?: { text: string; cwd: string; at: number; chips: string[] };
 
   private readonly decor: ComposerDecor = {
-    icon: () => this.mascotOn ? mascotFace(this.animations ? this.mascot.mood() : "idle") : "pi",
-    paintedIcon: () => {
+    icon: (width) => !this.mascotOn ? "pi" : this.fullSprite(width) ? ""
+      : mascotFace(this.animations ? this.mascot.mood() : "idle"),
+    paintedIcon: (width) => {
       if (!this.mascotOn) return undefined;
+      if (this.fullSprite(width)) return undefined;
       const mood = this.animations ? this.mascot.mood() : "idle";
       return paintFace(mascotFace(mood), mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined);
     },
-    tip: (width) => {
+    perch: (width) => {
       if (!this.mascotOn || width < 40) return undefined;
       const mood = this.animations ? this.mascot.mood() : "idle";
-      const animationFrame = this.phase === "idle" ? this.frame : Math.floor(Date.now() / COMPOSER_ACTIVE_INTERVAL_MS);
-      const tip = this.animations ? this.mascot.tip(Date.now(), animationFrame) : this.mascot.tip(0, 0);
-      return " ".repeat(3) + paintTip(tip, mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined);
+      const frame = this.animations ? Math.floor(Date.now() / COMPOSER_ACTIVE_INTERVAL_MS) : 0;
+      if (this.fullSprite(width)) {
+        return mascotPerch(mood, frame, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined)
+          .map(row => "   " + row);
+      }
+      return ["   " + paintTip(mascotTip(mood, frame), mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined)];
     },
     session: () => this.session,
     profile: () => this.profile,
@@ -362,6 +373,11 @@ export class ComposerStyle {
       return this.chips.chips.map((chip) => this.colors?.fg("accent", chip) ?? chip).join(this.colors?.fg("dim", "   ") ?? "   ");
     }
   };
+
+  /** Keep short/narrow terminals usable; the pet and mood spark reserve six rows. */
+  private fullSprite(width: number): boolean {
+    return width >= 60 && (this.tui?.terminal?.rows ?? process.stdout.rows ?? 24) >= 24;
+  }
 
   /** Share the suggestion state rendered as ghost text. */
   attachSuggestions(state: SuggestionState): void {
@@ -398,7 +414,6 @@ export class ComposerStyle {
     if (!changed) return;
     this.phase = phase;
     this.animations = animations;
-    this.frame = 0;
     this.restartTimer();
     if (this.enabled) this.tui?.requestRender();
   }
@@ -406,12 +421,12 @@ export class ComposerStyle {
   /**
    * Pi's own streaming/tool updates already repaint active sessions. Never add another active
    * animation loop: active frames derive from wall time when Pi naturally renders. Idle only
-   * schedules exact blink/sleep/flash transitions.
+   * schedules exact blink/sleep transitions and bounded reaction frames until a flash expires.
    */
   private restartTimer(): void {
     this.stopTimer();
     if (!this.enabled || !this.animations || !this.mascotOn) return;
-    this.lastKey = this.mascot.key(Date.now(), this.frame);
+    this.lastKey = this.mascot.key();
     this.scheduleTimer();
   }
   private scheduleTimer(): void {
@@ -420,8 +435,7 @@ export class ComposerStyle {
     if (delay === undefined) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.frame++;
-      const key = this.mascot.key(Date.now(), this.frame);
+      const key = this.mascot.key();
       if (key !== this.lastKey) {
         this.lastKey = key;
         this.tui?.requestRender();
@@ -471,7 +485,6 @@ export class ComposerStyle {
     this.stopTimer();
     this.tui = undefined;
     this.phase = "idle";
-    this.frame = 0;
     this.session = "";
     try {
       if (ctx.hasUI && ctx.mode === "tui" && this.owner && ctx.ui.getEditorComponent() === this.owner) {

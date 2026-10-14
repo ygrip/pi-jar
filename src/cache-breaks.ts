@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { CACHE_IDLE_MS, contextTokens, formatTokens } from "./context-budget.ts";
 import { duration, money } from "./panel.ts";
 
 /**
@@ -19,6 +18,18 @@ import { duration, money } from "./panel.ts";
  *   costly miss is a break: it is classified, logged to JSONL and announced once.
  * Decisions here are pure; {@link registerCacheBreaks} feeds Pi events in.
  */
+
+/** Approximate inactivity window used only to classify cache misses; never a compaction trigger. */
+const CACHE_IDLE_MS = 5 * 60_000;
+const amount = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+function contextTokens(usage: { input?: unknown; cacheRead?: unknown; cacheWrite?: unknown } | undefined): number {
+  return amount(usage?.input) + amount(usage?.cacheRead) + amount(usage?.cacheWrite);
+}
+function formatTokens(tokens: number): string {
+  if (tokens < 1000) return String(Math.round(tokens));
+  if (tokens < 999_500) return `${Math.round(tokens / 1000)}k`;
+  return `${(tokens / 1_000_000).toFixed(1)}M`;
+}
 
 /** A call is a costly break when its cache read falls short of the previous prompt by more than this... */
 export const BREAK_SHORTFALL_TOKENS = 4096;

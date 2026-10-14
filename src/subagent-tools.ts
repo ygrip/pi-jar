@@ -1,9 +1,32 @@
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { workspacePathAllowed } from "./delegate-worktree.ts";
 
 export const CHILD_TOOLS_ENV = "PI_JAR_CHILD_TOOLS";
+export const CHILD_SKILL_READS_ENV = "PI_JAR_CHILD_SKILL_READS";
+
+/** Trusted skill instructions and their relative references; never extension/package roots. */
+export function skillReadRoots(paths: readonly string[]): string[] {
+  return [...new Set(paths.map(path => {
+    const canonical = realpathSync(path);
+    // Retain the trusted spelling: /var and /private/var (or a symlinked skill
+    // install) must both work. workspacePathAllowed resolves its physical boundary.
+    const spelling = resolve(path);
+    return statSync(canonical).isDirectory() || basename(path) !== "SKILL.md" || lstatSync(path).isSymbolicLink()
+      ? spelling : dirname(spelling);
+  }))];
+}
+
+/** Malformed inherited grants fail closed. Parent-owned roots are absolute; the guard resolves their canonical boundary. */
+export function childSkillReadRoots(value: string | undefined): readonly string[] {
+  if (value === undefined) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.some(path => typeof path !== "string" || !isAbsolute(path) || path.includes("\0"))) return [];
+    return parsed;
+  } catch { return []; }
+}
 export const WEB_TOOLS = ["web_enable", "web_search", "fetch_content", "get_search_content", "source_check"] as const;
 export const RECURSIVE_TOOLS = new Set(["jar_delegate", "jar_subagent", "jar_council"]);
 export const SHELL_TOOLS = new Set(["bash", "powershell", "jar_shell"]);
@@ -71,14 +94,15 @@ export function loadSubagentConfig(directory: string, home = homedir()): Subagen
 }
 
 /** Multi-file tools must validate each effective target, not just the top-level default path. */
-export function worktreeToolViolation(root: string, cwd: string, name: string, args: unknown): string | undefined {
+export function worktreeToolViolation(root: string, cwd: string, name: string, args: unknown, skillRoots: readonly string[] = []): string | undefined {
   if (SHELL_TOOLS.has(name)) return "Sandboxed worktree subagents cannot run shell tools.";
   const pathTools = new Set(["read", "edit", "write", "grep", "find", "ls", "multi_file_edit"]);
   if (!pathTools.has(name)) return;
   if (!workspacePathAllowed(root, cwd, ".")) return "Sandboxed worktree subagent working directory is outside its workspace.";
   const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
   const validate = (value: unknown): string | undefined => {
-    if (typeof value !== "string" || !value || !workspacePathAllowed(root, cwd, value, name === "read")) {
+    const grantedRead = name === "read" && typeof value === "string" && skillRoots.some(skill => workspacePathAllowed(skill, cwd, value, true));
+    if (typeof value !== "string" || !value || (!workspacePathAllowed(root, cwd, value, name === "read") && !grantedRead)) {
       return "Sandboxed worktree subagent cannot access outside its workspace or use an invalid path: " + String(value);
     }
   };
