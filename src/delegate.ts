@@ -1361,7 +1361,24 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     const value = options.getMaxSubagents?.() ?? MAX_DELEGATES;
     return SUBAGENT_LIMIT_CHOICES.includes(value as never) ? value : MAX_DELEGATES;
   };
-  pi.on?.("session_start", (_event, ctx) => { controllerContext = ctx; });
+  let sessionGeneration = 0;
+  let sessionActive = true;
+  const cancelUpdates = new Set<() => void>();
+  const resetSession = () => {
+    sessionGeneration++;
+    controllerContext = undefined;
+    clearTimeout(wakeTimer);
+    wakeTimer = undefined;
+    watched.clear();
+    pendingEvents.clear();
+    pendingControls.clear();
+    moderatorActive = false;
+    moderatorInterrupted = false;
+    for (const cancel of cancelUpdates) cancel();
+    cancelUpdates.clear();
+  };
+  pi.on?.("session_shutdown", () => { sessionActive = false; resetSession(); });
+  pi.on?.("session_start", (_event, ctx) => { resetSession(); sessionActive = true; controllerContext = ctx; });
   const roleCandidates = (role: string) => {
     const manager = roles as ModelRoleManager & { resolveCandidates?: (name: string) => ReturnType<ModelRoleManager["resolveCandidates"]> };
     if (typeof manager.resolveCandidates === "function") return manager.resolveCandidates(role);
@@ -1451,10 +1468,10 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     };
   };
   const scheduleWake = () => {
-    if (moderatorActive || moderatorInterrupted || wakeTimer || !pendingEvents.size) return;
+    if (!sessionActive || moderatorActive || moderatorInterrupted || wakeTimer || !pendingEvents.size) return;
     wakeTimer = setTimeout(() => {
       wakeTimer = undefined;
-      if (moderatorActive || moderatorInterrupted) return;
+      if (!sessionActive || moderatorActive || moderatorInterrupted) return;
       const message = takeEvents();
       if (!message) return;
       try { pi.sendMessage?.(message, { triggerTurn: true }); }
@@ -1462,7 +1479,11 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     }, NOTIFY_COALESCE_MS);
     wakeTimer.unref?.();
   };
-  const queueEvent = (id: string, event: SubagentEvent) => { pendingEvents.set(id, event); scheduleWake(); };
+  const queueEvent = (id: string, event: SubagentEvent) => {
+    if (!sessionActive || registry.get(event.record.key) !== event.record) return;
+    pendingEvents.set(id, event);
+    scheduleWake();
+  };
   const boundary = (event: { outcome?: string; context?: { canContinue?: boolean } }) => {
     if (event.outcome !== "completed" || event.context?.canContinue === false) return;
     const message = takeEvents();
@@ -1506,6 +1527,9 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     // Internal council launches use session context, not tool-only nested execution APIs.
     async execute(_id, params, signal, onUpdate, ctx: ExtensionContext) {
       controllerContext = ctx;
+      const generation = sessionGeneration;
+      const currentSession = () => sessionActive && generation === sessionGeneration;
+      const parentCwd = ctx.cwd;
       const requested = params.tasks;
       const parentToolNames = (): string[] | undefined => {
         try {
@@ -1595,6 +1619,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           }
         }
       }
+      if (!currentSession()) return { content: [{ type: "text", text: "Subagent launch cancelled: session changed." }], details: { runs: [], write: false }, isError: true };
       const worktreeTasks = requested.filter((item) => (item.mode ?? params.mode ?? (params.write === true ? "direct" : "scout")) === "worktree").length;
       const recoveryBlock = worktreeTasks ? worktreeAdmission(registry, worktreeTasks) : undefined;
       if (recoveryBlock) return { content: [{ type: "text", text: recoveryBlock }], details: { runs: [], write: false }, isError: true };
@@ -1641,9 +1666,10 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         catch (error) { console.error("pi-jar: direct subagent edits will not join /diff", error); }
       }
       const edited = (path: string) => {
+        if (!currentSession()) return;
         const tracker = options.changes?.();
         if (!baselines || !tracker) return;
-        const absolute = isAbsolute(path) ? resolve(path) : resolve(ctx.cwd, path);
+        const absolute = isAbsolute(path) ? resolve(path) : resolve(parentCwd, path);
         const baseline = readChildBaseline(baselines, absolute);
         if (baseline !== undefined && tracker.adopt(absolute, baseline)) options.changed?.();
       };
@@ -1651,19 +1677,20 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       /** Last footer state per record: child streams fire many updates, the status changes rarely. */
       const published = new Map<string, string>();
       const publish = () => {
-        if (!ctx.hasUI) return;
-        for (const { key, run } of records) {
-          const state = run.state === "done" || run.state === "failed" || run.state === "stopped" ? ""
-            : run.state === "queued" || run.state === "paused" ? "waiting" : run.state === "idle" || run.state === "hibernated" ? "idle" : "working";
-          if (published.get(key) === state) continue;
-          published.set(key, state);
-          try {
+        if (!currentSession()) return;
+        try {
+          if (!ctx.hasUI) return;
+          for (const { key, run } of records) {
+            const state = run.state === "done" || run.state === "failed" || run.state === "stopped" ? ""
+              : run.state === "queued" || run.state === "paused" ? "waiting" : run.state === "idle" || run.state === "hibernated" ? "idle" : "working";
+            if (published.get(key) === state) continue;
+            published.set(key, state);
             ctx.ui.setStatus(`${ROLE_PREFIX}${key}`, !state ? undefined : JSON.stringify({
               name: run.name, label: run.name.slice(0, 12), state,
               task: cleanText(run.task, 60), expiresAt: Date.now() + 24 * 60 * 60_000
             }));
-          } catch { /* status is decoration */ }
-        }
+          }
+        } catch { /* status is decoration; even hasUI can throw on an expired context */ }
       };
       const details = (includeOutput = true) => ({
         batch: id,
@@ -1673,18 +1700,29 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       let updateTimer: ReturnType<typeof setTimeout> | undefined;
       let lastUpdateAt = 0;
       let toolReturned = false;
-      const emitUpdate = () => {
+      const cancelUpdate = () => {
+        if (updateTimer) clearTimeout(updateTimer);
         updateTimer = undefined;
+        cancelUpdates.delete(cancelUpdate);
+      };
+      const emitUpdate = () => {
+        cancelUpdate();
+        if (!currentSession()) return;
         lastUpdateAt = Date.now();
         publish();
         onUpdate?.({ content: [{ type: "text", text: runs.map((run) => `${run.name}: ${run.state}${run.activity ? " · " + run.activity : ""}`).join("\n") }], details: details(false) });
       };
       const update = () => {
+        if (!currentSession()) return;
         registry.notify();
         if (toolReturned || !onUpdate) { publish(); return; }
         const wait = Math.max(0, LIVE_UPDATE_MS - (Date.now() - lastUpdateAt));
         if (wait === 0) { if (updateTimer) clearTimeout(updateTimer); emitUpdate(); return; }
-        if (!updateTimer) { updateTimer = setTimeout(emitUpdate, wait); updateTimer.unref?.(); }
+        if (!updateTimer) {
+          cancelUpdates.add(cancelUpdate);
+          updateTimer = setTimeout(emitUpdate, wait);
+          updateTimer.unref?.();
+        }
       };
       const flushUpdate = () => {
         if (updateTimer) { clearTimeout(updateTimer); updateTimer = undefined; }
@@ -1736,7 +1774,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           failBeforeStart(run, "fork/worktree mode requires a persisted parent Pi session");
           return failedHandle();
         }
-        let cwd = ctx.cwd;
+        let cwd = parentCwd;
         let session: DelegateSessionOptions | undefined;
         const env: Record<string, string> = { [SUBAGENT_KEY_ENV]: key, [SUBAGENT_NAME_ENV]: run.name };
         const effectiveTools = toolsByRun.get(run.index) ?? (run.mode === "worktree" ? WORKTREE_TOOLS : run.mode === "direct" ? undefined : READ_ONLY_TOOLS);
@@ -1759,7 +1797,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         }
         if (run.mode === "worktree") {
           try {
-            const worktree = await createDelegateWorktree(ctx.cwd, controllers[index]!.signal);
+            const worktree = await createDelegateWorktree(parentCwd, controllers[index]!.signal);
             worktrees.set(run.index, worktree);
             run.workspace = worktree.root;
             cwd = worktree.cwd;
@@ -1802,7 +1840,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         void handle.closed.then(async () => {
           // The agent ended for good (hibernation never resolves closed): drop its private session and
           // discussion identity. An unreconciled worktree outlives it as lightweight recovery state.
-          retireDiscussion(key);
+          if (currentSession()) retireDiscussion(key);
           await cleanupPrivate(run.index, dropsWorktree(index) || run.mode !== "worktree");
           if (worktrees.has(run.index) && !stopRequested.has(index)) releaseForRecovery(run);
           update();
@@ -1852,8 +1890,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
           catch (error) { run.error = "could not inspect isolated changes: " + cleanText(String(error), 240); }
           if (changed.length && !run.error) {
             try {
-              run.appliedFiles = await applyDelegateWorktree(worktree, ctx.cwd, changed, options.changes?.(), controllers[index]!.signal);
-              if (run.appliedFiles.length) {
+              run.appliedFiles = await applyDelegateWorktree(worktree, parentCwd, changed, options.changes?.(), controllers[index]!.signal);
+              if (run.appliedFiles.length && currentSession()) {
                 try { options.changed?.(); } catch (error) { console.error("pi-jar: could not refresh parent change UI", error); }
               }
               await disposeDelegateWorktree(worktree);

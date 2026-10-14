@@ -812,6 +812,89 @@ const moderatorHost = (spawn: unknown, activeTools?: string[], options: Delegate
   return { registry, delegate: tools.get("jar_delegate")!, control: tools.get("jar_subagent")!, events, sent };
 };
 
+for (const lifecycle of ["session_shutdown", "session_start"]) {
+  test(`${lifecycle} cancels delegate updates and wake-ups before late cleanup`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const fake = fakeSpawn(child => { say(child, "old report"); settle(child); });
+    const host = moderatorHost(fake.spawn);
+    const hook = (name: string, ctx = quiet) =>
+      (host.events.get(name) as unknown as (event: object, ctx: object) => void)({}, ctx);
+    let expired = false;
+    let staleReads = 0;
+    let statuses = 0;
+    let updates = 0;
+    const ctx = {
+      ...quiet,
+      get hasUI() {
+        if (expired) { staleReads++; throw new Error("expired context"); }
+        return true;
+      },
+      ui: { setStatus() { statuses++; } }
+    };
+    await host.delegate.execute("old", { tasks: [{ task: "inspect" }] }, undefined, () => { updates++; }, ctx);
+    await tick();
+    const record = host.registry.records()[0]!;
+    const sessionDir = fake.calls[0]!.args[fake.calls[0]!.args.indexOf("--session-dir") + 1]!;
+    assert.equal(record.run.state, "idle");
+    assert.ok(statuses > 0);
+    const previousStatuses = statuses;
+    const previousUpdates = updates;
+    expired = true;
+    hook(lifecycle);
+    host.registry.clear(); // The extension owns process shutdown and workspace preservation.
+    await record.closed!();
+    await until(() => !existsSync(sessionDir));
+    await tick();
+    t.mock.timers.tick(1000);
+    assert.equal(staleReads, 0, "late child and cleanup callbacks never access the expired context");
+    assert.equal(statuses, previousStatuses);
+    assert.equal(updates, previousUpdates, "queued tool-update timers are cancelled");
+    assert.equal(host.sent.length, 0, "old events never wake the replacement session");
+    if (lifecycle === "session_shutdown") hook("session_start");
+    await host.delegate.execute("fresh", { tasks: [{ task: "new session" }] }, undefined, undefined, quiet);
+    await tick();
+    t.mock.timers.tick(1000);
+    assert.equal(host.sent.length, 1, "fresh session notifications still work");
+    await host.registry.records()[0]!.stop();
+  });
+}
+
+test("late cleanup tolerates hasUI expiry before a lifecycle notification", async () => {
+  const fake = fakeSpawn(() => {});
+  const host = moderatorHost(fake.spawn);
+  let expired = false;
+  await host.delegate.execute("old", { tasks: [{ task: "inspect" }] }, undefined, undefined, {
+    ...quiet,
+    get hasUI() { if (expired) throw new Error("expired context"); return true; },
+    ui: { setStatus() {} }
+  });
+  const record = host.registry.records()[0]!;
+  const sessionDir = fake.calls[0]!.args[fake.calls[0]!.args.indexOf("--session-dir") + 1]!;
+  expired = true;
+  await record.stop();
+  await until(() => !existsSync(sessionDir));
+  await tick();
+  assert.equal(record.run.error, undefined, "a decoration failure must not fail cleanup");
+});
+
+test("session shutdown cancels a launch awaiting resource discovery", async () => {
+  let release!: (value: { extensions: []; skills: [] }) => void;
+  const catalog = new Promise<{ extensions: []; skills: [] }>(resolve => { release = resolve; });
+  const fake = fakeSpawn(() => {});
+  const host = moderatorHost(fake.spawn, undefined, {
+    getSubagentConfig: () => ({ tools: { allow: [], deny: [] }, extensions: { allow: [], deny: ["/auth.ts"] }, skills: { allow: [], deny: [] } }),
+    loadResources: () => catalog
+  });
+  const launch = host.delegate.execute("old", { tasks: [{ task: "inspect" }] }, undefined, undefined, quiet);
+  host.events.get("session_shutdown")!({ messages: [] });
+  release({ extensions: [], skills: [] });
+  const result = await launch;
+  assert.equal(result.isError, true);
+  assert.match(result.content[0]!.text, /launch cancelled: session changed/);
+  assert.equal(fake.calls.length, 0);
+  assert.equal(host.registry.records().length, 0);
+});
+
 test("worktree launch grants only selected, deny-filtered skill resources", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-jar-skill-launch-"));
   const skills = mkdtempSync(join(tmpdir(), "pi-jar-launch-skills-"));
