@@ -16,6 +16,7 @@ import { renderFooterLayout, type ActivityState, type FooterActivity, type Foote
 import { openJarHistory } from "../src/history-ui.ts";
 import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
 import { GoalLoop } from "../src/goal-loop.ts";
+import { registerTodoGate } from "../src/todo-gate.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
 import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY, conversationStarted, pinnedProfileId } from "../src/profiles.ts";
@@ -358,6 +359,10 @@ export default function piJar(pi: ExtensionAPI): void {
     completed: () => composer.flash("complete", 4000)
   });
   if (!delegatedChild) goalLoop.register();
+  if (!delegatedChild) registerTodoGate(pi, {
+    todos: () => todos, suspended: () => planMode.isEnabled() || !!goals?.isActive(),
+    enabled: () => process.env.PI_JAR_TODO_GATE !== "off"
+  });
   planMode.setOnEnter((ctx) => goalLoop.pause(ctx, "plan mode is on"));
   const suggestions = new SuggestionState();
   composer.attachSuggestions(suggestions);
