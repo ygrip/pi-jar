@@ -2,6 +2,10 @@ name: Publish to npm
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - 'package.json'
     tags:
       - 'v*'
   workflow_dispatch:
@@ -12,7 +16,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -36,31 +40,57 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
-      - name: Verify tag matches package version
+      - name: Verify package and release ref
+        id: release
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
         run: |
+          set -euo pipefail
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          RELEASE_TAG="v${PACKAGE_VERSION}"
           test "$PACKAGE_NAME" = "pi-jar" || { echo "Unexpected npm package: $PACKAGE_NAME"; exit 1; }
-          test "$RELEASE_TAG" = "v${PACKAGE_VERSION}" || { echo "Tag $RELEASE_TAG does not match package version v${PACKAGE_VERSION}"; exit 1; }
-          test "$(git tag --points-at HEAD | grep -Fx "$RELEASE_TAG")" = "$RELEASE_TAG" || { echo "Tag $RELEASE_TAG does not point to checked-out commit"; exit 1; }
-
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF_TYPE" == "branch" ]]; then
+            test "$GITHUB_REF_NAME" = "main" || { echo "Releases from non-main branches are not allowed"; exit 1; }
+            if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" > /dev/null; then
+              echo "Tag $RELEASE_TAG already exists. Skipping release."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            ACTUAL_TAG="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
+            test "$ACTUAL_TAG" = "$RELEASE_TAG" || { echo "Tag $ACTUAL_TAG does not match package version $RELEASE_TAG"; exit 1; }
+            test "$(git tag --points-at HEAD | grep -Fx "$RELEASE_TAG")" = "$RELEASE_TAG" || { echo "Tag $RELEASE_TAG does not point to checked-out commit"; exit 1; }
+          fi
       - name: Install dependencies
+        if: steps.release.outputs.skip != 'true'
         run: npm ci
 
       - name: Audit dependencies
+        if: steps.release.outputs.skip != 'true'
         run: npm audit --audit-level=high
 
       - name: Typecheck
+        if: steps.release.outputs.skip != 'true'
         run: npm run check
 
       - name: Test
+        if: steps.release.outputs.skip != 'true'
         run: npm test
 
       - name: Preview package contents
+        if: steps.release.outputs.skip != 'true'
         run: npm pack --dry-run
 
+      - name: Create tag after validation
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git tag "$RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG"
+
       - name: Publish to npm (trusted publishing)
+        if: steps.release.outputs.skip != 'true'
         run: npm publish --access public
