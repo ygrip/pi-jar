@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Container, stripTerminalSequences, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import piJar from "../extensions/index.ts";
 import { renderFooter, type FooterView } from "../src/footer.ts";
-import { HOPEFUL_WELCOME_MESSAGES, fullwidth, heroMessage, hopefulWelcomeMessage, welcomeHit, welcomeLines } from "../src/welcome.ts";
+import { HOPEFUL_WELCOME_MESSAGES, heroMessage, hopefulWelcomeMessage, welcomeHit, welcomeLines } from "../src/welcome.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 
 const plain = { fg: (_color: string, value: string) => value };
@@ -66,23 +66,22 @@ test("hopeful welcome copy is varied, bounded, refreshable and injectable per re
   for (const message of HOPEFUL_WELCOME_MESSAGES) {
     assert.match(message, /light|spark|step|path|work|begin|night/i);
     const text = welcomeLines(120, 0, plain.fg, { project: "pi-jar", message }).map(stripTerminalSequences).join(" ");
-    for (const word of message.split(" ")) assert.ok(text.includes(fullwidth(word)), `${message}: ${word}`);
+    for (const word of message.split(" ")) assert.ok(text.includes(word), `${message}: ${word}`);
   }
 });
 
-test("welcome message is a large hero at the top of the card", () => {
+test("welcome message uses readable English at the top of the card", () => {
   const message = "Steady hands, warm light, good work ahead.";
   for (const width of [30, 46, 86]) {
     const lines = heroMessage(message, width, plain.fg, false);
     assert.ok(lines.every((line) => visibleWidth(line) === width), `${width} fixed width`);
     const text = lines.map(stripTerminalSequences).join(" ");
-    const big = width >= 46;
-    for (const word of message.split(" ")) assert.ok(text.includes(big ? fullwidth(word) : word), `${width}: ${word}`);
+    for (const word of message.split(" ")) assert.ok(text.includes(word), `${width}: ${word}`);
     assert.ok(lines.every((line) => line.includes("\x1b[1m")), "bold");
   }
   // The hero sits right under the header, above the workspace rows.
   const rows = welcomeLines(120, 0, plain.fg, { project: "jar", message }).map(stripTerminalSequences);
-  const hero = rows.findIndex((row) => row.includes(fullwidth("Steady")));
+  const hero = rows.findIndex((row) => row.includes("Steady"));
   assert.ok(hero > 0 && hero < rows.findIndex((row) => row.includes("PROJECT")));
 });
 

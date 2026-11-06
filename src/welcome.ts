@@ -111,22 +111,10 @@ function wrap(text: string, width: number, space = " "): string[] {
   return lines;
 }
 
-/** Double-width (fullwidth) forms of printable ASCII: the closest a terminal gets to larger type. */
-export function fullwidth(text: string): string {
-  return [...text].map((char) => {
-    const code = char.charCodeAt(0);
-    return code > 0x20 && code < 0x7f ? String.fromCharCode(code + 0xfee0) : char;
-  }).join("");
-}
-
-/**
- * The welcome message as a hero: bold, flame-colored and double-width when it fits in
- * three lines, otherwise bold at normal width. Returns centered lines of exactly `width`.
- */
+/** The welcome message is bold, flame-colored and centered within the given width. */
 export function heroMessage(message: string, width: number, fg: Paint, truecolor = supportsTruecolor()): string[] {
   const text = cleanText(message, 100);
-  const big = wrap(fullwidth(text), width - 2, "  ");
-  const lines = big.length <= 3 && big.every((line) => visibleWidth(line) <= width - 2) ? big : wrap(text, width - 2);
+  const lines = wrap(text, width - 2);
   return lines.map((line) => {
     const chars = [...line];
     // Pale gold at the start cooling to orange, like the flame's core.
