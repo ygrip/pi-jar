@@ -4,7 +4,7 @@ Route a selected model across accounts **of the same provider** without creating
 
 ## Set up accounts
 
-Open the provider-first interactive manager with **`/jar accounts`** (also **`/jar settings` → Pi → Manage accounts**). Inspired by OMP's multiple-account workflow, it groups accounts by **native Pi provider**, with searchable keyboard/mouse menus for **Connect**, **Switch/pin**, **Auto**, **Reconnect**, **Sign out**, **Remove**, **Routing policy**, **Profile access**, and **Quota & limits**. **`/jar accounts list`** displays status without the UI. All commands below remain available for scripting/manual use.
+Open the **OMP-style provider/account hub** with **`/jar accounts`** (also **`/jar settings` → Pi → Manage accounts**). Built on Pi's native TUI, it lists providers in one pane and accounts, connection status, quotas, cooldowns and pins in the other. Use **↑/↓** to select, **Tab/Shift+Tab** to change panes, **Enter** to open a row, **/** to search, or the **A/S/R/P/Q** shortcuts for add, switch, routing, profile access and quota. On narrow terminals the panes stack; Pi fullscreen supports mouse clicks. You can reconnect, sign out, or remove an account in its details. **`/jar accounts list`** is the noninteractive status view.
 
 **Provider isolation:** `openai-codex` accounts form their own pool, independent of `anthropic`, `openai`, or any other provider. Switching a Codex account does not alter Anthropic's routing, models, or roles. Pi-Jar does not change a model/provider to chase another account.
 
