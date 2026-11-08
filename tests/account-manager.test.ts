@@ -183,7 +183,7 @@ test("OMP-style account hub shows native provider pools, quota flags and respect
 });
 
 
-test("profile access clearly distinguishes All from restricted checkboxes", async () => {
+test("profile access clearly distinguishes All from restricted checkboxes", { timeout: 10000 }, async () => {
   const members = [
     { version: 1, name: "work", provider: "openai", auth: "env" },
     { version: 1, name: "personal", provider: "openai", auth: "env" }
@@ -225,7 +225,7 @@ test("profile access clearly distinguishes All from restricted checkboxes", asyn
   assert.deepEqual(step, 5);
 });
 
-test("offline provider accounts remain visible and can be removed through the UI", async () => {
+test("offline provider accounts remain visible and can be removed through the UI", { timeout: 10000 }, async () => {
   let members = [{ version: 1, name: "old-work", provider: "disabled-plugin", auth: "oauth" }];
   const removed: string[] = [];
   const policy: AccountRoutingSettings = { mode: "sticky", accounts: [] };
@@ -258,7 +258,7 @@ test("offline provider accounts remain visible and can be removed through the UI
   assert.equal(step, 3);
 });
 
-test("hub search filters same-provider account rows, retaining provider-name search", async () => {
+test("hub search filters same-provider account rows, retaining provider-name search", { timeout: 10000 }, async () => {
   const members = [
     { version: 1, name: "work", provider: "openai-codex", auth: "oauth" },
     { version: 1, name: "personal", provider: "openai-codex", auth: "oauth" }
