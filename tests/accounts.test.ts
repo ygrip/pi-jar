@@ -93,10 +93,13 @@ test("routing policies preserve sticky affinity, rotate, and respect profile all
   f.setMode("round-robin"); await ask(); await ask();
   f.allow(["b"]); await ask();
   assert.deepEqual(f.calls, ["key-a", "key-a", "key-a", "key-b", "key-b"]);
+  assert.equal(f.router.status().find(item => item.name === "b")?.lastUsed, true, "menu identifies the account actually routed");
+  assert.equal(f.router.status().find(item => item.name === "a")?.lastUsed, false);
   f.allow(["not-configured"]);
   assert.match((await ask()).errorMessage!, /No eligible openai account/);
   assert.equal(f.calls.length, 5);
   f.setMode("off");
+  assert.equal(f.router.status().some(account => account.lastUsed), false, "disabled routing never claims an active pool account");
   await ask(); assert.equal(f.calls.at(-1), "missing"); // direct provider call, no runtime auth
 });
 
@@ -235,12 +238,14 @@ test("request instrumentation and non-auth options survive; primary request secr
   const f = fixture(t);
   const hook = async () => {};
   await f.router.wrap(f.provider).streamSimple(model, context, {
-    apiKey: "unrelated-primary", env: { KEY: "unrelated-primary" }, headers: { Authorization: "Bearer primary", "X-Trace-Id": "trace" },
+    apiKey: "unrelated-primary", env: { KEY: "unrelated-primary" }, headers: { Authorization: "Bearer primary", "OpenAI-Organization": "primary-org", "ChatGPT-Account-ID": "primary-account", "X-Trace-Id": "trace" },
     reasoning: "high", temperature: 0.3, onProviderStreamEvent: hook
   }).result();
   const options = f.requests[0]!;
   assert.equal(options.apiKey, "key-a");
   assert.equal(options.headers?.Authorization, undefined);
+  assert.equal(options.headers?.["OpenAI-Organization"], undefined, "avoid forwarding stale provider organization identity");
+  assert.equal(options.headers?.["ChatGPT-Account-ID"], undefined, "avoid forwarding another account's ID");
   assert.equal(options.headers?.["X-Trace-Id"], "trace");
   assert.equal(options.env?.KEY, undefined);
   assert.deepEqual([options.reasoning, options.temperature, options.onProviderStreamEvent, options.maxRetries], ["high", 0.3, hook, 0]);
@@ -531,4 +536,22 @@ test("removing the sole allowed identity fails closed instead of broadening the 
   await assert.rejects(() => accounts.remove("a", { isIdle: () => true } as never), /last allowed account would enable other accounts/);
   assert.deepEqual(f.store.list().map(account => account.name), ["a", "b"]);
   assert.deepEqual(policy.accounts, ["a"]);
+});
+
+test("same-named model with a different provider API is never routed through another account", async t => {
+  const f = fixture(t);
+  const request: Model<Api> = { ...model, api: "anthropic-messages" };
+  const response = await f.router.wrap(f.provider).streamSimple(request, context).result();
+  assert.equal(response.stopReason, "error");
+  assert.match(response.errorMessage ?? "", /No eligible openai account/);
+  assert.deepEqual(f.calls, [], "no account key or model API mismatch reaches the provider");
+});
+
+test("provider-specific cooldown never blocks healthy accounts belonging to another provider", async t => {
+  const f = fixture(t);
+  f.store.saveHealth("a", { blockedUntil: Date.now() + 60_000 });
+  const response = await f.router.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(response.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-b"]);
+  assert.equal(f.router.status().find(account => account.name === "b")?.lastUsed, true);
 });
