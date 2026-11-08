@@ -12,6 +12,7 @@ import {
   DISCUSSION_TOKEN_ENV,
   DiscussionBroker,
   discussionClientFromEnv,
+  INBOX_DEADLINE_MS,
   registerDiscussionTool,
   SUBAGENT_KEY_ENV,
   SUBAGENT_NAME_ENV,
@@ -38,6 +39,7 @@ function agent(transport: () => DiscussionTransport | undefined) {
     run: (params: Record<string, unknown>) => tool!.execute("call", params),
     say: async (params: Record<string, unknown>) => (await tool!.execute("call", params)).content[0]!.text,
     boundary: async () => await handlers.get("before_agent_start")!({ type: "before_agent_start", prompt: "next" }, {}) as Notice,
+    lifecycle: (event: string) => handlers.get(event)?.({ type: event }, {}),
     sent
   };
 }
@@ -299,3 +301,30 @@ test("change notifications fire on state changes only, and a failing listener ne
   assert.equal((await scout.ask("still fine")).id, 2);
   assert.equal(logged.mock.callCount(), 1);
 }));
+
+test("slow inbox mail joins the next turn of its own session, never another session's prompt", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const replies: Array<(value: unknown) => void> = [];
+  const slow = { inbox: () => new Promise((resolve) => { replies.push(resolve); }) } as unknown as DiscussionTransport;
+  const mail = (text: string) => ({ messages: [{ id: 1, kind: "broadcast", from: "s", fromName: "scout", text, createdAt: 0 }], latest: 1, more: 0 });
+  const host = agent(() => slow);
+
+  let turn = host.boundary();
+  t.mock.timers.tick(INBOX_DEADLINE_MS);
+  assert.equal(await turn, undefined, "the turn starts without waiting for the broker");
+  replies[0]!(mail("same session"));
+  await Promise.resolve(); await Promise.resolve();
+  turn = host.boundary();
+  replies[1]!({ messages: [], latest: 1, more: 0 });
+  assert.match((await turn)!.message.content, /same session/, "late mail joins the next turn");
+
+  turn = host.boundary();
+  t.mock.timers.tick(INBOX_DEADLINE_MS);
+  await turn;
+  host.lifecycle("session_start");
+  replies[2]!(mail("old session"));
+  await Promise.resolve(); await Promise.resolve();
+  turn = host.boundary();
+  replies[3]!({ messages: [], latest: 1, more: 0 });
+  assert.equal(await turn, undefined, "mail read for the previous session is discarded");
+});

@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Provider } from "@earendil-works/pi-ai";
@@ -14,6 +14,27 @@ export interface AccountDefinition {
 }
 export interface AccountHealth { blockedUntil?: number; quota?: import("./quota.ts").Quota; checkedAt?: number }
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
+/** Health updates hold the lock for one small read and write; anything older crashed mid-update. */
+const HEALTH_LOCK_STALE_MS = 10_000;
+const HEALTH_LOCK_TIMEOUT_MS = 2_000;
+const HEALTH_LOCK_RETRY_MS = 5;
+const lockWait = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Combine a proposed health record with the one on disk. Cooldowns only extend: a stale quota
+ * refresh must never clear a 429 cooldown another process recorded meanwhile.
+ */
+export function mergeHealth(current: AccountHealth, next: AccountHealth): AccountHealth {
+  const merged: AccountHealth = { ...current, ...next };
+  const blockedUntil = Math.max(current.blockedUntil ?? 0, next.blockedUntil ?? 0);
+  if (blockedUntil > 0) merged.blockedUntil = blockedUntil;
+  else delete merged.blockedUntil;
+  if ((current.checkedAt ?? 0) > (next.checkedAt ?? 0)) {
+    merged.quota = current.quota;
+    merged.checkedAt = current.checkedAt;
+  }
+  return merged;
+}
 
 function privatePath(path: string, directory: boolean): void {
   const stat = lstatSync(path);
@@ -105,8 +126,51 @@ export class AccountStore {
       return raw;
     } catch (error) { if (missing(error)) return {}; throw error; }
   }
+  /**
+   * Read, change and write `health.json` under a per-account lock file, so concurrent Pi
+   * processes (main session and subagents) cannot overwrite each other's quota or cooldown.
+   */
+  updateHealth(name: string, change: (current: AccountHealth) => AccountHealth): AccountHealth {
+    privatePath(this.root, true); privatePath(this.directory(name), true);
+    const release = this.lockHealth(name);
+    try {
+      const current = this.health(name);
+      const next = mergeHealth(current, change(current));
+      this.writeHealth(name, next);
+      return next;
+    } finally { release(); }
+  }
+  private lockHealth(name: string): () => void {
+    const path = join(this.directory(name), "health.lock");
+    const deadline = Date.now() + HEALTH_LOCK_TIMEOUT_MS;
+    while (true) {
+      try {
+        closeSync(openSync(path, "wx", 0o600));
+        return () => {
+          try { unlinkSync(path); } catch (error) { if (!missing(error)) throw error; }
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      this.removeStaleLock(path);
+      if (Date.now() > deadline) throw new Error(`Account health is locked by another process: ${name}`);
+      Atomics.wait(lockWait, 0, 0, HEALTH_LOCK_RETRY_MS);
+    }
+  }
+  private removeStaleLock(path: string): void {
+    let age: number;
+    try { age = Date.now() - statSync(path).mtimeMs; }
+    catch (error) { if (missing(error)) return; throw error; }
+    if (age < HEALTH_LOCK_STALE_MS) return;
+    try { unlinkSync(path); } catch (error) { if (!missing(error)) throw error; }
+  }
+  /** Replace health outright (e.g. clear a cooldown after re-login), still serialized by the lock. */
   saveHealth(name: string, health: AccountHealth): void {
     privatePath(this.root, true); privatePath(this.directory(name), true);
+    const release = this.lockHealth(name);
+    try { this.writeHealth(name, health); } finally { release(); }
+  }
+  private writeHealth(name: string, health: AccountHealth): void {
     const path = join(this.directory(name), "health.json");
     const temporary = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
     try {

@@ -43,6 +43,31 @@ test("/jar routing on/off persists active-profile policy and status reports it",
   });
 });
 
+test("settings-driven routing changes refresh model availability like /jar routing", async () => {
+  const previous = process.env.JAR_ROUTING_REFRESH_TEST;
+  process.env.JAR_ROUTING_REFRESH_TEST = "secret";
+  try {
+    await fixture(async ({ ctx, commands }) => {
+      const refreshed: string[][] = [];
+      ctx.modelRegistry.getProvider = () => ({ id: "openai", auth: { apiKey: { name: "OpenAI" } }, getModels: () => [] });
+      ctx.modelRegistry.getAll = () => [];
+      ctx.modelRegistry.refresh = async (options: { providers: string[] }) => { refreshed.push(options.providers); };
+      await commands.get("jar")("accounts add openai work JAR_ROUTING_REFRESH_TEST", ctx);
+      await commands.get("jar")("routing on", ctx);
+      const viaCommand = refreshed.length;
+      assert.ok(viaCommand > 0, "/jar routing on refreshes availability");
+      // `use` changes settings only through the shared settings path (the same one the settings UI uses).
+      await commands.get("jar")("accounts use work", ctx);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(refreshed.length > viaCommand, "a settings change also refreshes availability");
+      assert.deepEqual(refreshed.at(-1), ["openai"]);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.JAR_ROUTING_REFRESH_TEST;
+    else process.env.JAR_ROUTING_REFRESH_TEST = previous;
+  }
+});
+
 async function fixture(run: (h: any) => Promise<void>, active = "Default", initialEntries: any[] = [], legacyAccent?: "azure") {
   const directory = mkdtempSync(join(tmpdir(), "pi-jar-profile-integration-"));
   const prior = process.env.PI_CODING_AGENT_DIR;
@@ -87,6 +112,7 @@ async function fixture(run: (h: any) => Promise<void>, active = "Default", initi
   piJar({ on: (name: string, handler: Function) => events.set(name, [...(events.get(name) ?? []), handler]),
     registerCommand: (name: string, options: any) => commands.set(name, options.handler),
     registerShortcut: (name: string, options: any) => shortcuts.set(name, options.handler), registerTool() {}, getCommands: () => [],
+    registerProvider() {},
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     setModel: async (model: any) => { ctx.model = model; await emit("model_select", { source: "set" }); if (failModel && model.id === "writer") throw new Error("Model activation failed"); return true; },
     getThinkingLevel: () => "off", setThinkingLevel() {}

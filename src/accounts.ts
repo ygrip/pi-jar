@@ -28,6 +28,28 @@ export class Accounts {
     this.router = new AccountRouter(this.store, settings);
   }
   environment(): Record<string, string> { return { [ACCOUNT_ROUTING_ENV]: JSON.stringify(this.settings()) }; }
+  /**
+   * Credential variables a subagent must not inherit: keys of environment-backed accounts the
+   * routing allowlist excludes. Variables also used by an allowed account stay. With routing off
+   * or no allowlist nothing is withheld, because the child may need them for Pi's own login.
+   */
+  withheldEnvironment(): string[] {
+    const settings = this.settings();
+    if (settings.mode === "off" || !settings.accounts.length) return [];
+    let definitions: AccountDefinition[];
+    try { definitions = this.store.list(); }
+    catch (error) {
+      // The child reads the same storage and fails closed on it; it cannot route with these keys.
+      console.error("pi-jar: cannot read account storage to scope subagent credentials", error);
+      return [];
+    }
+    const allowed = new Set(settings.accounts);
+    const kept = new Set(definitions.filter(account => allowed.has(account.name)).map(account => account.env));
+    const withheld = definitions
+      .filter(account => account.auth === "env" && !allowed.has(account.name) && !kept.has(account.env))
+      .map(account => account.env!);
+    return [...new Set(withheld)];
+  }
   sync(ctx: ExtensionContext): void {
     this.router.onRoute = (name, provider, health) => {
       if (!ctx.hasUI || typeof ctx.ui.setStatus !== "function") return;

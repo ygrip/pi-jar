@@ -480,15 +480,24 @@ export function registerDiscussionTool(pi: ExtensionAPI, transport: () => Discus
   // that already carries it, so reading it costs no list call. Discussion traffic never sends a message
   // or triggers a turn, so agents cannot wake each other into a loop.
   // Reading the inbox marks mail read, so a reply that misses this turn's deadline is kept for the next.
-  const late: string[] = [];
+  // Late mail belongs to the session that read it: a session change discards it and any read still
+  // in flight, so one session's messages are never injected into another session's prompt.
+  let late: string[] = [];
+  let generation = 0;
+  const newSession = () => { generation++; late = []; };
+  pi.on?.("session_start", newSession);
+  pi.on?.("session_shutdown", newSession);
   pi.on?.("before_agent_start", async () => {
     const broker = transport();
     if (!broker) return;
     const carried = late.splice(0);
+    const readIn = generation;
     // Advisory only: never hold the model request on the broker. A slow reply joins the next turn;
     // a failure surfaces on the agent's next jar_discuss call.
     const reading = broker.inbox().then(inboxNotice, () => undefined);
-    const content = await withinDeadline(reading, INBOX_DEADLINE_MS, (notice) => { if (notice) late.push(notice); });
+    const content = await withinDeadline(reading, INBOX_DEADLINE_MS, (notice) => {
+      if (notice && readIn === generation) late.push(notice);
+    });
     const notices = [...carried, ...(content ? [content] : [])];
     if (notices.length) return { message: { customType: DISCUSSION_NOTICE, display: false, content: notices.join("\n\n") } };
   });

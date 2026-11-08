@@ -108,16 +108,16 @@ export class AccountRouter {
         state.quotaError = "Quota lookup unavailable; provider limits still apply";
       }
       if (quota) {
-        state.health = { ...this.store.health(state.definition.name), quota, checkedAt: this.now() };
-        this.store.saveHealth(state.definition.name, state.health);
+        const checkedAt = this.now();
+        state.health = this.store.updateHealth(state.definition.name, current => ({ ...current, quota, checkedAt }));
       }
       state.nextCheck = this.now() + QUOTA_TTL_MS;
     })().finally(() => { state.pending = undefined; });
     return waitForQuota(state.pending, signal);
   }
-  private async select(provider: Provider, model: AnyModel, tried: Set<string>, signal?: AbortSignal): Promise<AccountState> {
+  /** `settings` is the policy captured when the request was dispatched; retries reuse it. */
+  private async select(provider: Provider, model: AnyModel, tried: Set<string>, settings: AccountRoutingSettings, signal?: AbortSignal): Promise<AccountState> {
     if (this.configurationError) throw new RoutingError(this.configurationError);
-    const settings = this.settings();
     const accounts = this.store.list().filter(account => account.provider === provider.id
       && (!settings.accounts.length || settings.accounts.includes(account.name)) && !tried.has(account.name));
     const states = accounts.map(account => this.state(account, provider));
@@ -178,9 +178,8 @@ export class AccountRouter {
     callback?: (response: ProviderResponse, model: TModel) => void | Promise<void>) {
     return async (response: ProviderResponse, model: TModel): Promise<void> => {
       if (response.status === 429) {
-        const health = this.store.health(state.definition.name);
-        state.health = { ...health, blockedUntil: Math.max(health.blockedUntil ?? 0, retryAfter(response, this.now())) };
-        this.store.saveHealth(state.definition.name, state.health);
+        const blockedUntil = retryAfter(response, this.now());
+        state.health = this.store.updateHealth(state.definition.name, current => ({ ...current, blockedUntil }));
       }
       await callback?.(response, model);
     };
@@ -234,7 +233,7 @@ export class AccountRouter {
       generateImages: provider.generateImages && (async (model, context, options) => {
         if (!active()) return provider.generateImages!(model, context, options);
         try {
-          const state = await this.select(provider, model, new Set(), options?.signal);
+          const state = await this.select(provider, model, new Set(), this.settings(), options?.signal);
           try { return await (await state.models).generateImages(model, context, {
             ...this.cleanOptions(options), onResponse: this.observeResponse(state, options?.onResponse)
           }); }
@@ -249,7 +248,7 @@ export class AccountRouter {
       classify: provider.classify && (async (model, context, options) => {
         if (!active()) return provider.classify!(model, context, options);
         try {
-          const state = await this.select(provider, model, new Set(), options?.signal);
+          const state = await this.select(provider, model, new Set(), this.settings(), options?.signal);
           try { return await (await state.models).classify(model, context, {
             ...this.cleanOptions(options), onResponse: this.observeResponse(state, options?.onResponse)
           }); }
@@ -281,6 +280,8 @@ export class AccountRouter {
   }
   private route(provider: Provider, model: Model<Api>, context: TranscriptContext, options: StreamOptions = {}, simple: boolean): AssistantMessageEventStream {
     const output = createAssistantMessageEventStream();
+    // One policy per request: a mode or allowlist change applies to the next request, never a retry.
+    const settings = this.settings();
     void (async () => {
       let started = false;
       const tried = new Set<string>();
@@ -288,7 +289,7 @@ export class AccountRouter {
         while (true) {
           options.signal?.throwIfAborted();
           if ("deferred" in options && options.deferred) throw new RoutingError("Deferred requests require account routing off");
-          const state = await this.select(provider, model, tried, options.signal);
+          const state = await this.select(provider, model, tried, settings, options.signal);
           tried.add(state.definition.name);
           let response: ProviderResponse | undefined;
           let exposed = false;

@@ -4,7 +4,10 @@ import { mkdtempSync, rmSync, chmodSync, lstatSync, readFileSync, symlinkSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssistantMessageEventStream, createModels, InMemoryCredentialStore, normalizeContext, type Provider, type Model, type Api, type AssistantMessage, type SimpleStreamOptions, type ImageModel, type ImageApi, type ClassifierModel, type ClassifierApi } from "@earendil-works/pi-ai";
-import { AccountStore } from "../src/account-store.ts";
+import { AccountStore, mergeHealth } from "../src/account-store.ts";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { AccountRouter, remainingQuota, retryAfter } from "../src/account-router.ts";
 import { parseAccountRouting, type AccountRoutingSettings } from "../src/account-settings.ts";
@@ -283,4 +286,49 @@ test("subagents inherit routing policy/allowlist without credentials", t => {
 test("quota score uses the most constrained unexpired window", () => {
   assert.equal(remainingQuota({ fiveHour: { used: 50 }, week: { used: 90 } }, 1), 10);
   assert.equal(remainingQuota({ week: { used: 100, resetsAt: 1 } }, 2), undefined);
+});
+
+test("a stale quota refresh never clears a cooldown another writer recorded", () => {
+  const cooled = { blockedUntil: 5000, quota: { week: { used: 10 } }, checkedAt: 100 };
+  assert.deepEqual(mergeHealth(cooled, { quota: { week: { used: 20 } }, checkedAt: 200 }),
+    { blockedUntil: 5000, quota: { week: { used: 20 } }, checkedAt: 200 });
+  assert.deepEqual(mergeHealth(cooled, { ...cooled, blockedUntil: 9000 }).blockedUntil, 9000);
+  assert.deepEqual(mergeHealth({ ...cooled, checkedAt: 300 }, { quota: { week: { used: 99 } }, checkedAt: 200 }).quota, { week: { used: 10 } },
+    "an older quota snapshot does not replace a newer one");
+});
+
+test("health updates from separate processes are serialized: no lost cooldowns or increments", async t => {
+  const f = fixture(t);
+  const store = fileURLToPath(new URL("../src/account-store.ts", import.meta.url));
+  const worker = (role: "quota" | "cooldown") => `
+    import { AccountStore } from ${JSON.stringify(store)};
+    const store = new AccountStore(${JSON.stringify(f.directory)});
+    for (let index = 0; index < 60; index++) {
+      store.updateHealth("a", (current) => {
+        const quota = { week: { used: ((current.quota?.week?.used ?? 0) + 1) } };
+        if (${JSON.stringify(role)} === "cooldown" && index === 30) return { ...current, quota, blockedUntil: 4102444800000 };
+        return { ...current, quota, checkedAt: (current.checkedAt ?? 0) + 1 };
+      });
+    }`;
+  const run = (role: "quota" | "cooldown") => promisify(execFile)(process.execPath,
+    ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", worker(role)]);
+  await Promise.all([run("quota"), run("cooldown"), run("quota")]);
+  const health = f.store.health("a");
+  assert.equal(health.quota?.week?.used, 180, "every read/modify/write saw the previous one");
+  assert.equal(health.blockedUntil, 4102444800000, "a concurrent quota refresh did not erase the 429 cooldown");
+  assert.equal(lstatSync(join(f.store.root, "a", "health.json")).mode & 0o777, 0o600);
+  assert.throws(() => lstatSync(join(f.store.root, "a", "health.lock")), /ENOENT/, "the lock is released");
+});
+
+test("a routing policy change during a request does not alter its 429 retry", async t => {
+  const f = fixture(t); f.fail(429);
+  const provider = f.router.wrap(f.provider);
+  const pending = provider.streamSimple(model, context).result();
+  f.allow(["a"]);
+  f.setMode("off");
+  const result = await pending;
+  assert.equal(result.stopReason, "stop", "the retry used the policy captured at dispatch");
+  assert.deepEqual(f.calls, ["key-a", "key-b"]);
+  await provider.streamSimple(model, context).result();
+  assert.equal(f.calls.at(-1), "missing", "the next request uses the new policy");
 });

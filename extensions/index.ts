@@ -371,6 +371,7 @@ export default function piJar(pi: ExtensionAPI): void {
   let delegateController: DelegateController | undefined;
   registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges,
     discussionEnv: (key, name) => ({ ...discussion?.childEnv(key, name), ...accounts.environment() }),
+    withheldEnv: () => accounts.withheldEnvironment(),
     discussionRetire: (key) => discussion?.retire(key),
     discussionUnread: (key) => discussion?.unreadFor(key) ?? 0,
     discussionDigest: () => discussion?.digest(),
@@ -707,8 +708,14 @@ export default function piJar(pi: ExtensionAPI): void {
       ctx.ui.notify(`Accent ${next.accent} is not loaded`, "warning");
       return;
     }
+    const routingChanged = JSON.stringify(next.accountRouting) !== JSON.stringify(visualSettings.accountRouting);
     visualSettings = next;
-    accounts.sync(ctx);
+    // Same activation as /jar routing: install or restore providers, then refresh model availability.
+    if (routingChanged) {
+      void accounts.ready(ctx).catch((error: unknown) => {
+        ctx.ui.notify(`Account routing: ${error instanceof Error ? error.message : String(error)}`, "error");
+      });
+    }
     setIconSet(next.icons);
     enabled = next.ui;
     animations = next.animations;

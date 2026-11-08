@@ -8,6 +8,9 @@ import { setImmediate as tick } from "node:timers/promises";
 import { ChangeTracker } from "../src/changes.ts";
 import { DelegateRegistry, HIBERNATE_AFTER_MS, registerDelegate, type DelegateOptions } from "../src/delegate.ts";
 import { DISCUSSION_ENDPOINT_ENV, DISCUSSION_TOKEN_ENV } from "../src/discussion.ts";
+import { AccountStore } from "../src/account-store.ts";
+import { Accounts } from "../src/accounts.ts";
+import type { AccountRoutingSettings } from "../src/account-settings.ts";
 import { emit, fakeSpawn, say, sessionFileOf, settle, taskOf, until, type FakeChild } from "./fake-rpc.ts";
 
 interface Tool { name: string; execute(id: string, params: object, signal: undefined, onUpdate: undefined, ctx: object): Promise<{ isError?: boolean; content: Array<{ text: string }> }> }
@@ -234,4 +237,32 @@ test("a hibernated worktree worker keeps its private edits, resumes in the same 
     assert.equal(existsSync(first.cwd!), false, "stop removes the worktree");
     assert.equal(existsSync(dirname(sessionFileOf(first.args)!)), false, "and the private session");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("subagents do not inherit credential variables of accounts excluded by the routing allowlist", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "jar-withheld-"));
+  process.env.JAR_EXCLUDED_KEY = "secret-excluded";
+  process.env.JAR_ALLOWED_KEY = "secret-allowed";
+  t.after(() => { rmSync(directory, { recursive: true, force: true }); delete process.env.JAR_EXCLUDED_KEY; delete process.env.JAR_ALLOWED_KEY; });
+  const store = new AccountStore(directory);
+  for (const [name, env] of [["work", "JAR_ALLOWED_KEY"], ["personal", "JAR_EXCLUDED_KEY"]] as const) {
+    store.reserve(name); store.save({ version: 1, name, provider: "openai", auth: "env", env });
+  }
+  let settings: AccountRoutingSettings = { mode: "sticky", accounts: ["work"] };
+  const accounts = new Accounts({} as never, () => settings, () => {}, directory);
+  const fake = fakeSpawn((child) => { say(child, "done"); settle(child); });
+  const moderator = host(fake.spawn, {
+    discussionEnv: () => accounts.environment(),
+    withheldEnv: () => accounts.withheldEnvironment()
+  });
+  await moderator.delegate.execute("d", { tasks: [{ task: "inspect", name: "scout" }] }, undefined, undefined, quiet);
+  await tick();
+  const env = fake.calls[0]!.env;
+  assert.equal(env.JAR_EXCLUDED_KEY, undefined, "an excluded account's key never reaches the child");
+  assert.equal(env.JAR_ALLOWED_KEY, "secret-allowed", "allowed accounts keep working in the child");
+  assert.deepEqual(JSON.parse(env.PI_JAR_ACCOUNT_ROUTING!), settings);
+  settings = { mode: "off", accounts: ["work"] };
+  assert.deepEqual(accounts.withheldEnvironment(), [], "routing off withholds nothing; Pi's own login may need the variables");
+  settings = { mode: "sticky", accounts: [] };
+  assert.deepEqual(accounts.withheldEnvironment(), [], "no allowlist means every account is allowed");
 });
