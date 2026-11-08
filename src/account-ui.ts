@@ -132,11 +132,12 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
   const accountDescription = (account: AccountDefinition): string => {
     const status = accounts.router.status().find(item => item.name === account.name);
     const remaining = status?.remaining === undefined ? "quota unknown" : `${status.remaining}% left`;
+    const connected = accounts.store.hasCredentials(account) ? "" : " · SIGNED OUT / MISSING KEY";
     const cooldown = status?.blockedUntil && status.blockedUntil > Date.now() ? " · cooldown" : "";
     const pin = accounts.policy().pinned?.[account.provider] === account.name ? " · PINNED" : "";
     const allowed = accounts.policy().accounts;
     const excluded = allowed.length && !allowed.includes(account.name) ? " · excluded" : "";
-    return `${account.name} · ${account.auth === "oauth" ? "OAuth" : "API key"} · ${remaining}${cooldown}${pin}${excluded}`;
+    return `${account.name} · ${account.auth === "oauth" ? "OAuth" : "API key"} · ${remaining}${cooldown}${pin}${excluded}${connected}`;
   };
 
   const showLimits = async (providerId?: string): Promise<void> => {
@@ -159,7 +160,7 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
   const manageAccount = async (account: AccountDefinition): Promise<void> => {
     const choices = [
       "Make active for this provider (pin)",
-      ...(account.auth === "oauth" ? ["Reconnect / renew Pi OAuth login"] : []),
+      ...(account.auth === "oauth" ? ["Reconnect / renew Pi OAuth login", "Sign out (keep label)"] : []),
       "View quota & cooldown",
       "Remove local account credentials…",
       "Back"
@@ -169,8 +170,13 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
       choices);
     if (choice === undefined || choice === choices.length - 1) return;
     if (choice === 0) return accounts.pin(account.provider, account.name, ctx);
-    const offset = account.auth === "oauth" ? 1 : 0;
+    const offset = account.auth === "oauth" ? 2 : 0;
     if (account.auth === "oauth" && choice === 1) { await signIn(account.provider, account.name); return; }
+    if (account.auth === "oauth" && choice === 2) {
+      const confirm = await promptChoice(ctx, "Sign out?", `Remove ${account.name}'s local OAuth credential but keep the account label for future login?`, ["Keep signed in", "Sign out locally"]);
+      if (confirm === 1) await accounts.logout(account.name, ctx);
+      return;
+    }
     if (choice === offset + 1) { await showLimits(account.provider); return; }
     if (choice === offset + 2) {
       const confirmation = await promptChoice(ctx, "Remove this account?", `Delete ${account.name}'s local credential files? The provider session is not revoked.`, [
