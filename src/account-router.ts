@@ -118,6 +118,11 @@ export class AccountRouter {
   /** `settings` is the policy captured when the request was dispatched; retries reuse it. */
   private async select(provider: Provider, model: AnyModel, tried: Set<string>, settings: AccountRoutingSettings, signal?: AbortSignal): Promise<AccountState> {
     if (this.configurationError) throw new RoutingError(this.configurationError);
+    // Provider IDs are the credential boundary. Model IDs are not globally unique,
+    // so a same-named model from another provider must never select these credentials.
+    if (model.provider !== provider.id) {
+      throw new RoutingError(`Model ${model.provider}/${model.id} does not belong to routed provider ${provider.id}`);
+    }
     const pinnedName = settings.pinned?.[provider.id];
     const accounts = this.store.list().filter(account => account.provider === provider.id
       && (!settings.accounts.length || settings.accounts.includes(account.name))
@@ -134,7 +139,8 @@ export class AccountRouter {
       if ((state.unavailableUntil ?? 0) > this.now()) continue;
       try {
         const models = await (await state.models).getAllAvailable(provider.id, { signal });
-        if (models.some(candidate => candidate.id === model.id && (candidate.type ?? "chat") === (model.type ?? "chat"))) eligible.push(state);
+        if (models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
+          && (candidate.type ?? "chat") === (model.type ?? "chat"))) eligible.push(state);
       } catch {
         signal?.throwIfAborted();
         state.unavailableUntil = this.now() + 60_000;
