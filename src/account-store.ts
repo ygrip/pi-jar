@@ -96,7 +96,7 @@ export class AccountStore {
       if (typeof raw?.deviceId === "string" && /^[\da-f-]{36}$/i.test(raw.deviceId)) return raw.deviceId;
     } catch { /* Pi has not assigned an installation ID yet. */ }
     this.ensureRoot();
-    const path = join(this.root, "device-id");
+    const path = join(this.root, ".device-id");
     try {
       privatePath(path, false);
       const id = readFileSync(path, "utf8").trim();
