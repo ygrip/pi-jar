@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, chmodSync, lstatSync, readFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, chmodSync, lstatSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssistantMessageEventStream, createModels, InMemoryCredentialStore, normalizeContext, type Provider, type Model, type Api, type AssistantMessage, type SimpleStreamOptions, type ImageModel, type ImageApi, type ClassifierModel, type ClassifierApi } from "@earendil-works/pi-ai";
@@ -331,4 +331,34 @@ test("a routing policy change during a request does not alter its 429 retry", as
   assert.deepEqual(f.calls, ["key-a", "key-b"]);
   await provider.streamSimple(model, context).result();
   assert.equal(f.calls.at(-1), "missing", "the next request uses the new policy");
+});
+
+test("private account removal is explicit, scoped and fails closed on unknown files", t => {
+  const fixture = mkdtempSync(join(tmpdir(), "pi-jar-remove-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const store = new AccountStore(fixture);
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: "openai", auth: "env", env: "WORK_KEY" });
+  store.saveHealth("work", { blockedUntil: Date.now() + 1000 });
+  const path = join(store.root, "work");
+  writeFileSync(join(path, "unexpected.txt"), "do not delete");
+  assert.throws(() => store.remove("work"), /unexpected files or active locks/);
+  assert.ok(existsSync(join(path, "account.json")));
+  rmSync(join(path, "unexpected.txt"));
+  store.remove("work");
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(store.list(), []);
+  assert.throws(() => store.remove("work"), /Unknown account/);
+});
+
+test("native provider login identity follows Pi settings and stays stable otherwise", t => {
+  const fixture = mkdtempSync(join(tmpdir(), "pi-jar-device-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const store = new AccountStore(fixture);
+  const created = store.deviceId();
+  assert.match(created, /^[0-9a-f-]{36}$/i);
+  assert.equal(store.deviceId(), created);
+  const piDeviceId = "12345678-1234-4234-8234-123456789abc";
+  writeFileSync(join(fixture, "settings.json"), JSON.stringify({ deviceId: piDeviceId }));
+  assert.equal(store.deviceId(), piDeviceId, "reuse Pi's native installation ID when present");
 });
