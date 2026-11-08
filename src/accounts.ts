@@ -190,8 +190,7 @@ export class Accounts {
     const current = this.settings();
     // An empty allowlist means ALL accounts, not NONE. Removing its last
     // member must not silently grant access to every other provider account.
-    const remaining = this.store.list().filter(account => account.name !== name);
-    if (current.accounts.length === 1 && current.accounts[0] === name && remaining.length) {
+    if (current.accounts.length === 1 && current.accounts[0] === name) {
       throw new Error("Removing the last allowed account would enable other accounts. Choose a different profile allowlist or explicitly 'use all' first");
     }
     this.store.remove(name);
@@ -237,6 +236,11 @@ export class Accounts {
       await this.logout(providerId, ctx);
       return;
     }
+    // Allow cleanup even when the provider plugin is no longer registered.
+    if (action === "remove" && providerId && !name) {
+      await this.remove(providerId, ctx);
+      return;
+    }
     if (action === "pin" && providerId && name && !env && !extra.length) {
       this.pin(providerId, name, ctx);
       return;
@@ -267,7 +271,7 @@ export class Accounts {
     }
     if (!["add", "login", "login-device"].includes(action) || !providerId || !name || extra.length
       || (action === "add" && (!env || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(env))) || (action !== "add" && env)) {
-      throw new Error("Usage: /jar accounts [manage|list|logout NAME|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
+      throw new Error("Usage: /jar accounts [manage|list|logout NAME|remove NAME|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
     }
     if (!ctx.isIdle()) throw new Error("Wait for active model work before adding an account");
     const provider = this.originals.get(providerId) ?? ctx.modelRegistry.getProvider(providerId);
