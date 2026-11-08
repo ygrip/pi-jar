@@ -7,13 +7,15 @@ import type { Api, Model, Provider, OAuthCredential } from "@earendil-works/pi-a
 import { Accounts } from "../src/accounts.ts";
 import type { AccountRoutingSettings } from "../src/account-settings.ts";
 import { openAccountManager } from "../src/account-ui.ts";
+import { openAccountHub } from "../src/account-hub.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { promptText } from "../src/dialogs.ts";
 
 const mockTheme = { fg: (_color: string, text: string) => text };
 const mockTui = { requestRender() {}, terminal: { rows: 24 } };
 
 test("interactive account manager can change routing policy and return to the menu", async () => {
-  const actions = [2, 1, 5]; // routing row, sticky, Done
+  const actions = ["r", 1, "esc"] as const; // hub shortcut, sticky, close hub
   let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
   const accounts = {
     store: { list: () => [] },
@@ -30,8 +32,12 @@ test("interactive account manager can change routing policy and return to the me
         assert.ok(view.render(80).length > 0);
         const choice = actions.shift();
         assert.notEqual(choice, undefined);
-        for (let index = 0; index < choice!; index++) view.handleInput("\x1b[B");
-        view.handleInput("\r");
+        if (choice === "r" || choice === "s") view.handleInput(choice);
+        else if (choice === "esc") view.handleInput("\x1b");
+        else {
+          for (let index = 0; index < choice!; index++) view.handleInput("\x1b[B");
+          view.handleInput("\r");
+        }
       })
     }
   };
@@ -41,7 +47,7 @@ test("interactive account manager can change routing policy and return to the me
 });
 
 test("OMP-style provider switching only pins the chosen provider", async () => {
-  const actions = [1, 0, 1, 7]; // Switch, first provider, first account, Done
+  const actions = ["s", 0, 1, "esc"] as const; // hub switch, provider picker, account picker, close hub
   const members = [
     { version: 1, name: "personal", provider: "openai-codex", auth: "oauth" },
     { version: 1, name: "work", provider: "openai-codex", auth: "oauth" },
@@ -65,8 +71,12 @@ test("OMP-style provider switching only pins the chosen provider", async () => {
         const view = factory(mockTui, mockTheme, {}, resolve);
         const choice = actions.shift();
         assert.notEqual(choice, undefined);
-        for (let index = 0; index < choice!; index++) view.handleInput("\x1b[B");
-        view.handleInput("\r");
+        if (choice === "r" || choice === "s") view.handleInput(choice);
+        else if (choice === "esc") view.handleInput("\x1b");
+        else {
+          for (let index = 0; index < choice!; index++) view.handleInput("\x1b[B");
+          view.handleInput("\r");
+        }
       })
     }
   };
@@ -133,4 +143,39 @@ test("login-device selects the provider's native OAuth device-code method withou
   assert.notEqual(deviceIds[0], "missing");
   assert.equal(accounts.store.list().length, 1);
   assert.ok(notifications.some(text => text.includes("Account work added")));
+});
+
+test("OMP-style account hub shows native provider pools, quota flags and respects narrow terminals", async () => {
+  const definitions = [
+    { version: 1, name: "personal", provider: "openai-codex", auth: "oauth" },
+    { version: 1, name: "work", provider: "openai-codex", auth: "oauth" },
+    { version: 1, name: "team", provider: "anthropic", auth: "oauth" }
+  ];
+  const ctx = { hasUI: true, mode: "tui", model: { provider: "openai-codex" },
+    modelRegistry: { getAll: () => [{ provider: "openai-codex" }, { provider: "anthropic" }],
+      getProvider: (id: string) => ({ id, name: id }) },
+    ui: { custom: async (factory: Function) => new Promise(resolve => {
+      const view = factory(mockTui, mockTheme, {}, resolve);
+      const wide = view.render(88).join("\n");
+      assert.match(wide, /PROVIDERS/);
+      assert.match(wide, /ACCOUNTS/);
+      assert.match(wide, /personal/);
+      assert.match(wide, /70% left/);
+      assert.match(wide, /COOLDOWN/);
+      const compact = view.render(42);
+      assert.ok(compact.every((line: string) => visibleWidth(line) <= 42));
+      // Returning to wide layout, a click on the right column selects the
+      // account, not the provider row occupying the same Y-coordinate.
+      view.render(88);
+      view.handleMouse({ type: "click", button: "left", x: 40, y: 6 });
+    }) } };
+  const accounts = { store: { list: () => definitions, hasCredentials: () => true },
+    policy: () => ({ mode: "sticky", accounts: [], pinned: {} }),
+    router: { status: () => [
+      { name: "personal", provider: "openai-codex", remaining: 70 },
+      { name: "work", provider: "openai-codex", remaining: 0, blockedUntil: Date.now() + 60_000 },
+      { name: "team", provider: "anthropic", remaining: 40 }
+    ] } };
+  const result = await openAccountHub(ctx as never, accounts as never, { provider: "openai-codex" });
+  assert.deepEqual(result, { kind: "account", provider: "openai-codex", name: "personal" });
 });
