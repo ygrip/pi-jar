@@ -133,23 +133,43 @@ export class AccountRouter {
       // must never select an account whose configured credential source is gone.
       && this.store.hasCredentials(account));
     const states = accounts.map(account => this.state(account, provider));
-    await Promise.all(states.map(state => this.refreshQuota(state, signal)));
-    signal?.throwIfAborted();
-    const eligible: AccountState[] = [];
+    // Remote quota endpoints can stall for seconds. Routing uses the latest shared
+    // quota snapshot and starts coalesced refreshes asynchronously, never gating
+    // a healthy request on a usage endpoint. Provider 429 remains authoritative.
     for (const state of states) {
       state.health = this.store.health(state.definition.name);
-      if ((state.health.blockedUntil ?? 0) > this.now() || remainingQuota(state.health.quota, this.now()) === 0) continue;
-      // Preserve credential-specific model eligibility, not merely the provider's catalog.
-      if ((state.unavailableUntil ?? 0) > this.now()) continue;
-      try {
-        const models = await (await state.models).getAllAvailable(provider.id, { signal });
-        if (models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
-          && (candidate.type ?? "chat") === (model.type ?? "chat") && candidate.api === model.api)) eligible.push(state);
-      } catch {
-        signal?.throwIfAborted();
-        state.unavailableUntil = this.now() + 60_000;
-      }
+      void this.refreshQuota(state).catch(() => {
+        state.quotaError = "Quota lookup unavailable; provider limits still apply";
+      });
     }
+    signal?.throwIfAborted();
+    const candidates = states.filter(state =>
+      (state.health.blockedUntil ?? 0) <= this.now()
+      && remainingQuota(state.health.quota, this.now()) !== 0
+      && (state.unavailableUntil ?? 0) <= this.now());
+    // Credential-scoped catalog validation can involve IO. Bound parallelism
+    // avoids N sequential delays without spawning unbounded provider requests.
+    const eligibleFlags = new Array<boolean>(candidates.length).fill(false);
+    let nextIndex = 0;
+    const check = async () => {
+      while (true) {
+        signal?.throwIfAborted();
+        const index = nextIndex++;
+        if (index >= candidates.length) return;
+        const state = candidates[index]!;
+        try {
+          const models = await (await state.models).getAllAvailable(provider.id, { signal });
+          eligibleFlags[index] = models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
+            && (candidate.type ?? "chat") === (model.type ?? "chat") && candidate.api === model.api);
+        } catch {
+          signal?.throwIfAborted();
+          state.unavailableUntil = this.now() + 60_000;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, candidates.length) }, () => check()));
+    signal?.throwIfAborted();
+    const eligible = candidates.filter((_, index) => eligibleFlags[index]);
     if (!eligible.length) throw new RoutingError(`No eligible ${provider.id} account for ${model.id}; check /jar accounts, profile allowlist, login and quota resets`);
     if (settings.mode === "quota-first") {
       eligible.sort((a, b) => (remainingQuota(b.health.quota, this.now()) ?? -1) - (remainingQuota(a.health.quota, this.now()) ?? -1)
