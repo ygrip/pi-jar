@@ -495,7 +495,7 @@ test("separate providers maintain independent same-provider routing and never bo
   const collidingModel: Model<Api> = { ...model, id: "second-model", provider: "openai" };
   const collision = await second.streamSimple(collidingModel, context).result();
   assert.equal(collision.stopReason, "error");
-  assert.match(collision.errorMessage ?? "", /cannot be routed through second/);
+  assert.match(collision.errorMessage ?? "", /does not belong to routed provider second/);
   assert.deepEqual(secondKeys, ["second-secret", "second-secret"], "no secondary credentials used for a foreign-provider model");
 });
 
