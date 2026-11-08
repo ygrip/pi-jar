@@ -25,6 +25,7 @@ import { openProfiles, type ProfileAction } from "../src/profile-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
 import { Accounts, inheritedAccountRouting } from "../src/accounts.ts";
+import { openAccountManager } from "../src/account-ui.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
 import { jarCommit } from "../src/commit.ts";
 import { registerAdvisor } from "../src/advisor.ts";
@@ -1129,8 +1130,12 @@ export default function piJar(pi: ExtensionAPI): void {
         return;
       }
       if (command === "accounts" || command.startsWith("accounts ")) {
-        try { await accounts.command(args.trim().slice("accounts".length).trim(), ctx); }
-        catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+        try {
+          const subcommand = args.trim().slice("accounts".length).trim();
+          if ((!subcommand || subcommand.toLowerCase() === "manage") && ctx.hasUI && ctx.mode === "tui") {
+            await openAccountManager(ctx, accounts);
+          } else await accounts.command(subcommand || "list", ctx);
+        } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
         return;
       }
       if (!command || command === "status") {
