@@ -141,15 +141,40 @@ export class Accounts {
       }
     };
   }
+  /** Pin a named account for one provider, or restore automatic routing for that provider. */
+  pin(providerId: string, name: string | undefined, ctx: ExtensionContext): void {
+    const current = this.settings();
+    if (name) {
+      const account = this.store.list().find(item => item.name === name);
+      if (!account || account.provider !== providerId) {
+        throw new Error(`Account ${name} is not configured for provider ${providerId}`);
+      }
+      if (current.accounts.length && !current.accounts.includes(name)) {
+        throw new Error(`Account ${name} is excluded by this profile's allowlist`);
+      }
+    } else if (!this.store.list().some(account => account.provider === providerId)) {
+      throw new Error(`No configured accounts for ${providerId}`);
+    }
+    const nextPinned = { ...current.pinned };
+    if (name) nextPinned[providerId] = name;
+    else delete nextPinned[providerId];
+    const { pinned: _previous, ...rest } = current;
+    this.update(Object.keys(nextPinned).length ? { ...rest, pinned: nextPinned } : rest, ctx);
+    ctx.ui.notify(name ? `Pinned ${providerId} to ${name} (no automatic failover to another account for this provider)`
+      : `Automatic account selection restored for ${providerId}`, "info");
+  }
+
   /** Remove only the selected account's private storage; never touch Pi's primary login. */
   async remove(name: string, ctx: ExtensionContext): Promise<void> {
     if (!ctx.isIdle()) throw new Error("Wait until the current model request finishes before removing an account");
     this.store.remove(name);
     this.router.invalidate(name);
     const current = this.settings();
-    if (current.accounts.includes(name)) {
-      this.update({ ...current, accounts: current.accounts.filter(item => item !== name) }, ctx);
-    }
+    const pins = Object.fromEntries(Object.entries(current.pinned ?? {}).filter(([, account]) => account !== name));
+    const { pinned: _previous, ...rest } = current;
+    this.update(Object.keys(pins).length
+      ? { ...rest, accounts: current.accounts.filter(item => item !== name), pinned: pins }
+      : { ...rest, accounts: current.accounts.filter(item => item !== name) }, ctx);
     await this.ready(ctx);
     ctx.ui.notify(`Account ${name} removed locally. Revoke its OAuth session at the provider if you also want to revoke access.`, "info");
   }
@@ -182,6 +207,14 @@ export class Accounts {
       ctx.ui.notify(`Account routing: ${this.settings().mode}\n${rows.join("\n") || "No accounts configured"}`, "info");
       return;
     }
+    if (action === "pin" && providerId && name && !env && !extra.length) {
+      this.pin(providerId, name, ctx);
+      return;
+    }
+    if (action === "auto" && providerId && !name) {
+      this.pin(providerId, undefined, ctx);
+      return;
+    }
     if (action === "mode" && ACCOUNT_ROUTING_MODES.includes(providerId as never) && !name) {
       this.update({ ...this.settings(), mode: providerId as AccountRoutingSettings["mode"] }, ctx);
       await this.ready(ctx);
@@ -194,12 +227,17 @@ export class Accounts {
         const known = new Set(this.store.list().map(account => account.name));
         if (!accounts.every(account => known.has(account))) throw new Error("Unknown account in profile allowlist");
       }
-      this.update({ ...this.settings(), accounts }, ctx);
+      const current = this.settings();
+      // An allowlist should not silently strand a pin on an excluded account.
+      const pins = Object.fromEntries(Object.entries(current.pinned ?? {})
+        .filter(([, account]) => !accounts.length || accounts.includes(account)));
+      const { pinned: _previous, ...rest } = current;
+      this.update(Object.keys(pins).length ? { ...rest, accounts, pinned: pins } : { ...rest, accounts }, ctx);
       return;
     }
     if (!["add", "login", "login-device"].includes(action) || !providerId || !name || extra.length
       || (action === "add" && (!env || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(env))) || (action !== "add" && env)) {
-      throw new Error("Usage: /jar accounts [manage|list|mode off/sticky/round-robin/quota-first|use all/name1,name2|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
+      throw new Error("Usage: /jar accounts [manage|list|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
     }
     if (!ctx.isIdle()) throw new Error("Wait for active model work before adding an account");
     const provider = this.originals.get(providerId) ?? ctx.modelRegistry.getProvider(providerId);
