@@ -27,6 +27,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
     const search = new Input({ prompt: "/ ", placeholder: "Search providers and accounts" });
     let providerHits: Array<{ y: number; id: string }> = [];
     let accountHits: Array<{ y: number; index: number }> = [];
+    let columnSplit = -1;
 
     const groups = () => {
       const known = ctx.modelRegistry.getAll().map(model => model.provider);
@@ -87,6 +88,8 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
     };
     const openSelected = () => {
       const provider = currentProvider();
+      state.pane = pane;
+      state.accountIndex = accountIndex;
       if (pane === "providers" && provider) { pane = "accounts"; accountIndex = 0; return; }
       const selected = choices()[accountIndex];
       if (!selected) return;
@@ -144,9 +147,9 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         if (event.type === "wheel" && event.wheelDelta) { move(Math.sign(event.wheelDelta) * 3); tui.requestRender(); return { handled: true }; }
         if (event.type !== "click" || event.button !== "left") return;
         const provider = providerHits.find(hit => hit.y === event.y);
-        if (provider) { state.provider = provider.id; pane = "accounts"; accountIndex = 0; tui.requestRender(); return { handled: true }; }
+        if (provider && (columnSplit < 0 || event.x < columnSplit)) { state.provider = provider.id; pane = "accounts"; accountIndex = 0; tui.requestRender(); return { handled: true }; }
         const account = accountHits.find(hit => hit.y === event.y);
-        if (account) { pane = "accounts"; accountIndex = account.index; openSelected(); tui.requestRender(); return { handled: true }; }
+        if (account && (columnSplit < 0 || event.x >= columnSplit)) { pane = "accounts"; accountIndex = account.index; openSelected(); tui.requestRender(); return { handled: true }; }
       },
       render(width: number): string[] {
         const available = Math.max(1, width);
@@ -155,7 +158,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         const allAccounts = accounts.store.list();
         const rows = choices();
         accountIndex = Math.max(0, Math.min(accountIndex, rows.length - 1));
-        providerHits = []; accountHits = [];
+        providerHits = []; accountHits = []; columnSplit = -1;
         const policy = accounts.policy();
         const headerLine = header(" pi-jar  /  Accounts", available);
         const summary = normal(` Pi native providers · ${allAccounts.length} accounts · ${policy.mode.toUpperCase()} · selected: ${provider ?? "none"}`, available);
@@ -168,6 +171,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         if (available >= 72) {
           const leftWidth = Math.min(30, Math.max(20, Math.floor(available * 0.32)));
           const rightWidth = Math.max(1, available - leftWidth - 3);
+          columnSplit = leftWidth + 2;
           out.push(pad(header(" PROVIDERS", leftWidth), leftWidth) + theme.fg("dim", " │ ") + header(` ACCOUNTS · ${provider ?? "no provider"}`, rightWidth));
           const count = Math.max(providers.length, rows.length, 2);
           for (let index = 0; index < count; index++) {
