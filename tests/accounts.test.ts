@@ -499,6 +499,31 @@ test("separate providers maintain independent same-provider routing and never bo
   assert.deepEqual(secondKeys, ["second-secret", "second-secret"], "no secondary credentials used for a foreign-provider model");
 });
 
+test("cached account runtimes never reuse credentials after sign-out or missing environment", async t => {
+  const f = fixture(t);
+  const routed = f.router.wrap(f.provider);
+  const first = await routed.streamSimple(model, context).result();
+  assert.equal(first.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-a"]);
+
+  // Simulate credentials being removed while this Pi process keeps its cached runtime.
+  delete process.env.JAR_TEST_A;
+  const second = await routed.streamSimple(model, context).result();
+  assert.equal(second.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-a", "key-b"], "sticky selection skips credentials that no longer exist");
+
+  delete process.env.JAR_TEST_B;
+  const unavailable = await routed.streamSimple(model, context).result();
+  assert.equal(unavailable.stopReason, "error");
+  assert.match(unavailable.errorMessage ?? "", /No eligible openai account/);
+  assert.deepEqual(f.calls, ["key-a", "key-b"], "no stale runtime or primary login fallback");
+
+  const pinned = new AccountRouter(f.store, () => ({ mode: "sticky", accounts: [], pinned: { openai: "a" } }));
+  const pinnedFailure = await pinned.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(pinnedFailure.stopReason, "error", "a missing pinned account never borrows another identity");
+  assert.deepEqual(f.calls, ["key-a", "key-b"]);
+});
+
 test("removing the sole allowed identity fails closed instead of broadening the provider pool", async t => {
   const f = fixture(t);
   let policy: AccountRoutingSettings = { mode: "sticky", accounts: ["a"], pinned: { openai: "a" } };
