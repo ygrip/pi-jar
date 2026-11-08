@@ -18,7 +18,7 @@ interface AccountState {
   quotaError?: string;
   inFlight: number;
 }
-export interface AccountRouteStatus { name: string; provider: string; blockedUntil?: number; remaining?: number; inFlight: number; warning?: string }
+export interface AccountRouteStatus { name: string; provider: string; blockedUntil?: number; remaining?: number; inFlight: number; lastUsed: boolean; warning?: string }
 
 export function remainingQuota(quota: Quota | undefined, now: number): number | undefined {
   let remaining: number | undefined;
@@ -144,7 +144,7 @@ export class AccountRouter {
       try {
         const models = await (await state.models).getAllAvailable(provider.id, { signal });
         if (models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
-          && (candidate.type ?? "chat") === (model.type ?? "chat"))) eligible.push(state);
+          && (candidate.type ?? "chat") === (model.type ?? "chat") && candidate.api === model.api)) eligible.push(state);
       } catch {
         signal?.throwIfAborted();
         state.unavailableUntil = this.now() + 60_000;
@@ -176,13 +176,14 @@ export class AccountRouter {
       const health = this.store.health(account.name);
       return { name: account.name, provider: account.provider, blockedUntil: health.blockedUntil,
         remaining: remainingQuota(health.quota, this.now()), inFlight: this.states.get(account.name)?.inFlight ?? 0,
+        lastUsed: this.sticky.get(account.provider) === account.name,
         warning: this.states.get(account.name)?.quotaError };
     });
   }
   private cleanOptions<T extends { apiKey?: string; headers?: ProviderHeaders; env?: Record<string, string> }>(options: T = {} as T): T {
     const headers: ProviderHeaders = {};
     for (const [key, value] of Object.entries(options.headers ?? {})) {
-      if (["authorization", "x-api-key", "api-key", "chatgpt-account-id", "x-goog-api-key", "cookie"].includes(key.toLowerCase())) continue;
+      if (["authorization", "proxy-authorization", "x-api-key", "api-key", "chatgpt-account-id", "openai-organization", "openai-project", "x-organization-id", "x-account-id", "x-goog-api-key", "cookie"].includes(key.toLowerCase())) continue;
       headers[key] = value;
     }
     return { ...options, apiKey: undefined, env: undefined, headers };
