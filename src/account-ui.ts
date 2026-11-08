@@ -3,6 +3,7 @@ import { ACCOUNT_ROUTING_MODES, validAccountName } from "./account-settings.ts";
 import type { AccountDefinition } from "./account-store.ts";
 import type { Accounts } from "./accounts.ts";
 import { promptChoice, promptText } from "./dialogs.ts";
+import { openAccountHub, type AccountHubState } from "./account-hub.ts";
 
 /**
  * OMP-style provider-first account management, backed by Pi's native provider
@@ -209,30 +210,24 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
     }
   };
 
+  const hubState: AccountHubState = { provider: ctx.model?.provider };
   while (true) {
-    let members: AccountDefinition[];
-    try { members = definitions(); }
+    // Keep provider and pane selection when returning from a native Pi login,
+    // submenu or account mutation, instead of rebuilding a chain of pickers.
+    let action;
+    try { action = await openAccountHub(ctx, accounts, hubState); }
     catch (error) { notifyError(error); return; }
-    const ids = [...new Set(members.map(account => account.provider))].sort();
-    const policy = accounts.policy();
-    const choices = [
-      "Connect another account…",
-      "Switch active account…",
-      `Routing policy · ${policy.mode}`,
-      `Profile access · ${policy.accounts.length ? policy.accounts.join(", ") : "all"}`,
-      "Quota & limits…",
-      ...ids.map(id => `${id} · ${members.filter(account => account.provider === id).length} accounts · ${policy.pinned?.[id] ? "pinned: " + policy.pinned[id] : "auto"}`),
-      "Done"
-    ];
-    const choice = await promptChoice(ctx, "Pi-Jar accounts", `${members.length} identity/identities across ${ids.length} provider(s). Pi-native OAuth · ${policy.mode.toUpperCase()} routing.`, choices);
-    if (choice === undefined || choice === choices.length - 1) return;
+    if (action.kind === "close") return;
     try {
-      if (choice === 0) await add();
-      else if (choice === 1) await switchAccount();
-      else if (choice === 2) await routingPolicy();
-      else if (choice === 3) await allowlist();
-      else if (choice === 4) await showLimits();
-      else await providerMenu(ids[choice - 5]!);
+      if (action.kind === "add") await add(action.provider);
+      else if (action.kind === "switch") await switchAccount(action.provider);
+      else if (action.kind === "routing") await routingPolicy();
+      else if (action.kind === "allowlist") await allowlist();
+      else if (action.kind === "limits") await showLimits(action.provider);
+      else if (action.kind === "account") {
+        const account = definitions().find(item => item.provider === action.provider && item.name === action.name);
+        if (account) await manageAccount(account);
+      } else if (action.kind === "auto") accounts.pin(action.provider, undefined, ctx);
     } catch (error) { notifyError(error); }
   }
 }
