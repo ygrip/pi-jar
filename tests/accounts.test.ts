@@ -493,4 +493,11 @@ test("separate providers maintain independent same-provider routing and never bo
   const wrong = await second.streamSimple(model, context).result();
   assert.equal(wrong.stopReason, "error", "a model from another provider is not eligible for this pool");
   assert.deepEqual(secondKeys, ["second-secret", "second-secret"]);
+  // Providers may expose identical model IDs. Routing must compare provider
+  // identity first, not merely the model ID, or cross-provider auth can leak.
+  const collidingModel: Model<Api> = { ...model, id: "second-model", provider: "openai" };
+  const collision = await second.streamSimple(collidingModel, context).result();
+  assert.equal(collision.stopReason, "error");
+  assert.match(collision.errorMessage ?? "", /does not belong to routed provider second/);
+  assert.deepEqual(secondKeys, ["second-secret", "second-secret"], "no secondary credentials used for a foreign-provider model");
 });
