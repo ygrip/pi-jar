@@ -421,7 +421,8 @@ test("sign-out preserves OAuth account label and leaves Pi primary credentials u
   assert.equal(store.hasCredentials(definition), true);
   let policy: AccountRoutingSettings = { mode: "sticky", accounts: [], pinned: { "openai-codex": "work" } };
   const accounts = new Accounts({ registerProvider() {} } as never, () => policy, next => { policy = next; }, directory);
-  await accounts.logout("work", { isIdle: () => true, hasUI: false, ui: { notify() {} } } as never);
+  await accounts.logout("work", { isIdle: () => true, hasUI: false, ui: { notify() {} },
+    modelRegistry: { getProvider: () => undefined, refresh: async () => {} } } as never);
   assert.equal(store.hasCredentials(definition), false);
   assert.equal(store.list().length, 1);
   assert.equal(policy.pinned, undefined);
