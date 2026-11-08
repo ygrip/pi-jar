@@ -75,7 +75,7 @@ Pi 1.5 fixes Apple Terminal's local Shift+Return fallback for setups sending ESC
 | `/jar` · `/jar settings` | Visual and workflow preferences. |
 | `/jar status` | One-line status summary. |
 | `/jar routing on\|off` | Enable account routing (sticky when previously off) or restore normal Pi authentication. `/jar routing status` shows current routing/account quota. |
-| `/jar accounts` | List account quota/cooldown status. `login PROVIDER NAME`, `add PROVIDER NAME ENV_VAR`, `mode off\|sticky\|round-robin\|quota-first`, `use all\|name1,name2`. [Multi-account routing](docs/MULTI_ACCOUNT.md). |
+| `/jar accounts` | Interactive account manager for sign-in, API keys, routing policy, profile allowlist, status, re-login and safe local removal. `/jar accounts list` is the noninteractive view; `login`, `login-device`, `add`, `mode` and `use` remain available as commands. [Multi-account routing](docs/MULTI_ACCOUNT.md). |
 | `/jar perf` | Long-session diagnostics on demand: branch entries, context sampling, parent and child RSS, retained/hibernated subagents and recovery worktrees, render requests vs. frames, shell output, discussion and quota cache. |
 | `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Searchable, scrollable checklist; ←/→ folds/unfolds subtasks. |
 | `/jar tasks collapse\|expand\|toggle` · `/jar tasks scroll N` | Collapse/expand the compact task widget or scroll it by N rows. |
