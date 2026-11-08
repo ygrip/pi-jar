@@ -176,7 +176,7 @@ export class AccountRouter {
       const health = this.store.health(account.name);
       return { name: account.name, provider: account.provider, blockedUntil: health.blockedUntil,
         remaining: remainingQuota(health.quota, this.now()), inFlight: this.states.get(account.name)?.inFlight ?? 0,
-        lastUsed: this.sticky.get(account.provider) === account.name,
+        lastUsed: this.settings().mode !== "off" && this.sticky.get(account.provider) === account.name,
         warning: this.states.get(account.name)?.quotaError };
     });
   }
