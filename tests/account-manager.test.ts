@@ -25,6 +25,7 @@ test("interactive account manager can change routing policy and return to the me
   };
   const ctx = {
     hasUI: true, mode: "tui",
+    modelRegistry: { getAll: () => [], getProvider: () => undefined },
     ui: {
       notify() {},
       custom: async (factory: Function) => new Promise(resolve => {
