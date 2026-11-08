@@ -501,3 +501,12 @@ test("separate providers maintain independent same-provider routing and never bo
   assert.match(collision.errorMessage ?? "", /does not belong to routed provider second/);
   assert.deepEqual(secondKeys, ["second-secret", "second-secret"], "no secondary credentials used for a foreign-provider model");
 });
+
+test("removing the sole allowed identity fails closed instead of broadening the provider pool", async t => {
+  const f = fixture(t);
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: ["a"], pinned: { openai: "a" } };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, f.directory);
+  await assert.rejects(() => accounts.remove("a", { isIdle: () => true } as never), /last allowed account would enable other accounts/);
+  assert.deepEqual(f.store.list().map(account => account.name), ["a", "b"]);
+  assert.deepEqual(policy.accounts, ["a"]);
+});
