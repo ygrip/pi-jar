@@ -187,9 +187,15 @@ export class Accounts {
   /** Remove only the selected account's private storage; never touch Pi's primary login. */
   async remove(name: string, ctx: ExtensionContext): Promise<void> {
     if (!ctx.isIdle()) throw new Error("Wait until the current model request finishes before removing an account");
+    const current = this.settings();
+    // An empty allowlist means ALL accounts, not NONE. Removing its last
+    // member must not silently grant access to every other provider account.
+    const remaining = this.store.list().filter(account => account.name !== name);
+    if (current.accounts.length === 1 && current.accounts[0] === name && remaining.length) {
+      throw new Error("Removing the last allowed account would enable other accounts. Choose a different profile allowlist or explicitly 'use all' first");
+    }
     this.store.remove(name);
     this.router.invalidate(name);
-    const current = this.settings();
     const pins = Object.fromEntries(Object.entries(current.pinned ?? {}).filter(([, account]) => account !== name));
     const { pinned: _previous, ...rest } = current;
     this.update(Object.keys(pins).length
