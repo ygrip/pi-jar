@@ -138,6 +138,10 @@ test("retired context controls are absent and remaining Pi settings keep working
       pane.handleInput(" ");
       assert.equal(state.readCache, true);
       assert.equal(state.cacheDiagnostics, true);
+      pane.handleInput("\x1b[B");
+      assert.match(text(), /❯ Account routing policy\s+OFF/);
+      pane.handleInput(" ");
+      assert.equal(state.accountRouting.mode, "sticky");
       pane.handleInput("\x1b[B"); // wraps to the first Pi row
       assert.match(text(), /❯ Mouse clicks/);
     }

@@ -9,6 +9,39 @@ import piJar from "../extensions/index.ts";
 import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY } from "../src/profiles.ts";
 import { defaultVisualSettings, saveVisualSettings, SETTINGS_FILE } from "../src/settings.ts";
 import { openJarSettings } from "../src/settings-ui.ts";
+import { AccountStore } from "../src/account-store.ts";
+
+test("account commands preserve uppercase environment variable names and never persist API-key values", async () => {
+  const previous = process.env.JAR_ACCOUNT_COMMAND_TEST;
+  process.env.JAR_ACCOUNT_COMMAND_TEST = "secret-never-persisted";
+  try {
+    await fixture(async ({ ctx, directory, commands, notices }) => {
+      ctx.modelRegistry.getProvider = () => ({ id: "openai", auth: { apiKey: { name: "OpenAI" } } });
+      await commands.get("jar")("accounts add openai work JAR_ACCOUNT_COMMAND_TEST", ctx);
+      const accounts = new AccountStore(directory).list();
+      assert.equal(accounts[0]?.env, "JAR_ACCOUNT_COMMAND_TEST");
+      assert.doesNotMatch(readFileSync(join(directory, "pi-jar-accounts", "work", "account.json"), "utf8"), /secret-never-persisted/);
+      assert.ok(notices.some((notice: string) => notice.includes("Account work added")));
+    });
+  } finally {
+    if (previous === undefined) delete process.env.JAR_ACCOUNT_COMMAND_TEST;
+    else process.env.JAR_ACCOUNT_COMMAND_TEST = previous;
+  }
+});
+
+test("/jar routing on/off persists active-profile policy and status reports it", async () => {
+  await fixture(async ({ directory, commands, ctx, notices }) => {
+    await commands.get("jar")("routing on", ctx);
+    assert.equal(new ProfileStore(directory).active().settings.accountRouting.mode, "sticky");
+    await commands.get("jar")("routing quota-first", ctx);
+    await commands.get("jar")("routing on", ctx);
+    assert.equal(new ProfileStore(directory).active().settings.accountRouting.mode, "quota-first");
+    await commands.get("jar")("routing off", ctx);
+    assert.equal(new ProfileStore(directory).active().settings.accountRouting.mode, "off");
+    await commands.get("jar")("routing status", ctx);
+    assert.ok(notices.some((notice: string) => notice.includes("Account routing: off")));
+  });
+});
 
 async function fixture(run: (h: any) => Promise<void>, active = "Default", initialEntries: any[] = [], legacyAccent?: "azure") {
   const directory = mkdtempSync(join(tmpdir(), "pi-jar-profile-integration-"));

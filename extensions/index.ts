@@ -24,6 +24,7 @@ import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { openProfiles, type ProfileAction } from "../src/profile-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
+import { Accounts, inheritedAccountRouting } from "../src/accounts.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
 import { jarCommit } from "../src/commit.ts";
 import { registerAdvisor } from "../src/advisor.ts";
@@ -104,6 +105,9 @@ export default function piJar(pi: ExtensionAPI): void {
   installCompactBuiltinTools(pi, { readCache: () => visualSettings.readCache === true });
   let demo = false;
   let visualSettings = defaultVisualSettings();
+  const inheritedRouting = inheritedAccountRouting();
+  const accounts = new Accounts(pi, () => inheritedRouting ?? visualSettings.accountRouting,
+    (accountRouting, ctx) => applyVisualSettings({ ...visualSettings, accountRouting }, ctx));
   let profileStore: ProfileStore | undefined;
   let animations = visualSettings.animations;
   let enabled = visualSettings.ui;
@@ -338,10 +342,15 @@ export default function piJar(pi: ExtensionAPI): void {
       return undefined;
     }
   };
-  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild, beforeSessionStart: initializeProfiles });
+  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild,
+    beforeSessionStart: async (ctx) => {
+      const profile = initializeProfiles(ctx);
+      await accounts.ready(ctx);
+      return profile;
+    } });
   let delegateController: DelegateController | undefined;
   registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges,
-    discussionEnv: (key, name) => discussion?.childEnv(key, name),
+    discussionEnv: (key, name) => ({ ...discussion?.childEnv(key, name), ...accounts.environment() }),
     discussionRetire: (key) => discussion?.retire(key),
     discussionUnread: (key) => discussion?.unreadFor(key) ?? 0,
     discussionDigest: () => discussion?.digest(),
@@ -675,6 +684,7 @@ export default function piJar(pi: ExtensionAPI): void {
       return;
     }
     visualSettings = next;
+    accounts.sync(ctx);
     setIconSet(next.icons);
     enabled = next.ui;
     animations = next.animations;
@@ -736,6 +746,7 @@ export default function piJar(pi: ExtensionAPI): void {
       modelRoles.load(ctx.cwd, next.roles, next.id);
       composer.setProfile(next.name);
       applyVisualSettings(next.settings, ctx, { persist: false, accent: false });
+      await accounts.ready(ctx);
       if (!await modelRoles.activate("default", ctx, true)) ctx.ui.notify("Profile loaded, but its default model is unavailable; keeping the current model", "warning");
       repaint("profile"); welcomeTui?.requestRender();
       ctx.ui.notify(`Profile: ${next.name}`, "info");
@@ -1055,12 +1066,22 @@ export default function piJar(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("jar", {
-    description: "Pi-jar settings, read-only history, to-dos, prompts, quota and animations",
+    description: "Pi-jar settings, accounts, read-only history, to-dos, prompts, quota and animations",
     handler: async (args, ctx) => {
       const command = args.trim().toLowerCase();
       if (!command && ctx.hasUI && ctx.mode === "tui" || command === "settings") {
         if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify("Settings require the interactive TUI", "warning"); return; }
         await openSettings(ctx);
+        return;
+      }
+      if (command === "routing" || command.startsWith("routing ")) {
+        try { await accounts.routing(args.trim().slice("routing".length).trim(), ctx); }
+        catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+        return;
+      }
+      if (command === "accounts" || command.startsWith("accounts ")) {
+        try { await accounts.command(args.trim().slice("accounts".length).trim(), ctx); }
+        catch (error) { ctx.ui.notify((error as Error).message, "error"); }
         return;
       }
       if (!command || command === "status") {
@@ -1231,7 +1252,7 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "quota on" && quotaCache) { quotaCache.enabled = true; quotaDisabledByUser = false; refreshQuota(ctx); }
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaDisabledByUser = true; quotaCache.stop(); }
       else {
-        ctx.ui.notify("Usage: /jar [status|perf|settings|activity|shells|sessions [search]|icons [unicode|nerd|ascii]|commit [note]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        ctx.ui.notify("Usage: /jar [status|perf|settings|routing on/off|accounts|activity|shells|sessions [search]|icons [unicode|nerd|ascii]|commit [note]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
       }
       if (!["animations on", "animations off", "ui on", "ui off"].includes(command)) installUi(ctx);

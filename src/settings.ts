@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { ACCENT_NAMES } from "./accent.ts";
 import { DEFAULT_FOOTER_SETTINGS, FOOTER_FIELDS, type FooterSettings } from "./footer-settings.ts";
 import { ICON_SETS, type IconSet } from "./icons.ts";
+import { parseAccountRouting, type AccountRoutingSettings } from "./account-settings.ts";
 
 export type JarAccent = "follow" | "default" | (typeof ACCENT_NAMES)[number];
 export interface JarVisualSettings {
@@ -30,6 +31,7 @@ export interface JarVisualSettings {
   /** Glyph set for footer, composer and views: unicode, Nerd Font icons, or plain ascii. */
   icons: IconSet;
   footer: FooterSettings;
+  accountRouting: AccountRoutingSettings;
 }
 
 export const GOAL_ROUND_CHOICES = [4, 8, 12, 20] as const;
@@ -41,7 +43,7 @@ export function isMaxSubagents(value: unknown): value is MaxSubagents {
 
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 2, advisor: true, advisorGates: false, cacheDiagnostics: true, readCache: false, icons: "unicode", footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 2, advisor: true, advisorGates: false, cacheDiagnostics: true, readCache: false, icons: "unicode", accountRouting: { mode: "off", accounts: [] }, footer: { ...footer } };
 }
 
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
@@ -62,6 +64,7 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     ? value.footer as Record<string, unknown> : {};
   return {
     version: 1,
+    accountRouting: parseAccountRouting(value.accountRouting),
     accent: value.accent === "follow" || value.accent === "default" || ACCENT_NAMES.some((name) => name === value.accent)
       ? value.accent as JarAccent : fallback.accent,
     animations: typeof value.animations === "boolean" ? value.animations : fallback.animations,
