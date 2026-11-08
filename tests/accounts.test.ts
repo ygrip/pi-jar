@@ -214,7 +214,7 @@ test("account storage rejects traversal, symlinks and public permissions", t => 
 
 test("routing settings migrate safely and persist with profiles without secrets", t => {
   const f = fixture(t);
-  const settings = { ...defaultVisualSettings(), accountRouting: { mode: "quota-first" as const, accounts: ["b"] } };
+  const settings = { ...defaultVisualSettings(), accountRouting: { mode: "quota-first" as const, accounts: ["b"], pinned: { openai: "b" } } };
   saveVisualSettings(f.directory, settings);
   assert.deepEqual(loadVisualSettings(f.directory).accountRouting, settings.accountRouting);
   const profiles = new ProfileStore(f.directory);
@@ -405,6 +405,28 @@ test("private account removal is explicit, scoped and fails closed on unknown fi
   assert.equal(existsSync(path), false);
   assert.deepEqual(store.list(), []);
   assert.throws(() => store.remove("work"), /Unknown account/);
+});
+
+test("sign-out preserves OAuth account label and leaves Pi primary credentials untouched", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-logout-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: "openai-codex", auth: "oauth" });
+  const authPath = join(store.root, "work", "auth.json");
+  writeFileSync(authPath, JSON.stringify({ stored: "oauth" }), { mode: 0o600 });
+  const primary = join(directory, "auth.json");
+  writeFileSync(primary, "primary login", { mode: 0o600 });
+  const definition = store.list()[0]!;
+  assert.equal(store.hasCredentials(definition), true);
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: [], pinned: { "openai-codex": "work" } };
+  const accounts = new Accounts({ registerProvider() {} } as never, () => policy, next => { policy = next; }, directory);
+  await accounts.logout("work", { isIdle: () => true, hasUI: false, ui: { notify() {} } } as never);
+  assert.equal(store.hasCredentials(definition), false);
+  assert.equal(store.list().length, 1);
+  assert.equal(policy.pinned, undefined);
+  assert.equal(readFileSync(primary, "utf8"), "primary login");
+  assert.equal(existsSync(authPath), false);
 });
 
 test("native provider login identity follows Pi settings and stays stable otherwise", t => {
