@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Api, Model, Provider, OAuthCredential } from "@earendil-works/pi-ai";
 import { Accounts } from "../src/accounts.ts";
 import type { AccountRoutingSettings } from "../src/account-settings.ts";
@@ -13,7 +12,7 @@ const mockTheme = { fg: (_color: string, text: string) => text };
 const mockTui = { requestRender() {}, terminal: { rows: 24 } };
 
 test("interactive account manager can change routing policy and return to the menu", async () => {
-  const actions = [2, 1, 4]; // routing row, sticky, Done
+  const actions = [2, 1, 5]; // routing row, sticky, Done
   let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
   const accounts = {
     store: { list: () => [] },
@@ -37,6 +36,41 @@ test("interactive account manager can change routing policy and return to the me
   };
   await openAccountManager(ctx as never, accounts as never);
   assert.equal(policy.mode, "sticky");
+  assert.deepEqual(actions, []);
+});
+
+test("OMP-style provider switching only pins the chosen provider", async () => {
+  const actions = [1, 0, 1, 7]; // Switch, first provider, first account, Done
+  const members = [
+    { version: 1, name: "personal", provider: "openai-codex", auth: "oauth" },
+    { version: 1, name: "work", provider: "openai-codex", auth: "oauth" },
+    { version: 1, name: "team", provider: "anthropic", auth: "oauth" }
+  ];
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: [] };
+  const accounts = {
+    store: { list: () => members },
+    router: { status: () => members.map(account => ({ name: account.name, provider: account.provider })) },
+    policy: () => policy,
+    pin: (provider: string, name: string | undefined) => {
+      policy = { ...policy, pinned: { ...policy.pinned, ...(name ? { [provider]: name } : {}) } };
+    }
+  };
+  const ctx = {
+    hasUI: true, mode: "tui",
+    modelRegistry: { getAll: () => [], getProvider: (id: string) => ({ id, auth: { oauth: {} } }) },
+    ui: {
+      notify() {},
+      custom: async (factory: Function) => new Promise(resolve => {
+        const view = factory(mockTui, mockTheme, {}, resolve);
+        const choice = actions.shift();
+        assert.notEqual(choice, undefined);
+        for (let index = 0; index < choice!; index++) view.handleInput("\x1b[B");
+        view.handleInput("\r");
+      })
+    }
+  };
+  await openAccountManager(ctx as never, accounts as never);
+  assert.deepEqual(policy.pinned, { anthropic: "team" }, "Codex accounts remain on automatic routing");
   assert.deepEqual(actions, []);
 });
 
