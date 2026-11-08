@@ -85,7 +85,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
           { kind: "add" as const, label: "＋ Add account to this provider" },
           { kind: "switch" as const, label: "Switch / pin provider account…" },
           { kind: "limits" as const, label: "Quota and cooldown details…" }
-        ] : [{ kind: "close" as const, label: "Provider unavailable · select account to remove" }])
+        ] : [{ kind: "close" as const, label: "Provider unavailable · choose account above to remove" }])
       ];
     };
 
@@ -144,11 +144,18 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         } else if (matchesKey(data, Key.up)) move(-1);
         else if (matchesKey(data, Key.down)) move(1);
         else if (matchesKey(data, Key.enter) || data === " ") openSelected();
-        else if (data === "a") act("add", currentProvider());
-        else if (data === "s") act("switch", currentProvider());
-        else if (data === "r") act("routing");
+        else if (data === "a") {
+          const provider = currentProvider();
+          if (!provider || ctx.modelRegistry.getProvider(provider)) act("add", provider);
+        } else if (data === "s") {
+          const provider = currentProvider();
+          if (provider && ctx.modelRegistry.getProvider(provider)) act("switch", provider);
+        } else if (data === "r") act("routing");
         else if (data === "p") act("allowlist");
-        else if (data === "q") act("limits", currentProvider());
+        else if (data === "q") {
+          const provider = currentProvider();
+          if (provider && ctx.modelRegistry.getProvider(provider)) act("limits", provider);
+        }
         tui.requestRender();
       },
       handleMouse(event: TuiMouseEvent) {
