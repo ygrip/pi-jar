@@ -29,13 +29,14 @@ export async function openJarSettings(
   update: (settings: JarVisualSettings) => void,
   availableAccents: readonly string[],
   pi?: PiPreferences,
-  profiles?: { activeName(): string; open(action: ProfileAction): Promise<void> }
+  profiles?: { activeName(): string; open(action: ProfileAction): Promise<void> },
+  manageAccounts?: () => Promise<void>
 ): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
   const PAGES: Page[] = profiles ? ["appearance", "footer", "pi", "profiles"] : ["appearance", "footer", "pi"];
   let lastPage: Page = "appearance";
   while (true) {
-  const action = await popup<ProfileAction | undefined>(ctx, (tui, theme, _keys, done) => {
+  const action = await popup<ProfileAction | "accounts" | undefined>(ctx, (tui, theme, _keys, done) => {
     let page: Page = lastPage;
     let selected = 0;
     let width = 64;
@@ -43,7 +44,7 @@ export async function openJarSettings(
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
     let choosing: "goalRounds" | "maxSubagents" | undefined;
     const choices = () => choosing === "maxSubagents" ? MAX_SUBAGENT_CHOICES : GOAL_ROUND_CHOICES;
-    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 9 : page === "profiles" ? 2 : 7;
+    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? (manageAccounts ? 10 : 9) : page === "profiles" ? 2 : 7;
     // Back on the row that opened the picker.
     const finishChoice = () => { selected = choosing === "maxSubagents" ? 3 : 2; choosing = undefined; };
     const piError = (error: unknown) => ctx.ui.notify("Could not change Pi setting: " + (error as Error).message, "error");
@@ -83,6 +84,11 @@ export async function openJarSettings(
           const currentIndex = ACCOUNT_ROUTING_MODES.indexOf(state.accountRouting.mode);
           const mode = ACCOUNT_ROUTING_MODES[(currentIndex + 1) % ACCOUNT_ROUTING_MODES.length]!;
           update({ ...state, accountRouting: { ...state.accountRouting, mode } });
+        }
+        else if (index === 9 && manageAccounts) {
+          lastPage = page;
+          done("accounts");
+          return;
         }
       } else if (index === 0) {
         const at = Math.max(0, accents.indexOf(state.accent));
@@ -173,7 +179,8 @@ export async function openJarSettings(
             row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates),
             row(6, "Cache diagnostics (explain cache breaks)", state.cacheDiagnostics ? "ON" : "OFF", state.cacheDiagnostics),
             row(7, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache),
-            row(8, "Account routing policy", state.accountRouting.mode.toUpperCase(), state.accountRouting.mode !== "off")
+            row(8, "Account routing policy", state.accountRouting.mode.toUpperCase(), state.accountRouting.mode !== "off"),
+            ...(manageAccounts ? [row(9, "Manage accounts…", "OPEN", true)] : [])
           ] : page === "profiles" ? [
             row(0, "Switch profile…", profiles!.activeName(), true),
             row(1, "Create profile…", "OPEN", true)
@@ -205,6 +212,11 @@ export async function openJarSettings(
       }
     };
   });
+  if (action === "accounts" && manageAccounts) {
+    try { await manageAccounts(); }
+    catch (error) { ctx.ui.notify("Could not open account manager: " + (error as Error).message, "error"); }
+    continue;
+  }
   if (!action || !profiles) return;
   try { await profiles.open(action); }
   catch (error) { ctx.ui.notify("Could not change profile: " + (error as Error).message, "error"); }
