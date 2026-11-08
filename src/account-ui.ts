@@ -20,12 +20,13 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
   const providers = (): string[] => [...new Set([
     ...ctx.modelRegistry.getAll().map(model => model.provider),
     ...definitions().map(account => account.provider)
-  ])].filter(id => !!ctx.modelRegistry.getProvider(id)).sort();
+  ])].sort();
   const notifyError = (error: unknown) => ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 
   const chooseProvider = async (type?: "oauth" | "apiKey", configuredOnly = false): Promise<string | undefined> => {
     const configured = new Set(definitions().map(account => account.provider));
-    const ids = providers().filter(id => (!configuredOnly || configured.has(id))
+    const ids = providers().filter(id => !!ctx.modelRegistry.getProvider(id)
+      && (!configuredOnly || configured.has(id))
       && (!type || !!ctx.modelRegistry.getProvider(id)?.auth[type]));
     if (!ids.length) {
       ctx.ui.notify(configuredOnly ? "No accounts configured yet" : "No eligible Pi providers in the model registry", "warning");
@@ -112,18 +113,22 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
       const all = definitions();
       if (!all.length) return;
       const selected = accounts.policy().accounts;
+      const unrestricted = selected.length === 0;
       const choices = [
-        `All accounts${!selected.length ? " · current" : ""}`,
-        ...all.map(account => `${selected.includes(account.name) ? "[x]" : "[ ]"} ${account.provider} / ${account.name}`),
+        unrestricted ? "[x] All accounts · unrestricted" : "[ ] All accounts · remove restrictions",
+        ...all.map(account => unrestricted
+          ? `Restrict to ${account.provider} / ${account.name} (only this identity)`
+          : `${selected.includes(account.name) ? "[x]" : "[ ]"} ${account.provider} / ${account.name}`),
         "Back"
       ];
       const choice = await promptChoice(ctx, "Profile account access",
-        "This profile can use the checked identities. All means no restrictions. Excluding a pinned account clears its pin.", choices);
+        unrestricted ? "All configured and future accounts are permitted. Select Restrict to explicitly limit this profile to one identity."
+          : "Only checked identities are permitted. Select All accounts to remove restrictions; excluding a pin clears it.", choices);
       if (choice === undefined || choice === choices.length - 1) return;
       if (choice === 0) await accounts.command("use all", ctx);
       else {
         const name = all[choice - 1]!.name;
-        const next = selected.includes(name) ? selected.filter(item => item !== name) : [...selected, name];
+        const next = unrestricted ? [name] : selected.includes(name) ? selected.filter(item => item !== name) : [...selected, name];
         if (next.length) await accounts.command(`use ${next.join(",")}`, ctx);
         else ctx.ui.notify("Choose All accounts to clear the profile allowlist.", "info");
       }
@@ -159,6 +164,13 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
   };
 
   const manageAccount = async (account: AccountDefinition): Promise<void> => {
+    if (!ctx.modelRegistry.getProvider(account.provider)) {
+      const confirmation = await promptChoice(ctx, `${account.provider} / ${account.name} · unavailable provider`,
+        "The provider plugin is not registered. Authentication and pinning are disabled, but local credentials can be removed.",
+        ["Keep account", "Remove local account & credentials…"]);
+      if (confirmation === 1) await accounts.remove(account.name, ctx);
+      return;
+    }
     const choices = [
       "Make active for this provider (pin)",
       ...(account.auth === "oauth" ? ["Reconnect / renew Pi OAuth login", "Sign out (keep label)"] : []),
