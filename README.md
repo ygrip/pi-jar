@@ -4,6 +4,10 @@ A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earend
 
 > Requires Pi **1.5.0+** (`@earendil-works/*` 1.x). Native provider/credential APIs handle account routing and locked OAuth refresh; Pi 1.5's streaming, tool parsing and provider-reported usage improvements remain intact.
 
+## Why Pi-Jar?
+
+**Pi-Jar** is a play on **pijar**, an Indonesian word for a glow or shining light. **Pi** refers to the coding agent this project extends; together, the name evokes *pijar*: a small light that helps illuminate the work in your terminal. The flame imagery and Ember mascot carry that idea through the interface.
+
 ## See it in action
 
 ![pi-jar 0.3.0: logo, profile switching, welcome dismissal, jar_ask choices, bouncing Ember and split diff](https://raw.githubusercontent.com/ygrip/pi-jar/main/docs/assets/pi-jar-demo.gif)
