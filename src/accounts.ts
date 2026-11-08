@@ -162,7 +162,10 @@ export class Accounts {
     if (name) nextPinned[providerId] = name;
     else delete nextPinned[providerId];
     const { pinned: _previous, ...rest } = current;
-    this.update(Object.keys(nextPinned).length ? { ...rest, pinned: nextPinned } : rest, ctx);
+    // Choosing an account must actually take effect, even when routing was off.
+    // Never claim an active pin while Pi is still using its normal single login.
+    const active = { ...rest, mode: rest.mode === "off" ? "sticky" as const : rest.mode };
+    this.update(Object.keys(nextPinned).length ? { ...active, pinned: nextPinned } : active, ctx);
     ctx.ui.notify(name ? `Pinned ${providerId} to ${name} (no automatic failover to another account for this provider)`
       : `Automatic account selection restored for ${providerId}`, "info");
   }
