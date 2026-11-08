@@ -205,14 +205,17 @@ test("profile access clearly distinguishes All from restricted checkboxes", { ti
     ui: { notify() {}, custom: async (factory: Function) => new Promise(resolve => {
       const view = factory(mockTui, mockTheme, {}, resolve);
       const output = view.render(110).join("\n");
-      if (step === 0 || step === 2) view.handleInput("p");
+      if (step === 0) view.handleInput("p"); // Enter the profile access dialog.
       else if (step === 1) {
         seen.push(output);
         view.handleInput("\x1b[B"); view.handleInput("\r"); // Restrict to work
-      } else if (step === 3) {
+      } else if (step === 2) {
+        // The access dialog stays open so multiple identities can be toggled.
         seen.push(output);
         view.handleInput("\r"); // Explicitly restore All
-      } else view.handleInput("\x1b");
+      } else if (step === 3) {
+        view.handleInput("\x1b"); // Leave the access dialog.
+      } else view.handleInput("\x1b"); // Close the parent account hub.
       step++;
     }) } };
   await openAccountManager(ctx as never, accounts as never);
