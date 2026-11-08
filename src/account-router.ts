@@ -170,7 +170,11 @@ export class AccountRouter {
     selected.inFlight++;
     return selected;
   }
-  invalidate(name: string): void { this.states.delete(name); }
+  invalidate(name: string): void {
+    this.states.delete(name);
+    // Re-login, sign-out, or deletion invalidates the account's last-used marker.
+    for (const [provider, selected] of this.sticky) if (selected === name) this.sticky.delete(provider);
+  }
   status(): AccountRouteStatus[] {
     return this.store.list().map(account => {
       const health = this.store.health(account.name);
