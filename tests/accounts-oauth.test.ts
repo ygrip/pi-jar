@@ -97,4 +97,26 @@ test("native OAuth refresh is locked per account, quota probes coalesce, main lo
   release();
   assert.equal((await healthy).stopReason, "stop");
   assert.equal(pendingLookups, 2);
+
+  // Regression: two OAuth subscriptions from the SAME provider must keep their
+  // native Pi credential stores isolated while rotating and enforcing allowlists.
+  store.saveHealth("a", {}); store.saveHealth("b", {});
+  let policy: AccountRoutingSettings = { mode: "round-robin", accounts: [] };
+  const rotating = new AccountRouter(store, () => policy, Date.now, async () => ({ fiveHour: { used: 10 } }));
+  const wrapped = rotating.wrap(provider);
+  const beforeRotation = calls.length;
+  const first = await wrapped.streamSimple(model, context).result();
+  const second = await wrapped.streamSimple(model, context).result();
+  assert.equal(first.stopReason, "stop");
+  assert.equal(second.stopReason, "stop");
+  assert.deepEqual(calls.slice(beforeRotation), ["a-fresh", "b-fresh"],
+    "round-robin must use each named OAuth identity from the same provider");
+  assert.deepEqual(await primary.read("anthropic"), main, "Pi's main OAuth login remains untouched");
+
+  policy = { mode: "round-robin", accounts: ["b"] };
+  const beforeAllowlist = calls.length;
+  await wrapped.streamSimple(model, context).result();
+  await wrapped.streamSimple(model, context).result();
+  assert.deepEqual(calls.slice(beforeAllowlist), ["b-fresh", "b-fresh"],
+    "a profile allowlist cannot silently borrow another same-provider OAuth token");
 });
