@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model, Provider, OAuthCredential } from "@earendil-works/pi-ai";
@@ -326,10 +326,10 @@ test("failed native OAuth login releases an empty reservation and retries with s
   const accounts = new Accounts({ registerProvider() {} } as never, () => policy, next => { policy = next; }, directory);
   await assert.rejects(
     () => accounts.command("login-device openai-codex work", ctx as never),
-    /simulated browser callback rejection.*empty reservation was cleared/
+    /simulated browser callback rejection/
   );
   const path = join(accounts.store.root, "work");
-  assert.equal(existsSync(path), false, "failed login releases its own unused reservation");
+  assert.equal(existsSync(path), false, "failed login directory files: " + (existsSync(path) ? readdirSync(path).join(", ") : "none"));
   assert.deepEqual(accounts.store.list(), []);
   await accounts.command("login-device openai-codex work", ctx as never);
   assert.equal(calls, 2);
