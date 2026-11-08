@@ -442,3 +442,55 @@ test("native provider login identity follows Pi settings and stays stable otherw
   writeFileSync(join(fixture, "settings.json"), JSON.stringify({ deviceId: piDeviceId }));
   assert.equal(store.deviceId(), piDeviceId, "reuse Pi's native installation ID when present");
 });
+
+test("pinning from disabled routing activates same-provider sticky routing and preserves model selection", async t => {
+  const f = fixture(t);
+  let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
+  const wrapper = new AccountRouter(f.store, () => policy);
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, f.directory);
+  const ctx = { ui: { notify() {} } };
+  accounts.pin("openai", "b", ctx as never);
+  assert.equal(policy.mode, "sticky", "a switch is actionable even when routing was off");
+  assert.deepEqual(policy.pinned, { openai: "b" });
+  const reply = await wrapper.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(reply.stopReason, "stop");
+  assert.equal(f.calls.at(-1), "key-b");
+  assert.equal(reply.provider, model.provider);
+  assert.equal(reply.model, model.id);
+  accounts.pin("openai", undefined, ctx as never);
+  assert.equal(policy.mode, "sticky");
+  assert.equal(policy.pinned, undefined);
+});
+
+test("separate providers maintain independent same-provider routing and never borrow credentials", async t => {
+  const f = fixture(t);
+  const secondary: Model<Api> = { ...model, provider: "second", id: "second-model" };
+  process.env.JAR_SECONDARY_KEY = "second-secret";
+  t.after(() => { delete process.env.JAR_SECONDARY_KEY; });
+  f.store.reserve("second-work");
+  f.store.save({ version: 1, name: "second-work", provider: "second", auth: "env", env: "JAR_SECONDARY_KEY" });
+  const secondKeys: string[] = [];
+  const secondProvider: Provider = {
+    ...f.provider, id: "second", getModels: () => [secondary],
+    streamSimple: (m, c, options) => {
+      secondKeys.push(options?.apiKey ?? "missing");
+      const result = { ...message(options?.apiKey ?? "missing"), provider: secondary.provider, model: secondary.id };
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: "done", reason: "stop", message: result });
+      stream.end();
+      return stream;
+    }
+  };
+  const settings: AccountRoutingSettings = { mode: "round-robin", accounts: [] };
+  const router = new AccountRouter(f.store, () => settings);
+  const first = router.wrap(f.provider), second = router.wrap(secondProvider);
+  await first.streamSimple(model, context).result();
+  await second.streamSimple(secondary, context).result();
+  await first.streamSimple(model, context).result();
+  await second.streamSimple(secondary, context).result();
+  assert.deepEqual(f.calls, ["key-a", "key-b"], "rotation uses only the first provider's pool");
+  assert.deepEqual(secondKeys, ["second-secret", "second-secret"], "second provider never borrows first-provider credentials");
+  const wrong = await second.streamSimple(model, context).result();
+  assert.equal(wrong.stopReason, "error", "a model from another provider is not eligible for this pool");
+  assert.deepEqual(secondKeys, ["second-secret", "second-secret"]);
+});
