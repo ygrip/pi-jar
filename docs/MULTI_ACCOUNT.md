@@ -4,7 +4,7 @@ Route a selected model across accounts **of the same provider** without creating
 
 ## Set up accounts
 
-Open the **OMP-style provider/account hub** with **`/jar accounts`** (also **`/jar settings` → Pi → Manage accounts**). Built on Pi's native TUI, it lists providers in one pane and accounts, connection status, quotas, cooldowns and pins in the other. Use **↑/↓** to select, **Tab/Shift+Tab** to change panes, **Enter** to open a row, **/** to search, or the **A/S/R/P/Q** shortcuts for add, switch, routing, profile access and quota. On narrow terminals the panes stack; Pi fullscreen supports mouse clicks. You can reconnect, sign out, or remove an account in its details. **`/jar accounts list`** is the noninteractive status view.
+Open the **OMP-style provider/account hub** with **`/jar accounts`** (also **`/jar settings` → Pi → Manage accounts**). Built on Pi's native TUI, it lists providers in one pane and accounts, connection status, quotas, cooldowns and pins in the other. Use **↑/↓** to select, **Tab/Shift+Tab** to change panes, **Enter** to open a row, **/** to search, or the **A/S/R/P/Q** shortcuts for add, switch, routing, profile access and quota. On narrow terminals the panes stack; Pi fullscreen supports mouse clicks. You can reconnect, sign out, or remove an account in its details. Accounts from unregistered/removed providers appear as **OFFLINE** groups and can still be removed, without running that provider’s authentication. Search filters account rows by label as well as provider groups. Profile access explicitly distinguishes **All accounts** from selecting **Restrict to** one identity. **`/jar accounts list`** is the noninteractive status view.
 
 **Provider isolation:** `openai-codex` accounts form their own pool, independent of `anthropic`, `openai`, or any other provider. Switching a Codex account does not alter Anthropic's routing, models, or roles. Pi-Jar does not change a model/provider to chase another account.
 
@@ -41,7 +41,7 @@ Enable or disable routing directly:
 /jar routing status
 ```
 
-To sign out without losing the account label, open `/jar accounts`, choose the provider/account and **Sign out**. Or use `/jar accounts logout NAME`. Reconnecting the same label invokes Pi's native OAuth flow again. To delete the account label and local credentials entirely, choose **Remove local account credentials** and confirm. Removal rejects unexpected private files or locks and never touches Pi's primary login. Neither action revokes a provider-side session; revoke it at the provider when required.
+To sign out without losing the account label, open `/jar accounts`, choose the provider/account and **Sign out**. Or use `/jar accounts logout NAME`. Reconnecting the same label invokes Pi's native OAuth flow again. To delete the account label and local credentials entirely, choose **Remove local account credentials** and confirm, or use **`/jar accounts remove NAME`** (also works when the provider is no longer registered). Removal rejects unexpected private files or locks and never touches Pi's primary login. Neither action revokes a provider-side session; revoke it at the provider when required.
 
 `on` keeps an already-active policy, or selects sticky when routing was off. `off` restores the original provider/authentication. These settings apply to the active profile. To select a particular policy, use `/jar routing quota-first` (also accepts `sticky` and `round-robin`).
 
@@ -84,7 +84,7 @@ The policy, per-provider pins, and optional account allowlist belong to the acti
 /jar accounts use all
 ```
 
-An empty allowlist (`all`) permits all configured accounts. A named allowlist applies **across** providers, so don't use it just to switch between two accounts for one provider: use per-provider **Switch / pin** instead. An allowlist never falls back to an excluded account or Pi's main login for a routed provider. Account names are global and unique; credentials are not embedded in profiles or project files.
+An empty allowlist (`all`) permits all configured accounts. Removing the sole explicitly allowed account is refused even when it is the only configured account; you must explicitly choose **All accounts** or another allowlist first, so future accounts cannot accidentally gain access. A named allowlist applies **across** providers, so don't use it just to switch between two accounts for one provider: use per-provider **Switch / pin** instead. An allowlist never falls back to an excluded account or Pi's main login for a routed provider. Account names are global and unique; credentials are not embedded in profiles or project files.
 
 Keep roles unchanged, for example `/roles set worker openai-codex/gpt-6.1-terra`. Routing happens below model selection, including advisor/commit side calls, compaction, and chat calls from subagents. At every spawn/relaunch, a child inherits the parent's policy and allowlist; pi-jar adds no tokens to its environment. Native OAuth refresh locks coordinate credential refresh, and quota/cooldown files are updated under a per-account lock so concurrent processes cannot erase each other's cooldowns. Rotation cursors and in-flight counts are process-local, not a distributed scheduler. A request keeps the policy and allowlist it was dispatched with; changes apply to the next request.
 
@@ -94,7 +94,7 @@ Only providers with configured accounts are wrapped. Providers without configure
 
 ## Quotas and retries
 
-For **OpenAI Codex** and **Anthropic OAuth**, built-in usage endpoints provide five-hour/weekly subscription limits. Results are shared privately for five minutes; concurrent lookups within a process coalesce. Exhausted windows exclude an account until reset or refreshed quota shows availability. Other providers/API-key accounts have **unknown** proactive quota and rely on provider enforcement.
+For **OpenAI Codex** and **Anthropic OAuth**, built-in usage endpoints provide five-hour/weekly subscription limits. Results are shared privately for five minutes; concurrent lookups within a process coalesce. Routing uses cached quota immediately and refreshes the provider usage endpoint asynchronously, so a delayed quota lookup cannot stall a model request. Account-specific model availability checks use a bounded four-at-a-time concurrency limit. Exhausted windows exclude an account until reset or refreshed quota shows availability. Other providers/API-key accounts have **unknown** proactive quota and rely on provider enforcement.
 
 A failed quota lookup retains known limits, reports a warning, and backs off for five minutes. Unknown quota does **not** imply unlimited quota: the model endpoint remains authoritative. Cached limits and process-local selection cannot guarantee an atomic reservation of provider quota across simultaneous requests.
 
