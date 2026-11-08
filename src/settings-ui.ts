@@ -212,7 +212,8 @@ export async function openJarSettings(
       }
     };
   });
-  if (action === "accounts" && manageAccounts) {
+  if (action === "accounts") {
+    if (!manageAccounts) return;
     try { await manageAccounts(); }
     catch (error) { ctx.ui.notify("Could not open account manager: " + (error as Error).message, "error"); }
     continue;
