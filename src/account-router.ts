@@ -118,6 +118,9 @@ export class AccountRouter {
   /** `settings` is the policy captured when the request was dispatched; retries reuse it. */
   private async select(provider: Provider, model: AnyModel, tried: Set<string>, settings: AccountRoutingSettings, signal?: AbortSignal): Promise<AccountState> {
     if (this.configurationError) throw new RoutingError(this.configurationError);
+    // Provider IDs are the security/routing boundary. A matching model ID in
+    // another provider must never allow credentials to cross that boundary.
+    if (model.provider !== provider.id) throw new RoutingError(`Model ${model.provider}/${model.id} cannot be routed through ${provider.id}`);
     // Provider IDs are the credential boundary. Model IDs are not globally unique,
     // so a same-named model from another provider must never select these credentials.
     if (model.provider !== provider.id) {
