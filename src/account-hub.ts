@@ -32,8 +32,8 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
     const groups = () => {
       const known = ctx.modelRegistry.getAll().map(model => model.provider);
       const configured = accounts.store.list().map(account => account.provider);
+      // Stored accounts stay visible when their provider plugin is uninstalled.
       return [...new Set([...known, ...configured])]
-        .filter(id => !!ctx.modelRegistry.getProvider(id))
         .sort((a, b) => a.localeCompare(b));
     };
     const matching = () => {
@@ -58,12 +58,18 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
     const choices = () => {
       const provider = currentProvider();
       if (!provider) return [{ kind: "add" as const, label: "Connect provider account…" }];
-      const members = accounts.store.list().filter(account => account.provider === provider);
+      const registered = ctx.modelRegistry.getProvider(provider);
+      const query = search.getValue().trim().toLocaleLowerCase();
+      const words = query.split(/\s+/).filter(Boolean);
+      const providerTerms = `${provider} ${registered?.name ?? ""}`.toLocaleLowerCase();
+      const providerMatch = words.every(word => providerTerms.includes(word));
+      const members = accounts.store.list().filter(account => account.provider === provider
+        && (providerMatch || words.every(word => `${providerTerms} ${account.name}`.toLocaleLowerCase().includes(word))));
       const pinned = accounts.policy().pinned?.[provider];
       const statuses = accounts.router.status();
       const allow = accounts.policy().accounts;
       return [
-        { kind: "auto" as const, label: `Automatic selection · ${accounts.policy().mode}${pinned ? "" : " · current"}` },
+        ...(registered ? [{ kind: "auto" as const, label: `Automatic selection · ${accounts.policy().mode}${pinned ? "" : " · current"}` }] : []),
         ...members.map(account => {
           const status = statuses.find(item => item.name === account.name);
           const quota = status?.remaining === undefined ? "quota ?" : `${Math.round(status.remaining)}% left`;
@@ -75,9 +81,11 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
           return { kind: "account" as const, name: account.name,
             label: `${account.name} · ${account.auth === "oauth" ? "OAuth" : "API"} · ${quota}${flags ? " · " + flags : ""}` };
         }),
-        { kind: "add" as const, label: "＋ Add account to this provider" },
-        { kind: "switch" as const, label: "Switch / pin provider account…" },
-        { kind: "limits" as const, label: "Quota and cooldown details…" }
+        ...(registered ? [
+          { kind: "add" as const, label: "＋ Add account to this provider" },
+          { kind: "switch" as const, label: "Switch / pin provider account…" },
+          { kind: "limits" as const, label: "Quota and cooldown details…" }
+        ] : [{ kind: "close" as const, label: "Provider unavailable · select account to remove" }])
       ];
     };
 
@@ -178,7 +186,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
             const id = providers[index];
             const countAccounts = id ? allAccounts.filter(account => account.provider === id).length : 0;
             const focused = pane === "providers" && id === provider;
-            const left = id ? `${focused ? "❯" : " "} ${id} (${countAccounts})` : "";
+            const left = id ? `${focused ? "❯" : " "} ${id} (${countAccounts})${ctx.modelRegistry.getProvider(id) ? "" : " OFFLINE"}` : "";
             const right = rows[index] ? detail(rows[index]!, index, rightWidth) : "";
             const y = out.length;
             if (id) providerHits.push({ y, id });
@@ -190,7 +198,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
           for (const id of providers) {
             providerHits.push({ y: out.length, id });
             const selected = pane === "providers" && id === provider;
-            out.push(normal(` ${selected ? "❯" : " "} ${id} · ${allAccounts.filter(account => account.provider === id).length} accounts`, available));
+            out.push(normal(` ${selected ? "❯" : " "} ${id} · ${allAccounts.filter(account => account.provider === id).length} accounts${ctx.modelRegistry.getProvider(id) ? "" : " · OFFLINE"}`, available));
           }
           if (!providers.length) out.push(theme.fg("dim", " No provider accounts. Press A to connect."));
           out.push(header(` ACCOUNTS · ${provider ?? "none"}`, available));
