@@ -647,3 +647,84 @@ test("routing does not await delayed quota endpoints and bounds concurrent catal
     for (const release of outstanding) release();
   }
 });
+
+
+test("automatic selection respects routing off; explicit pin is the opt-in", async t => {
+  const f = fixture(t);
+  let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, f.directory);
+  const ctx = { ui: { notify() {} },
+    modelRegistry: { getAll: () => [], getProvider: () => undefined, refresh: async () => {} } };
+  accounts.pin("openai", undefined, ctx as never);
+  assert.deepEqual(policy, { mode: "off", accounts: [] }, "hub Automatic row is a no-op while routing is off");
+  await accounts.command("auto openai", ctx as never);
+  assert.equal(policy.mode, "off", "CLI automatic also preserves off");
+  accounts.pin("openai", "a", ctx as never);
+  assert.equal(policy.mode, "sticky", "explicit account pin enables routing");
+  assert.deepEqual(policy.pinned, { openai: "a" });
+  await accounts.command("mode off", ctx as never);
+  accounts.pin("openai", undefined, ctx as never);
+  assert.equal(policy.mode, "off");
+  assert.equal(policy.pinned, undefined);
+});
+
+test("stale quota from old OAuth credentials cannot return after logout or reconnect", { timeout: 10000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-quota-race-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  const providerId = "openai-codex";
+  const codexModel: Model<Api> = { ...model, provider: providerId };
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: providerId, auth: "oauth" });
+  const authPath = join(store.root, "work", "auth.json");
+  writeFileSync(authPath, "old-token", { mode: 0o600 });
+  store.models = async () => ({
+    getAuth: async () => ({ auth: { apiKey: "fake-token" }, source: "oauth" }),
+    getAllAvailable: async () => [codexModel],
+    streamSimple: () => {
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: "done", reason: "stop", message: { ...message("ok"), provider: providerId, model: codexModel.id } });
+      stream.end();
+      return stream;
+    }
+  }) as never;
+  const provider: Provider = {
+    id: providerId, name: "Test Codex", auth: { oauth: {} as Provider["auth"]["oauth"] },
+    getModels: () => [codexModel],
+    stream: () => { throw new Error("unused"); },
+    streamSimple: () => { throw new Error("unused"); }
+  };
+  const policy: AccountRoutingSettings = { mode: "quota-first", accounts: [] };
+  let startFirst!: () => void, releaseFirst!: (quota: { fiveHour: { used: number } }) => void;
+  const firstStarted = new Promise<void>(resolve => { startFirst = resolve; });
+  const router = new AccountRouter(store, () => policy, Date.now, async () => {
+    startFirst();
+    return new Promise(resolve => { releaseFirst = resolve; });
+  });
+  assert.equal((await router.wrap(provider).streamSimple(codexModel, context).result()).stopReason, "stop");
+  await firstStarted;
+  router.invalidate("work");
+  store.logout("work");
+  assert.equal(existsSync(authPath), false);
+  releaseFirst({ fiveHour: { used: 100 } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.health("work").quota, undefined, "invalidated runtime cannot resurrect exhausted limits");
+
+  // Reconnect with a different identity; the provider ID and account name
+  // stay the same, but a new credential generation is persisted.
+  writeFileSync(authPath, "new-token", { mode: 0o600 });
+  store.resetHealthForCredentialChange("work");
+  let startOther!: () => void, releaseOther!: (quota: { fiveHour: { used: number } }) => void;
+  const otherStarted = new Promise<void>(resolve => { startOther = resolve; });
+  const otherProcess = new AccountRouter(store, () => policy, Date.now, async () => {
+    startOther();
+    return new Promise(resolve => { releaseOther = resolve; });
+  });
+  assert.equal((await otherProcess.wrap(provider).streamSimple(codexModel, context).result()).stopReason, "stop");
+  await otherStarted;
+  store.resetHealthForCredentialChange("work"); // another process changes credentials, without invalidating router
+  releaseOther({ fiveHour: { used: 100 } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.health("work").quota, undefined, "persistent epoch prevents cross-process stale writes");
+  assert.ok(store.health("work").credentialGeneration);
+});
