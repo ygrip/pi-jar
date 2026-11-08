@@ -557,7 +557,7 @@ test("provider-specific cooldown never blocks healthy accounts belonging to anot
 });
 
 
-test("removing the only configured allowlisted identity is rejected even before a later account is added", async t => {
+test("removing the only configured allowlisted identity is rejected even before a later account is added", { timeout: 10000 }, async t => {
   const f = fixture(t);
   f.store.remove("b"); // The account directory now contains only the explicitly allowed identity.
   let policy: AccountRoutingSettings = { mode: "sticky", accounts: ["a"] };
@@ -573,7 +573,7 @@ test("removing the only configured allowlisted identity is rejected even before 
   assert.deepEqual(f.calls, ["key-a"], "adding a new account cannot inherit access after rejected removal");
 });
 
-test("CLI remove works for orphaned providers and refuses invalid or unknown names", async t => {
+test("CLI remove works for orphaned providers and refuses invalid or unknown names", { timeout: 10000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), "pi-jar-orphan-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
@@ -588,7 +588,7 @@ test("CLI remove works for orphaned providers and refuses invalid or unknown nam
   await assert.rejects(() => accounts.command("remove ..\/private", ctx as never), /Unknown account|names must/);
 });
 
-test("routing does not await delayed quota endpoints and bounds concurrent catalog checks", async () => {
+test("routing does not await delayed quota endpoints and bounds concurrent catalog checks", { timeout: 10000 }, async () => {
   const providerId = "openai-codex";
   const routedModel: Model<Api> = { ...model, provider: providerId };
   const definitions = Array.from({ length: 12 }, (_, index) => ({
