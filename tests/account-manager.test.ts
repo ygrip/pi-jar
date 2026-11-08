@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Api, Model, Provider, OAuthCredential } from "@earendil-works/pi-ai";
 import { Accounts } from "../src/accounts.ts";
 import type { AccountRoutingSettings } from "../src/account-settings.ts";
