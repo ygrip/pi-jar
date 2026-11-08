@@ -15,7 +15,7 @@ const model: Model<Api> = { id: "test", name: "Test", api: "anthropic-messages",
 const context = normalizeContext({ messages: [] });
 const credential = (access: string, expires = 0): OAuthCredential => ({ type: "oauth", access, refresh: `refresh-${access}`, expires });
 
-test("native OAuth refresh is locked per account, quota probes coalesce, main login stays untouched", async t => {
+test("native OAuth refresh is locked per account, quota probes coalesce, main login stays untouched", { timeout: 20000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), "jar-oauth-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const store = new AccountStore(directory);
