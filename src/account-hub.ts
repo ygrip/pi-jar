@@ -70,7 +70,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
           const blocked = (status?.blockedUntil ?? 0) > Date.now();
           const missing = !accounts.store.hasCredentials(account);
           const excluded = allow.length > 0 && !allow.includes(account.name);
-          const flags = [pinned === account.name ? "PINNED" : "", blocked ? "COOLDOWN" : "",
+          const flags = [pinned === account.name ? "PINNED" : "", !pinned && status?.lastUsed ? "LAST USED" : "", blocked ? "COOLDOWN" : "",
             missing ? "SIGN IN" : "", excluded ? "EXCLUDED" : ""].filter(Boolean).join(" · ");
           return { kind: "account" as const, name: account.name,
             label: `${account.name} · ${account.auth === "oauth" ? "OAuth" : "API"} · ${quota}${flags ? " · " + flags : ""}` };
