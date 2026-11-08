@@ -228,7 +228,7 @@ export class Accounts {
         if ((account.blockedUntil ?? 0) > Date.now()) quota = `cooldown until ${new Date(account.blockedUntil!).toISOString()}`;
         let warning = "";
         if (account.warning) warning = ` · ${account.warning}`;
-        return `${account.name}: ${account.provider} · ${quota}${warning}`;
+        return `${account.name}: ${account.provider} · ${quota}${account.lastUsed ? " · last used" : ""}${warning}`;
       });
       ctx.ui.notify(`Account routing: ${this.settings().mode}\n${rows.join("\n") || "No accounts configured"}`, "info");
       return;
