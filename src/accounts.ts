@@ -162,9 +162,9 @@ export class Accounts {
     if (name) nextPinned[providerId] = name;
     else delete nextPinned[providerId];
     const { pinned: _previous, ...rest } = current;
-    // Choosing an account must actually take effect, even when routing was off.
-    // Never claim an active pin while Pi is still using its normal single login.
-    const active = { ...rest, mode: rest.mode === "off" ? "sticky" as const : rest.mode };
+    // Explicitly pinning an account turns routing on. Unpinning / choosing
+    // Automatic while routing is off must preserve native Pi authentication.
+    const active = { ...rest, mode: name && rest.mode === "off" ? "sticky" as const : rest.mode };
     this.update(Object.keys(nextPinned).length ? { ...active, pinned: nextPinned } : active, ctx);
     ctx.ui.notify(name ? `Pinned ${providerId} to ${name} (no automatic failover to another account for this provider)`
       : `Automatic account selection restored for ${providerId}`, "info");
@@ -173,8 +173,9 @@ export class Accounts {
   /** Sign out without touching another provider or Pi's primary credentials. */
   async logout(name: string, ctx: ExtensionContext): Promise<void> {
     if (!ctx.isIdle()) throw new Error("Finish the current model request before signing out");
-    this.store.logout(name);
+    // Stop old background quota probes before touching credential/health files.
     this.router.invalidate(name);
+    this.store.logout(name);
     const current = this.settings();
     const pins = Object.fromEntries(Object.entries(current.pinned ?? {})
       .filter(([, account]) => account !== name));
@@ -241,6 +242,12 @@ export class Accounts {
       await this.remove(providerId, ctx);
       return;
     }
+    if (action === "recover" && providerId && !name) {
+      if (!ctx.isIdle()) throw new Error("Finish active model work before recovering an incomplete reservation");
+      this.store.discardEmptyReservation(providerId);
+      ctx.ui.notify(`Empty reservation ${providerId} cleared; you can retry login with this label`, "info");
+      return;
+    }
     if (action === "pin" && providerId && name && !env && !extra.length) {
       this.pin(providerId, name, ctx);
       return;
@@ -271,7 +278,7 @@ export class Accounts {
     }
     if (!["add", "login", "login-device"].includes(action) || !providerId || !name || extra.length
       || (action === "add" && (!env || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(env))) || (action !== "add" && env)) {
-      throw new Error("Usage: /jar accounts [manage|list|logout NAME|remove NAME|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
+      throw new Error("Usage: /jar accounts [manage|list|logout NAME|remove NAME|recover NAME|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
     }
     if (!ctx.isIdle()) throw new Error("Wait for active model work before adding an account");
     const provider = this.originals.get(providerId) ?? ctx.modelRegistry.getProvider(providerId);
@@ -286,23 +293,36 @@ export class Accounts {
     if (existing && (action === "add" || existing.provider !== providerId || existing.auth !== "oauth")) {
       throw new Error("Account name already belongs to another account");
     }
-    // Leave an unactivated private directory after interrupted first login; never delete credentials implicitly.
+    // The reservation prevents competing processes from claiming this name.
+    // On failed first OAuth login, only an entirely empty private directory is
+    // automatically released. Any credential/lock/unknown file remains intact.
     if (!existing) this.store.reserve(name);
     if (action !== "add") {
-      const models = await this.store.models(account, provider);
       try {
-        // Reuse Pi's public login API and the provider's own OAuth flow, credential
-        // persistence, refresh handling, and installation identity.
+        const models = await this.store.models(account, provider);
+        // Use Pi's native OAuth flow, not a second credential implementation.
         await models.login(providerId, "oauth", this.interaction(ctx, action === "login-device"),
           { getDeviceId: () => this.store.deviceId() });
       } catch (error) {
+        let recovery = "";
+        if (!existing) {
+          try {
+            this.store.discardEmptyReservation(name);
+            recovery = " The empty reservation was cleared; you can retry with the same label.";
+          } catch {
+            recovery = ` Reservation files were retained for safety; inspect them before using /jar accounts recover ${name} (only empty reservations may be removed).`;
+          }
+        }
         const reason = cleanText(error instanceof Error ? error.message : String(error), 220);
-        throw new Error(`Account login failed (${name}): ${reason}. The main Pi login was not modified. If browser authorization fails, retry with /jar accounts login-device ${providerId} ${name}.`);
+        throw new Error(`Account login failed (${name}): ${reason}. The main Pi login was not modified.${recovery} If browser authorization fails, retry with /jar accounts login-device ${providerId} ${name}.`);
       }
     }
     if (!existing) this.store.save(account);
-    if (existing) this.store.saveHealth(name, {});
     this.router.invalidate(name);
+    // Existing OAuth labels can be reconnected to a different subscription.
+    // Rotate the on-disk epoch so stale in-flight quota probes cannot revive
+    // the previous identity's limits (including probes in other Pi processes).
+    if (existing && action !== "add") this.store.resetHealthForCredentialChange(name);
     await this.ready(ctx);
     ctx.ui.notify(`Account ${name} added for ${providerId}. Choose routing in /jar settings → Pi, or /jar accounts mode sticky`, "info");
   }
