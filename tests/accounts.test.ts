@@ -358,6 +358,7 @@ test("native provider login identity follows Pi settings and stays stable otherw
   const created = store.deviceId();
   assert.match(created, /^[0-9a-f-]{36}$/i);
   assert.equal(store.deviceId(), created);
+  assert.deepEqual(store.list(), [], "identity marker must never look like an account directory");
   const piDeviceId = "12345678-1234-4234-8234-123456789abc";
   writeFileSync(join(fixture, "settings.json"), JSON.stringify({ deviceId: piDeviceId }));
   assert.equal(store.deviceId(), piDeviceId, "reuse Pi's native installation ID when present");
