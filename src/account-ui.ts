@@ -4,141 +4,229 @@ import type { AccountDefinition } from "./account-store.ts";
 import type { Accounts } from "./accounts.ts";
 import { promptChoice, promptText } from "./dialogs.ts";
 
-/** Interactive account manager built on Pi-Jar's searchable, keyboard/mouse friendly dialogs. */
+/**
+ * OMP-style provider-first account management, backed by Pi's native provider
+ * registry and login. All dialogs are searchable and support keyboard/mouse.
+ * No account-specific OAuth logic, model aliases or credential copies live here.
+ */
 export async function openAccountManager(ctx: ExtensionContext, accounts: Accounts): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") {
-    ctx.ui.notify("Account manager requires the interactive Pi terminal. Use /jar accounts list for status.", "warning");
+    ctx.ui.notify("Account manager requires an interactive Pi terminal; use /jar accounts list for status.", "warning");
     return;
   }
 
+  const definitions = (): AccountDefinition[] => accounts.store.list();
+  const providers = (): string[] => [...new Set([
+    ...ctx.modelRegistry.getAll().map(model => model.provider),
+    ...definitions().map(account => account.provider)
+  ])].filter(id => !!ctx.modelRegistry.getProvider(id)).sort();
+  const notifyError = (error: unknown) => ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+
+  const chooseProvider = async (type?: "oauth" | "apiKey", configuredOnly = false): Promise<string | undefined> => {
+    const configured = new Set(definitions().map(account => account.provider));
+    const ids = providers().filter(id => (!configuredOnly || configured.has(id))
+      && (!type || !!ctx.modelRegistry.getProvider(id)?.auth[type]));
+    if (!ids.length) {
+      ctx.ui.notify(configuredOnly ? "No accounts configured yet" : "No eligible Pi providers in the model registry", "warning");
+      return undefined;
+    }
+    const options = ids.map(id => {
+      const count = definitions().filter(account => account.provider === id).length;
+      return `${id} · ${count} account${count === 1 ? "" : "s"}`;
+    });
+    const index = await promptChoice(ctx, "Choose provider", "Accounts only switch within the same Pi provider; models and roles remain unchanged.", options);
+    return index === undefined ? undefined : ids[index];
+  };
+
+  const add = async (providerId?: string, type?: "oauth" | "apiKey"): Promise<void> => {
+    const id = providerId ?? await chooseProvider();
+    if (!id) return;
+    const provider = ctx.modelRegistry.getProvider(id);
+    if (!provider) throw new Error("Unknown Pi provider: " + id);
+    let authType = type;
+    if (!authType) {
+      const choices = [
+        ...(provider.auth.oauth ? ["Sign in with provider (Pi OAuth)"] : []),
+        ...(provider.auth.apiKey ? ["Reference an environment variable (API key)"] : [])
+      ];
+      if (!choices.length) throw new Error("Provider has no supported interactive authentication");
+      const choice = await promptChoice(ctx, `Connect ${id}`, "Pi's native provider manages login; each named account has private credentials.", choices);
+      if (choice === undefined) return;
+      authType = choices[choice]!.startsWith("Sign in") ? "oauth" : "apiKey";
+    }
+    if (!provider.auth[authType]) throw new Error("This provider doesn't support that credential type");
+    const name = await promptText(ctx, "Account label", "Use lowercase letters, digits and hyphens (e.g. personal, work-2). Names are unique across providers.");
+    if (!name) return;
+    if (!validAccountName(name)) throw new Error("Account label must start with a lowercase letter and be at most 32 characters");
+    if (authType === "apiKey") {
+      const env = await promptText(ctx, "Existing key environment variable", "Enter its variable name, not the secret value. It must already be set when Pi starts.");
+      if (!env) return;
+      await accounts.command(`add ${id} ${name} ${env}`, ctx);
+    } else await signIn(id, name);
+  };
+
   const signIn = async (providerId: string, name: string): Promise<void> => {
+    // Only Pi's provider chooses/implements login methods. Prefer device code
+    // on remote terminals where localhost browser callbacks cannot reach Pi.
     let action = "login";
     if (providerId === "openai-codex") {
-      const method = await promptChoice(ctx, "Pi OAuth sign-in", "The native device-code flow works without a localhost browser callback.", [
-        "Device code (recommended for SSH, remote and containers)",
-        "Browser login (or paste the redirect URL)"
+      const choice = await promptChoice(ctx, "Native Pi OAuth", "Choose the Codex provider's own OAuth method. Device code works over SSH and in containers.", [
+        "Device code (recommended for remote terminals)",
+        "Browser callback / paste redirect URL"
       ]);
-      if (method === undefined) return;
-      if (method === 0) action = "login-device";
+      if (choice === undefined) return;
+      if (choice === 0) action = "login-device";
     }
     await accounts.command(`${action} ${providerId} ${name}`, ctx);
   };
 
-  const chooseProvider = async (type: "oauth" | "apiKey"): Promise<string | undefined> => {
-    const ids = [...new Set(ctx.modelRegistry.getAll().map(model => model.provider))]
-      .filter(id => !!ctx.modelRegistry.getProvider(id)?.auth[type])
-      .sort();
-    if (!ids.length) {
-      ctx.ui.notify("No providers with " + (type === "oauth" ? "OAuth" : "API-key") + " authentication are available in Pi.", "warning");
-      return undefined;
-    }
-    const choice = await promptChoice(ctx, "Choose a Pi provider", "Pi's built-in provider handles authentication; Pi-Jar keeps each account's credentials separate.", ids);
-    return choice === undefined ? undefined : ids[choice];
-  };
-
-  const addOAuth = async (): Promise<void> => {
-    const id = await chooseProvider("oauth");
+  const switchAccount = async (providerId?: string): Promise<void> => {
+    const id = providerId ?? await chooseProvider(undefined, true);
     if (!id) return;
-    const name = await promptText(ctx, "New subscription account", "Account name (lowercase letters, digits, hyphens; 1–32 characters)");
-    if (!name) return;
-    if (!validAccountName(name)) throw new Error("Account names must start with a lowercase letter and contain only lowercase letters, digits, or hyphens");
-    await signIn(id, name);
+    const members = definitions().filter(account => account.provider === id);
+    if (!members.length) return;
+    const selected = accounts.policy().pinned?.[id];
+    const allow = accounts.policy().accounts;
+    const choices = [
+      `Automatic (${accounts.policy().mode})${selected ? "" : " · active"}`,
+      ...members.map(account => `${account.name}${selected === account.name ? " · pinned" : ""}${allow.length && !allow.includes(account.name) ? " · excluded by profile" : ""}`)
+    ];
+    const choice = await promptChoice(ctx, `Switch account · ${id}`,
+      "Only this provider changes. Automatic mode preserves same-provider 429 failover; pinning intentionally disables account failover.", choices);
+    if (choice === undefined) return;
+    accounts.pin(id, choice === 0 ? undefined : members[choice - 1]!.name, ctx);
   };
 
-  const addKey = async (): Promise<void> => {
-    const id = await chooseProvider("apiKey");
-    if (!id) return;
-    const name = await promptText(ctx, "New API-key account", "Account name (lowercase letters, digits, hyphens; 1–32 characters)");
-    if (!name) return;
-    if (!validAccountName(name)) throw new Error("Invalid account name");
-    const env = await promptText(ctx, "Existing environment variable", "Name of an already-exported key variable (never paste the secret itself)");
-    if (!env) return;
-    await accounts.command(`add ${id} ${name} ${env}`, ctx);
-  };
-
-  const chooseMode = async (): Promise<void> => {
+  const routingPolicy = async (): Promise<void> => {
     const modes = [...ACCOUNT_ROUTING_MODES];
-    const selected = await promptChoice(ctx, "Account routing policy", "Sticky preserves prompt-cache affinity. Quota-first uses known subscription quota; unknown quotas are not unlimited.", modes,
+    const choice = await promptChoice(ctx, "Routing policy",
+      "Sticky keeps prompt-cache affinity; round-robin rotates; quota-first uses known remaining quota. Off restores Pi authentication.",
+      modes.map(mode => mode === accounts.policy().mode ? `${mode} · current` : mode),
       Math.max(0, modes.indexOf(accounts.policy().mode)));
-    if (selected !== undefined) await accounts.routing(modes[selected]!, ctx);
+    if (choice !== undefined) await accounts.routing(modes[choice]!, ctx);
   };
 
-  const editAllowlist = async (): Promise<void> => {
+  const allowlist = async (): Promise<void> => {
     while (true) {
-      const definitions = accounts.store.list();
+      const all = definitions();
+      if (!all.length) return;
       const selected = accounts.policy().accounts;
-      if (!definitions.length) { ctx.ui.notify("Add an account first", "warning"); return; }
       const choices = [
-        `Use all configured accounts ${!selected.length ? "(current)" : ""}`,
-        ...definitions.map(account => `${selected.includes(account.name) ? "[x]" : "[ ]"} ${account.name} · ${account.provider}`),
-        "Done"
+        `All accounts${!selected.length ? " · current" : ""}`,
+        ...all.map(account => `${selected.includes(account.name) ? "[x]" : "[ ]"} ${account.provider} / ${account.name}`),
+        "Back"
       ];
-      const choice = await promptChoice(ctx, "Profile account allowlist", "Select an account to toggle it, or choose all. Allowlist applies to this Pi-Jar profile.", choices);
+      const choice = await promptChoice(ctx, "Profile account access",
+        "This profile can use the checked identities. All means no restrictions. Excluding a pinned account clears its pin.", choices);
       if (choice === undefined || choice === choices.length - 1) return;
       if (choice === 0) await accounts.command("use all", ctx);
       else {
-        const name = definitions[choice - 1]!.name;
+        const name = all[choice - 1]!.name;
         const next = selected.includes(name) ? selected.filter(item => item !== name) : [...selected, name];
-        if (!next.length) {
-          ctx.ui.notify("To allow all accounts, select the Use all option above.", "info");
-        } else await accounts.command(`use ${next.join(",")}`, ctx);
+        if (next.length) await accounts.command(`use ${next.join(",")}`, ctx);
+        else ctx.ui.notify("Choose All accounts to clear the profile allowlist.", "info");
       }
     }
   };
 
+  const accountDescription = (account: AccountDefinition): string => {
+    const status = accounts.router.status().find(item => item.name === account.name);
+    const remaining = status?.remaining === undefined ? "quota unknown" : `${status.remaining}% left`;
+    const cooldown = status?.blockedUntil && status.blockedUntil > Date.now() ? " · cooldown" : "";
+    const pin = accounts.policy().pinned?.[account.provider] === account.name ? " · PINNED" : "";
+    const allowed = accounts.policy().accounts;
+    const excluded = allowed.length && !allowed.includes(account.name) ? " · excluded" : "";
+    return `${account.name} · ${account.auth === "oauth" ? "OAuth" : "API key"} · ${remaining}${cooldown}${pin}${excluded}`;
+  };
+
+  const showLimits = async (providerId?: string): Promise<void> => {
+    const id = providerId ?? await chooseProvider(undefined, true);
+    if (!id) return;
+    const members = definitions().filter(account => account.provider === id);
+    const summaries = members.map(account => {
+      const health = accounts.store.health(account.name);
+      const status = accounts.router.status().find(item => item.name === account.name);
+      const windowLabel = (label: string, window: { used: number; resetsAt?: number } | undefined) =>
+        window ? `${label}: ${Math.max(0, Math.round(100 - window.used))}% left${window.resetsAt ? " · reset " + new Date(window.resetsAt).toLocaleString() : ""}` : `${label}: unknown`;
+      const cooldown = (status?.blockedUntil ?? 0) > Date.now() ? " · cooldown " + new Date(status!.blockedUntil!).toLocaleString() : "";
+      return `${account.name} · ${windowLabel("5h", health.quota?.fiveHour)} · ${windowLabel("week", health.quota?.week)}${cooldown}${status?.warning ? " · warning" : ""}`;
+    });
+    await promptChoice(ctx, `Quota & limits · ${id}`,
+      "Cached provider values only; API keys and unsupported providers have unknown limits. Select Back to return.",
+      [...summaries, "Back"]);
+  };
+
   const manageAccount = async (account: AccountDefinition): Promise<void> => {
     const choices = [
-      ...(account.auth === "oauth" ? ["Sign in again / renew this account"] : []),
-      "Show status",
-      "Remove local account and credentials",
+      "Make active for this provider (pin)",
+      ...(account.auth === "oauth" ? ["Reconnect / renew Pi OAuth login"] : []),
+      "View quota & cooldown",
+      "Remove local account credentials…",
       "Back"
     ];
-    const choice = await promptChoice(ctx, `Account: ${account.name}`, `${account.provider} · ${account.auth === "oauth" ? "Native Pi OAuth" : "Environment variable " + account.env}`, choices);
+    const choice = await promptChoice(ctx, `${account.provider} / ${account.name}`,
+      `${account.auth === "oauth" ? "Pi native OAuth" : "Environment: " + account.env} · ${accounts.policy().pinned?.[account.provider] === account.name ? "Pinned" : "Automatic routing"}`,
+      choices);
     if (choice === undefined || choice === choices.length - 1) return;
-    if (account.auth === "oauth" && choice === 0) { await signIn(account.provider, account.name); return; }
-    const adjusted = account.auth === "oauth" ? choice - 1 : choice;
-    if (adjusted === 0) { await accounts.command("list", ctx); return; }
-    if (adjusted === 1) {
-      const confirm = await promptChoice(ctx, "Remove local account?", `Delete local credentials for ${account.name}? This does NOT revoke the provider's token.`, [
-        "Cancel", "Remove account and local credentials"
+    if (choice === 0) return accounts.pin(account.provider, account.name, ctx);
+    const offset = account.auth === "oauth" ? 1 : 0;
+    if (account.auth === "oauth" && choice === 1) { await signIn(account.provider, account.name); return; }
+    if (choice === offset + 1) { await showLimits(account.provider); return; }
+    if (choice === offset + 2) {
+      const confirmation = await promptChoice(ctx, "Remove this account?", `Delete ${account.name}'s local credential files? The provider session is not revoked.`, [
+        "Keep account", "Delete local account & credentials"
       ]);
-      if (confirm === 1) await accounts.remove(account.name, ctx);
+      if (confirmation === 1) await accounts.remove(account.name, ctx);
+    }
+  };
+
+  const providerMenu = async (providerId: string): Promise<void> => {
+    while (true) {
+      const members = definitions().filter(account => account.provider === providerId);
+      const pin = accounts.policy().pinned?.[providerId];
+      const choices = [
+        `Switch / pin account · ${pin ?? "automatic"}`,
+        ...members.map(accountDescription),
+        `Add account to ${providerId}…`,
+        "Quota & limits",
+        "Back"
+      ];
+      const choice = await promptChoice(ctx, `Provider · ${providerId}`,
+        `${members.length} account(s) · ${accounts.policy().mode} routing · native Pi provider`, choices);
+      if (choice === undefined || choice === choices.length - 1) return;
+      try {
+        if (choice === 0) await switchAccount(providerId);
+        else if (choice <= members.length) await manageAccount(members[choice - 1]!);
+        else if (choice === members.length + 1) await add(providerId);
+        else await showLimits(providerId);
+      } catch (error) { notifyError(error); }
     }
   };
 
   while (true) {
-    let definitions: AccountDefinition[];
-    try { definitions = accounts.store.list(); }
-    catch (error) {
-      ctx.ui.notify("Cannot load private account storage: " + (error instanceof Error ? error.message : String(error)), "error");
-      return;
-    }
+    let members: AccountDefinition[];
+    try { members = definitions(); }
+    catch (error) { notifyError(error); return; }
+    const ids = [...new Set(members.map(account => account.provider))].sort();
     const policy = accounts.policy();
-    const health = accounts.router.status();
-    const rows = definitions.map(account => {
-      const status = health.find(row => row.name === account.name);
-      const remaining = status?.remaining === undefined ? "quota unknown" : `${status.remaining}% remaining`;
-      const cooldown = (status?.blockedUntil ?? 0) > Date.now() ? " · cooling down" : "";
-      return `${account.name} · ${account.provider} · ${remaining}${cooldown}`;
-    });
     const choices = [
-      "Add subscription account (Pi OAuth)",
-      "Add API-key account (environment variable)",
-      `Routing policy: ${policy.mode}`,
-      `Profile allowlist: ${policy.accounts.length ? policy.accounts.join(", ") : "all"}`,
-      ...rows,
+      "Connect another account…",
+      "Switch active account…",
+      `Routing policy · ${policy.mode}`,
+      `Profile access · ${policy.accounts.length ? policy.accounts.join(", ") : "all"}`,
+      "Quota & limits…",
+      ...ids.map(id => `${id} · ${members.filter(account => account.provider === id).length} accounts · ${policy.pinned?.[id] ? "pinned: " + policy.pinned[id] : "auto"}`),
       "Done"
     ];
-    const choice = await promptChoice(ctx, "Pi-Jar account manager", `${definitions.length} account(s) · routing: ${policy.mode} · no credentials are shown`, choices);
+    const choice = await promptChoice(ctx, "Pi-Jar accounts", `${members.length} identity/identities across ${ids.length} provider(s). Pi-native OAuth · ${policy.mode.toUpperCase()} routing.`, choices);
     if (choice === undefined || choice === choices.length - 1) return;
     try {
-      if (choice === 0) await addOAuth();
-      else if (choice === 1) await addKey();
-      else if (choice === 2) await chooseMode();
-      else if (choice === 3) await editAllowlist();
-      else await manageAccount(definitions[choice - 4]!);
-    } catch (error) {
-      ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-    }
+      if (choice === 0) await add();
+      else if (choice === 1) await switchAccount();
+      else if (choice === 2) await routingPolicy();
+      else if (choice === 3) await allowlist();
+      else if (choice === 4) await showLimits();
+      else await providerMenu(ids[choice - 5]!);
+    } catch (error) { notifyError(error); }
   }
 }
