@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { COMPOSER_ACTIVE_INTERVAL_MS } from "../src/composer.ts";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { EMBER_PALETTE, Mascot, MASCOT_FACE_WIDTH, MASCOT_TIP_WIDTH, MASCOT_SPRITE_WIDTH, MASCOT_SPRITE_HEIGHT, SLEEPY_AFTER_MS, mascotFace, mascotPixels, mascotSprite, mascotPerch, mascotTip, mascotSpark, paintFace, paintTip, type MascotMood } from "../src/mascot.ts";
+import { accentPalette, EMBER_PALETTE, Mascot, MASCOT_FRAME_MS, mascotPose, mascotPoseDelay, rgbTo256, MASCOT_FACE_WIDTH, MASCOT_TIP_WIDTH, MASCOT_SPRITE_WIDTH, MASCOT_SPRITE_HEIGHT, SLEEPY_AFTER_MS, mascotFace, mascotPixels, mascotSprite, mascotPerch, mascotTip, mascotSpark, paintFace, paintTip, type MascotMood } from "../src/mascot.ts";
 
 test("idle mascot schedules exact state transitions instead of polling", () => {
   const mascot = new Mascot(0, () => 0);
@@ -11,22 +11,51 @@ test("idle mascot schedules exact state transitions instead of polling", () => {
   assert.equal(mascot.nextTransitionDelay(3000), 180);
   assert.equal(mascot.mood(3180), "idle");
   assert.equal(mascot.nextTransitionDelay(3180), 3000);
-
   mascot.flash("poke", 500, 4000);
-  assert.equal(mascot.nextTransitionDelay(4000), 200, "an idle reaction schedules its next pose, not just its expiry");
-  assert.equal(mascot.nextTransitionDelay(4200), 300, "the last pose is bounded by flash expiry");
-  assert.notEqual(mascot.key(4000), mascot.key(4200), "hop poses participate in change detection");
+  const first = mascot.nextTransitionDelay(4000)!;
+  assert.ok(first >= 16 && first <= 240, "an idle reaction schedules its next pose, not just its expiry");
+  assert.equal(mascot.nextTransitionDelay(4400), 100, "the last pose is bounded by flash expiry");
   assert.ok((mascot.nextTransitionDelay(4500) ?? 0) > 600, "expired reactions return to sparse idle deadlines");
-
   mascot.setPhase("generating", 5000);
-  assert.equal(mascot.nextTransitionDelay(5000), undefined, "active phases are driven by the composer clock");
+  assert.equal(mascot.nextTransitionDelay(5000), undefined, "active phases are driven by the activity clock");
   mascot.setPhase("idle", 6000);
   assert.ok((mascot.nextTransitionDelay(6000) ?? 0) > 0);
   assert.equal(mascot.nextTransitionDelay(6000 + SLEEPY_AFTER_MS), undefined, "sleepy idle mascot stops scheduling work");
 });
-
-test("active composer animation is deliberately low frequency", () => {
-  assert.equal(COMPOSER_ACTIVE_INTERVAL_MS, 600);
+test("hops use uneven anticipation, airborne and landing holds instead of a uniform metronome", () => {
+  const changes: Array<[number, number]> = [];
+  let previous = -1;
+  for (let now = 0; now < 1500; now += 10) {
+    const pose = mascotPose("happy", now);
+    if (pose !== previous) { changes.push([now, pose]); previous = pose; }
+  }
+  assert.deepEqual(changes.map(([, pose]) => pose), [0, 1, 2, 1, 0]);
+  const holds = changes.slice(1).map(([at], index) => at - changes[index]![0]);
+  assert.ok(new Set(holds).size > 2, `holds vary: ${holds.join(",")}`);
+  assert.ok(Math.min(...holds) >= MASCOT_FRAME_MS, "no pose is shorter than the frame floor");
+  for (const now of [0, 650, 900, 5000]) assert.ok(mascotPoseDelay("thinking", now) > 0);
+});
+test("accent palette recolors Ember while keeping silhouette, contrast order and warm expressions", () => {
+  const teal = accentPalette([69, 221, 209]);
+  const luminance = (rgb: readonly number[]) => rgb[0]! * 0.2126 + rgb[1]! * 0.7152 + rgb[2]! * 0.0722;
+  assert.deepEqual(teal.b, [69, 221, 209]);
+  assert.ok(luminance(teal.o!) < luminance(teal.s!) && luminance(teal.s!) < luminance(teal.b!)
+    && luminance(teal.b!) < luminance(teal.f!) && luminance(teal.f!) < luminance(teal.h!));
+  assert.ok(teal.c![0]! > teal.c![2]!, "blush stays warm on cool accents");
+  const plain = (rows: string[]) => rows.map(stripTerminalSequences);
+  for (const truecolor of [true, false]) {
+    const accented = mascotSprite("happy", 0, truecolor, teal);
+    assert.deepEqual(plain(accented), plain(mascotSprite("happy", 0, truecolor)), "same silhouette");
+    assert.notDeepEqual(accented, mascotSprite("happy", 0, truecolor), "different colors");
+  }
+  assert.match(mascotSprite("idle", 0, true, teal).join(""), /38;2;69;221;209/);
+  assert.match(paintFace(mascotFace("idle"), "idle", undefined, true, teal), /38;2;69;221;209/);
+  assert.equal(rgbTo256([0, 0, 0]), 16);
+  assert.equal(rgbTo256([255, 255, 255]), 231);
+});
+test("mascot poses never redraw faster than the frame floor", () => {
+  assert.equal(COMPOSER_ACTIVE_INTERVAL_MS, MASCOT_FRAME_MS);
+  assert.ok(MASCOT_FRAME_MS >= 100);
 });
 
 const moods: MascotMood[] = ["idle", "blink", "happy", "thinking", "tool", "waiting", "sleepy", "error", "complete", "poke"];

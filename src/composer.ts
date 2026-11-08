@@ -1,6 +1,8 @@
 import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type EditorComponent, type EditorTheme, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { Mascot, MASCOT_FACE_WIDTH, MASCOT_SPRITE_WIDTH, MASCOT_FRAME_MS, mascotFace, mascotTip, mascotPerch, paintFace, paintTip, type MascotMood } from "./mascot.ts";
+import { accentPalette, Mascot, MASCOT_FACE_WIDTH, MASCOT_SPRITE_WIDTH, MASCOT_FRAME_MS, mascotFace, mascotPose, mascotTip, mascotPerch,
+  paintFace, paintTip, type MascotMood, type MascotPaint, type MascotPalette } from "./mascot.ts";
+import { colorToRgb, type Color } from "@earendil-works/pi-tui";
 import type { SuggestionState } from "./suggest.ts";
 import type { WorkingPhase } from "./working.ts";
 import { imageChip, imageInfo, imagePaths } from "./attachments.ts";
@@ -14,6 +16,8 @@ const keyHint = (key: IconKey, action: string) => glyph(key) + " " + action;
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 type EditorKeybindings = ConstructorParameters<typeof CustomEditor>[2];
+/** The parts of Pi's Theme the composer reads; `colors` is absent on minimal/legacy themes. */
+type ComposerTheme = { fg(color: string, text: string): string; colors?: { accent?: Color } };
 
 /** Show native bindings, including Pi's existing Ctrl+J fallback; never remap editor input. */
 function newlineHint(keybindings?: EditorKeybindings): string {
@@ -342,8 +346,26 @@ export class ComposerStyle {
   private readonly mascot = new Mascot();
   private suggestions?: SuggestionState;
   private unsubscribe?: () => void;
-  private colors?: { fg(color: string, text: string): string };
+  /** Read on every render so an accent/theme switch recolors without recreating the editor. */
+  private themeOf?: () => ComposerTheme | undefined;
+  private paletteCache?: { accent: Color; palette: MascotPalette };
   private keybindings?: EditorKeybindings;
+  private get colors(): ComposerTheme | undefined { return this.themeOf?.(); }
+  /** Ember wears the active theme's accent; themes without concrete colors keep the ember palette. */
+  private palette(): MascotPalette | undefined {
+    const accent = this.colors?.colors?.accent;
+    if (!accent) return undefined;
+    if (this.paletteCache?.accent === accent) return this.paletteCache.palette;
+    const value = colorToRgb(accent);
+    const palette = accentPalette([value.r, value.g, value.b]);
+    this.paletteCache = { accent, palette };
+    return palette;
+  }
+  private paintWith(): MascotPaint | undefined {
+    const theme = this.colors;
+    if (!theme) return undefined;
+    return (color, text) => theme.fg(color, text);
+  }
   /** Chips for the last draft; image paths hit the filesystem, so reuse them briefly across repaints. */
   private chips?: { text: string; cwd: string; at: number; chips: string[] };
 
@@ -354,7 +376,7 @@ export class ComposerStyle {
       if (!this.mascotOn) return undefined;
       if (this.fullSprite(width)) return undefined;
       const mood = this.animations ? this.mascot.mood() : "idle";
-      return paintFace(mascotFace(mood), mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined);
+      return paintFace(mascotFace(mood), mood, this.paintWith(), undefined, this.palette());
     },
     perch: (width) => this.tasksVisible ? undefined : this.renderMascot(width),
     session: () => this.session,
@@ -392,13 +414,44 @@ export class ComposerStyle {
   pokeMascot(): void { this.decor.poke(); }
   renderMascot(width: number): string[] | undefined {
     if (!this.mascotOn || width < 40) return undefined;
-    const mood = this.animations ? this.mascot.mood() : "idle";
-    const frame = this.animations ? Math.floor(Date.now() / COMPOSER_ACTIVE_INTERVAL_MS) : 0;
-    if (this.fullSprite(width)) {
-      return mascotPerch(mood, frame, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined)
-        .map(row => "   " + row);
+    let mood: MascotMood = "idle";
+    let pose = 0;
+    if (this.animations) {
+      const now = Date.now();
+      mood = this.mascot.mood(now);
+      pose = mascotPose(mood, now);
     }
-    return ["   " + paintTip(mascotTip(mood, frame), mood, this.colors ? (color, text) => this.colors!.fg(color, text) : undefined)];
+    const full = this.fullSprite(width);
+    const palette = this.palette();
+    const theme = this.colors;
+    // Pi repaints the composer for every streamed token; the sprite only changes with its pose.
+    const cached = this.perchCache;
+    if (cached && cached.mood === mood && cached.pose === pose && cached.full === full && cached.palette === palette && cached.theme === theme) {
+      return cached.rows;
+    }
+    let rows: string[];
+    if (full) rows = mascotPerch(mood, pose, this.paintWith(), undefined, palette ?? undefined).map(row => "   " + row);
+    else rows = ["   " + paintTip(mascotTip(mood, pose), mood, this.paintWith(), undefined, palette)];
+    this.perchCache = { mood, pose, full, palette, theme, rows };
+    return rows;
+  }
+  private perchCache?: { mood: MascotMood; pose: number; full: boolean; palette?: MascotPalette; theme?: ComposerTheme; rows: string[] };
+
+  /**
+   * While a turn runs, when the next pose or mood can change, if the mascot animates at all.
+   * The activity clock uses this so motion stays smooth without a separate render loop.
+   */
+  nextActiveFrameDelay(now = Date.now()): number | undefined {
+    if (!this.enabled || !this.animations || !this.mascotOn || this.phase === "idle") return undefined;
+    return this.mascot.activeDelay(now);
+  }
+  /** Repaint only when the visible mascot pose actually changed. */
+  tick(now = Date.now()): void {
+    if (!this.enabled || !this.mascotOn) return;
+    const key = this.mascot.key(now);
+    if (key === this.lastKey) return;
+    this.lastKey = key;
+    this.tui?.requestRender();
   }
 
   /** Keep short/narrow terminals usable; the pet and mood spark reserve six rows. */
@@ -491,7 +544,7 @@ export class ComposerStyle {
       const factory: EditorFactory = (tui, theme, keys) => {
         this.tui = tui;
         this.keybindings = keys;
-        this.colors = ctx.ui.theme;
+        this.themeOf = () => ctx.ui.theme as ComposerTheme | undefined;
         const paint = (text: string) => ctx.ui.theme?.fg("accent", text) ?? theme.borderColor(text);
         return previous
           ? new ThemedEditor(previous(tui, theme, keys), theme, paint, this.decor)

@@ -28,8 +28,76 @@ const TIPS: Record<MascotMood, readonly string[]> = {
 export const MASCOT_FACE_WIDTH = 5;
 export const MASCOT_TIP_WIDTH = 5;
 export const SLEEPY_AFTER_MS = 120_000;
-export const MASCOT_FRAME_MS = 600;
+/** Shortest pose in any timeline; also the floor for reaction scheduling while Pi is idle. */
+export const MASCOT_FRAME_MS = 120;
 const BLINK_MS = 180;
+
+/**
+ * Pose timelines in milliseconds. Uneven holds read as natural motion: anticipation (squash),
+ * a short airborne beat, a quick landing, then a longer rest, instead of a uniform metronome.
+ * Poses: 0 rest, 1 squash/sway, 2 airborne (hop moods) or opposite glance, 3 settle.
+ */
+const TIMELINES: Record<MascotMood, readonly (readonly [pose: number, ms: number])[]> = {
+  idle: [[0, 1000]], blink: [[0, 1000]], sleepy: [[0, 1400], [1, 1400]],
+  happy: [[0, 640], [1, 140], [2, 240], [1, 120], [0, 360]],
+  complete: [[0, 360], [1, 120], [2, 260], [1, 120]],
+  poke: [[1, 120], [2, 220], [1, 120], [0, 240]],
+  thinking: [[0, 900], [1, 260], [2, 900], [3, 260]],
+  tool: [[0, 280], [1, 200], [0, 280], [3, 200]],
+  waiting: [[0, 1200], [1, 420]],
+  error: [[0, 420], [1, 120], [0, 160], [1, 120], [0, 600]]
+};
+const timelineLength = (mood: MascotMood) => TIMELINES[mood].reduce((total, [, ms]) => total + ms, 0);
+
+/** Pose for `mood` at wall time `now`; deterministic so every render agrees without a timer. */
+export function mascotPose(mood: MascotMood, now: number): number {
+  return poseAt(mood, now).pose;
+}
+/** Milliseconds until `mood` changes pose at `now`. */
+export function mascotPoseDelay(mood: MascotMood, now: number): number {
+  return poseAt(mood, now).remaining;
+}
+function poseAt(mood: MascotMood, now: number): { pose: number; remaining: number } {
+  const total = timelineLength(mood);
+  let offset = ((Math.floor(now) % total) + total) % total;
+  for (const [pose, ms] of TIMELINES[mood]) {
+    if (offset < ms) return { pose, remaining: ms - offset };
+    offset -= ms;
+  }
+  return { pose: 0, remaining: total };
+}
+
+export type Rgb = readonly [number, number, number];
+/** Pixel key to color: outline, shadow, body, face, highlight, blush, eye, glint, mouth. */
+export type MascotPalette = Readonly<Record<string, Rgb>>;
+
+const mix = (from: Rgb, to: Rgb, amount: number): Rgb =>
+  [0, 1, 2].map(index => Math.round(from[index]! + (to[index]! - from[index]!) * amount)) as unknown as Rgb;
+const BLACK: Rgb = [12, 8, 10];
+const WHITE: Rgb = [255, 252, 245];
+
+/**
+ * Ember in the selected accent: the accent becomes the body, darker steps shade and outline it,
+ * lighter steps form the face and highlight. Blush and mouth stay warm so expressions stay legible.
+ */
+export function accentPalette(accent: Rgb): MascotPalette {
+  const warm: Rgb = [255, 128, 112];
+  return {
+    o: mix(accent, BLACK, 0.62), s: mix(accent, BLACK, 0.3), b: accent, f: mix(accent, WHITE, 0.38),
+    h: mix(accent, WHITE, 0.68), c: mix(warm, accent, 0.25), k: mix(accent, BLACK, 0.84), w: WHITE,
+    m: mix([196, 62, 52], accent, 0.2)
+  };
+}
+const hex = (color: Rgb) => "#" + color.map(channel => channel.toString(16).padStart(2, "0")).join("");
+/** Nearest xterm-256 cube color, for terminals without truecolor. */
+export function rgbTo256(color: Rgb): number {
+  const level = (channel: number) => {
+    if (channel < 48) return 0;
+    if (channel < 115) return 1;
+    return Math.min(5, Math.floor((channel - 35) / 40));
+  };
+  return 16 + 36 * level(color[0]) + 6 * level(color[1]) + level(color[2]);
+}
 
 export function mascotFace(mood: MascotMood): string { return "▐" + FACES[mood] + "▌"; }
 
@@ -63,7 +131,7 @@ const BODY = [
   "..ooooooo.."
 ] as const;
 /** Outline, shadow, orange body, golden face, highlight, blush, eye, glint and mouth. */
-export const EMBER_PALETTE: Readonly<Record<string, readonly [number, number, number]>> = {
+export const EMBER_PALETTE: MascotPalette = {
   o: [113, 42, 18], s: [198, 76, 24], b: [255, 139, 38], f: [255, 197, 79],
   h: [255, 231, 154], c: [255, 128, 112], k: [58, 28, 20], w: [255, 249, 230], m: [196, 62, 52]
 };
@@ -111,11 +179,15 @@ export function mascotPixels(mood: MascotMood, frame = 0): string[] {
 }
 
 /** Two square pixels per terminal cell, like pixel-pet: colored half-blocks, not text-face glyphs. */
-export function mascotSprite(mood: MascotMood, frame = 0, truecolor = supportsTruecolor()): string[] {
+export function mascotSprite(mood: MascotMood, frame = 0, truecolor = supportsTruecolor(), palette: MascotPalette = EMBER_PALETTE): string[] {
   const pixels = mascotPixels(mood, frame);
+  const indexed = (pixel: string) => {
+    if (palette === EMBER_PALETTE) return EMBER_256[pixel];
+    return rgbTo256(palette[pixel]!);
+  };
   const color = (pixel: string, background: boolean) => truecolor
-    ? `\x1b[${background ? 48 : 38};2;${EMBER_PALETTE[pixel]!.join(";")}m`
-    : `\x1b[${background ? 48 : 38};5;${EMBER_256[pixel]}m`;
+    ? `\x1b[${background ? 48 : 38};2;${palette[pixel]!.join(";")}m`
+    : `\x1b[${background ? 48 : 38};5;${indexed(pixel)}m`;
   const rows: string[] = [];
   for (let y = 0; y < MASCOT_SPRITE_HEIGHT; y += 2) {
     let row = "";
@@ -132,8 +204,8 @@ export function mascotSprite(mood: MascotMood, frame = 0, truecolor = supportsTr
 }
 
 /** A hop uses the existing spark row as headroom, never moving the editor below it. */
-export function mascotPerch(mood: MascotMood, frame = 0, paint?: MascotPaint, truecolor = supportsTruecolor()): string[] {
-  const sprite = mascotSprite(mood, frame, truecolor);
+export function mascotPerch(mood: MascotMood, frame = 0, paint?: MascotPaint, truecolor = supportsTruecolor(), palette: MascotPalette = EMBER_PALETTE): string[] {
+  const sprite = mascotSprite(mood, frame, truecolor, palette);
   if (hopMood(mood) && poseFrame(frame) === 2) return [...sprite, " ".repeat(MASCOT_SPRITE_WIDTH)];
   const spark = mascotSpark(mood, frame);
   return [paint ? paint(mood === "sleepy" ? "dim" : "accent", spark) : spark, ...sprite];
@@ -193,7 +265,7 @@ export class Mascot {
     const current = this.mood(now);
     if (this.flashMood && now < this.flashMood.until) {
       // Only transient reactions need timed pose frames while Pi is idle; stop on expiry.
-      return Math.max(16, Math.min(this.flashMood.until - now, MASCOT_FRAME_MS - now % MASCOT_FRAME_MS));
+      return Math.max(16, Math.min(this.flashMood.until - now, mascotPoseDelay(current, now)));
     }
     if (this.phase !== "idle") return undefined;
     const sleepyAt = this.lastActive + SLEEPY_AFTER_MS;
@@ -203,27 +275,56 @@ export class Mascot {
   }
 
   /** Visual identity for change detection (avoids needless renders). */
-  key(now = Date.now(), frame = Math.floor(now / MASCOT_FRAME_MS)): string {
+  key(now = Date.now()): string {
     const mood = this.mood(now);
-    return mood + ":" + mascotTip(mood, frame) + ":" + mascotPerch(mood, frame).join("");
+    return mood + ":" + mascotPose(mood, now);
+  }
+
+  /** Milliseconds until the visible pose or mood can change while active. */
+  activeDelay(now = Date.now()): number {
+    return Math.max(16, mascotPoseDelay(this.mood(now), now));
   }
 }
 
 /** Colorize the face; truecolor terminals get the flame palette, others theme colors. */
-export function paintFace(face: string, mood: MascotMood, paint?: MascotPaint, truecolor = supportsTruecolor()): string {
-  const shell = mood === "error" ? FLAME_RAMP[4] : FLAME_RAMP[6];
-  const eyes = mood === "error" ? FLAME_RAMP[5] : mood === "sleepy" ? FLAME_RAMP[7] : FLAME_RAMP[9];
-  if (!truecolor) return paint ? paint(mood === "error" ? "error" : "warning", face) : face;
+export function paintFace(face: string, mood: MascotMood, paint?: MascotPaint, truecolor = supportsTruecolor(), palette?: MascotPalette): string {
+  let shell: string = mood === "error" ? FLAME_RAMP[4] : FLAME_RAMP[6];
+  let eyes: string = mood === "error" ? FLAME_RAMP[5] : mood === "sleepy" ? FLAME_RAMP[7] : FLAME_RAMP[9];
+  if (palette) {
+    shell = hex(mood === "error" ? palette.s! : palette.b!);
+    eyes = hex(mood === "error" ? palette.c! : mood === "sleepy" ? palette.f! : palette.h!);
+  }
+  if (!truecolor) {
+    if (!paint) return face;
+    if (mood === "error") return paint("error", face);
+    if (palette) return paint("accent", face);
+    return paint("warning", face);
+  }
   return rgb(shell!, face[0]!) + rgb(eyes!, face.slice(1, -1)) + rgb(shell!, face.at(-1)!);
 }
 
-export function paintTip(tip: string, mood: MascotMood, paint?: MascotPaint, truecolor = supportsTruecolor()): string {
-  if (!truecolor) return paint ? paint(mood === "sleepy" ? "dim" : "warning", tip) : tip;
+export function paintTip(tip: string, mood: MascotMood, paint?: MascotPaint, truecolor = supportsTruecolor(), palette?: MascotPalette): string {
+  if (!truecolor) {
+    if (!paint) return tip;
+    if (mood === "sleepy") return paint("dim", tip);
+    if (palette) return paint("accent", tip);
+    return paint("warning", tip);
+  }
+  let core: string = mood === "error" ? FLAME_RAMP[5] : FLAME_RAMP[8];
+  let spark: string = FLAME_RAMP[9];
+  let mark: string = FLAME_RAMP[7];
+  let edge: string = mood === "sleepy" ? FLAME_RAMP[4] : FLAME_RAMP[6];
+  if (palette) {
+    core = hex(mood === "error" ? palette.c! : palette.f!);
+    spark = hex(palette.h!);
+    mark = hex(palette.f!);
+    edge = hex(mood === "sleepy" ? palette.s! : palette.b!);
+  }
   return [...tip].map((char) => {
     if (char === " ") return char;
-    if (char === "█" || char === "▀") return rgb(mood === "error" ? FLAME_RAMP[5]! : FLAME_RAMP[8]!, char);
-    if (char === "·") return rgb(FLAME_RAMP[9]!, char);
-    if (char === "z" || char === "?") return rgb(FLAME_RAMP[7]!, char);
-    return rgb(mood === "sleepy" ? FLAME_RAMP[4]! : FLAME_RAMP[6]!, char);
+    if (char === "█" || char === "▀") return rgb(core, char);
+    if (char === "·") return rgb(spark, char);
+    if (char === "z" || char === "?") return rgb(mark, char);
+    return rgb(edge, char);
   }).join("");
 }

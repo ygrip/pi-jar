@@ -364,7 +364,7 @@ test("standalone flame above large π freezes on motion-off and replays safely",
   }
 });
 
-test("Pi lifecycle keeps working UI static and event-driven in long sessions", async () => {
+for (const [label, entries, animated] of [["small", 0, true], ["long", 900, false]] as const) test(`Pi lifecycle keeps working UI event-driven and bounded in ${label} sessions`, async () => {
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
   const intervals = new Set<{ callback: () => void }>();
@@ -381,15 +381,17 @@ test("Pi lifecycle keeps working UI static and event-driven in long sessions", a
     let command: Function | undefined;
     let message: string | undefined;
     let frames: string[] = [];
+    let intervalMs: number | undefined;
+    const branch = Array.from({ length: entries }, () => ({ type: "message", message: { role: "assistant" } }));
     const ctx = {
       hasUI: true, mode: "tui", isIdle: () => true,
       model: { provider: "test", id: "test" },
-      sessionManager: { getBranch: () => [] },
+      sessionManager: { getBranch: () => branch },
       getContextUsage: () => ({ percent: 0 }),
       ui: {
         theme: { fg: (_color: string, text: string) => text },
         setWorkingMessage(value?: string) { message = value; },
-        setWorkingIndicator(value?: { frames: string[] }) { frames = value?.frames ?? []; },
+        setWorkingIndicator(value?: { frames: string[]; intervalMs?: number }) { frames = value?.frames ?? []; intervalMs = value?.intervalMs; },
         setWidget() {}, setFooter() {}, notify() {}
       }
     };
@@ -404,7 +406,10 @@ test("Pi lifecycle keeps working UI static and event-driven in long sessions", a
     assert.equal(intervals.size, 0);
     events.get("agent_start")?.({}, ctx);
     assert.match(message ?? "", /esc to interrupt/);
-    assert.equal(frames.length, 1, "working indicator is static; native Pi renders drive updates");
+    if (animated) {
+      assert.ok(frames.length > 1, "small sessions show a moving spinner");
+      assert.ok((intervalMs ?? 0) >= 160, "spinner runs at a bounded cadence");
+    } else assert.equal(frames.length, 1, "long sessions keep a static spinner; each frame redraws the transcript");
     assert.equal(intervals.size, 0, "working state adds no repaint loop");
     events.get("message_end")?.({ message: { role: "assistant", usage: { output: 1700, cost: { total: 0.01 } } } }, ctx);
     assert.match(message ?? "", /↓ 1\.7k tokens/);
