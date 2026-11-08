@@ -349,7 +349,10 @@ test("explicit recovery only removes empty abandoned account reservations", { ti
   accounts.store.reserve("previous"); // Name is reusable.
   const protectedPath = join(accounts.store.root, "previous", "auth.json");
   writeFileSync(protectedPath, "keep-secret-safe", { mode: 0o600 });
-  await assert.rejects(() => accounts.command("recover previous", ctx as never), /contains files/);
-  assert.equal(existsSync(protectedPath), true, "never delete partial OAuth credentials without inspection");
+  await assert.rejects(() => accounts.command("recover previous", ctx as never), /contains an unreadable auth file/);
+  assert.equal(existsSync(protectedPath), true, "never delete unreadable OAuth credentials without inspection");
+  writeFileSync(protectedPath, JSON.stringify({ "openai-codex": { type: "oauth", access: "placeholder" } }), { mode: 0o600 });
+  await assert.rejects(() => accounts.command("recover previous", ctx as never), /contains credential data/);
+  assert.equal(existsSync(protectedPath), true, "never delete populated OAuth credentials");
   await assert.rejects(() => accounts.command("recover ..\\/escaped", ctx as never), /names must/);
 });
