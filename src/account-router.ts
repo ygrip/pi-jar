@@ -118,8 +118,11 @@ export class AccountRouter {
   /** `settings` is the policy captured when the request was dispatched; retries reuse it. */
   private async select(provider: Provider, model: AnyModel, tried: Set<string>, settings: AccountRoutingSettings, signal?: AbortSignal): Promise<AccountState> {
     if (this.configurationError) throw new RoutingError(this.configurationError);
+    const pinnedName = settings.pinned?.[provider.id];
     const accounts = this.store.list().filter(account => account.provider === provider.id
-      && (!settings.accounts.length || settings.accounts.includes(account.name)) && !tried.has(account.name));
+      && (!settings.accounts.length || settings.accounts.includes(account.name))
+      && (!pinnedName || account.name === pinnedName)
+      && !tried.has(account.name));
     const states = accounts.map(account => this.state(account, provider));
     await Promise.all(states.map(state => this.refreshQuota(state, signal)));
     signal?.throwIfAborted();
