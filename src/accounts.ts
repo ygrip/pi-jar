@@ -3,6 +3,8 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { AccountStore, type AccountDefinition } from "./account-store.ts";
 import { AccountRouter } from "./account-router.ts";
 import { QUOTA_PREFIX, QUOTA_TTL_MS } from "./quota.ts";
+import { promptText } from "./dialogs.ts";
+import { cleanText } from "./status.ts";
 import { ACCOUNT_ROUTING_ENV, ACCOUNT_ROUTING_MODES, parseAccountRouting, type AccountRoutingSettings } from "./account-settings.ts";
 
 /** Parent settings are captured at each child launch; no secrets travel in the environment. */
@@ -28,6 +30,7 @@ export class Accounts {
     this.router = new AccountRouter(this.store, settings);
   }
   environment(): Record<string, string> { return { [ACCOUNT_ROUTING_ENV]: JSON.stringify(this.settings()) }; }
+  policy(): AccountRoutingSettings { return this.settings(); }
   /**
    * Credential variables a subagent must not inherit: keys of environment-backed accounts the
    * routing allowlist excludes. Variables also used by an allowed account stay. With routing off
@@ -102,28 +105,55 @@ export class Accounts {
     // Publish account-backed availability before default/profile role activation; no catalog IO.
     await ctx.modelRegistry.refresh({ providers: [...this.originals.keys()], allowNetwork: false });
   }
-  private interaction(ctx: ExtensionContext): AuthInteraction {
+  private interaction(ctx: ExtensionContext, preferDeviceCode = false): AuthInteraction {
     return {
       prompt: async prompt => {
         prompt.signal?.throwIfAborted();
         if (prompt.type === "secret") throw new Error("Use an environment-backed account for API keys");
         let value: string | undefined;
         if (prompt.type === "select") {
-          const labels = prompt.options.map(option => option.label);
-          const selected = await ctx.ui.select(prompt.message, labels);
-          value = prompt.options.find(option => option.label === selected)?.id;
+          // The provider owns the available login methods. In headless/SSH terminals,
+          // prefer its native device-code flow instead of a localhost browser callback.
+          if (preferDeviceCode) {
+            const device = prompt.options.find(option => option.id === "device_code");
+            if (!device) throw new Error("This provider does not offer a native device-code login");
+            value = device.id;
+          } else {
+            const labels = prompt.options.map(option => option.label);
+            const selected = await ctx.ui.select(prompt.message, labels);
+            value = prompt.options.find(option => option.label === selected)?.id;
+          }
+        } else if (prompt.type === "manual_code") {
+          // Unlike ctx.ui.input(), this popup can close itself when Pi's local OAuth
+          // callback wins the race. The native provider parses the pasted redirect URL.
+          value = await promptText(ctx, "Complete provider sign-in", prompt.message, "", prompt.signal);
         } else value = await ctx.ui.input(prompt.message, prompt.placeholder);
         prompt.signal?.throwIfAborted();
         if (value === undefined) throw new Error("Account login cancelled");
         return value;
       },
       notify: event => {
-        if (event.type === "auth_url") ctx.ui.notify(`Open to sign in: ${event.url}`, "info");
-        else if (event.type === "device_code") ctx.ui.notify(`Open ${event.verificationUri} and enter ${event.userCode}`, "info");
+        if (event.type === "auth_url") ctx.ui.notify(
+          `Open this login URL in your browser: ${event.url}\nIf the localhost callback is not reachable (SSH/container), paste the full redirected URL in the next prompt, or retry using device-code login.`, "info");
+        else if (event.type === "device_code") ctx.ui.notify(
+          `Open ${event.verificationUri} and enter code ${event.userCode}. Pi is waiting for confirmation.`, "info");
         else if (event.type === "info" || event.type === "progress") ctx.ui.notify(event.message, "info");
       }
     };
   }
+  /** Remove only the selected account's private storage; never touch Pi's primary login. */
+  async remove(name: string, ctx: ExtensionContext): Promise<void> {
+    if (!ctx.isIdle()) throw new Error("Wait until the current model request finishes before removing an account");
+    this.store.remove(name);
+    this.router.invalidate(name);
+    const current = this.settings();
+    if (current.accounts.includes(name)) {
+      this.update({ ...current, accounts: current.accounts.filter(item => item !== name) }, ctx);
+    }
+    await this.ready(ctx);
+    ctx.ui.notify(`Account ${name} removed locally. Revoke its OAuth session at the provider if you also want to revoke access.`, "info");
+  }
+
   async routing(args: string, ctx: ExtensionContext): Promise<void> {
     const choice = args.trim().toLowerCase();
     if (!choice || choice === "status") return this.command("list", ctx);
@@ -167,29 +197,36 @@ export class Accounts {
       this.update({ ...this.settings(), accounts }, ctx);
       return;
     }
-    if (!["add", "login"].includes(action) || !providerId || !name || extra.length
-      || (action === "add" && (!env || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(env))) || (action === "login" && env)) {
-      throw new Error("Usage: /jar accounts [list|mode off/sticky/round-robin/quota-first|use all/name1,name2|add PROVIDER NAME ENV_VAR|login PROVIDER NAME]");
+    if (!["add", "login", "login-device"].includes(action) || !providerId || !name || extra.length
+      || (action === "add" && (!env || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(env))) || (action !== "add" && env)) {
+      throw new Error("Usage: /jar accounts [manage|list|mode off/sticky/round-robin/quota-first|use all/name1,name2|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
     }
     if (!ctx.isIdle()) throw new Error("Wait for active model work before adding an account");
     const provider = this.originals.get(providerId) ?? ctx.modelRegistry.getProvider(providerId);
     if (!provider) throw new Error("Unknown provider");
-    if (action === "login" && !ctx.hasUI) throw new Error("OAuth account login requires an interactive session");
-    if (action === "login" && !provider.auth.oauth) throw new Error("This provider has no OAuth login; use an environment-backed account");
+    if (action !== "add" && (!ctx.hasUI || ctx.mode !== "tui")) throw new Error("OAuth account login requires an interactive Pi terminal");
+    if (action !== "add" && !provider.auth.oauth) throw new Error("This provider has no OAuth login; use an environment-backed account");
     if (action === "add" && !provider.auth.apiKey) throw new Error("This provider does not support API-key accounts");
     if (env && !process.env[env]) throw new Error("Set the account environment variable before adding it");
     const account: AccountDefinition = { version: 1, name, provider: providerId, auth: "oauth" };
     if (action === "add") { account.auth = "env"; account.env = env; }
     const existing = this.store.list().find(item => item.name === name);
-    if (existing && (action !== "login" || existing.provider !== providerId || existing.auth !== "oauth")) {
+    if (existing && (action === "add" || existing.provider !== providerId || existing.auth !== "oauth")) {
       throw new Error("Account name already belongs to another account");
     }
     // Leave an unactivated private directory after interrupted first login; never delete credentials implicitly.
     if (!existing) this.store.reserve(name);
-    if (action === "login") {
+    if (action !== "add") {
       const models = await this.store.models(account, provider);
-      try { await models.login(providerId, "oauth", this.interaction(ctx)); }
-      catch { throw new Error(`Account login did not finish; no new account was activated. Retry an existing account, or use a new name for an interrupted first login (${name}).`); }
+      try {
+        // Reuse Pi's public login API and the provider's own OAuth flow, credential
+        // persistence, refresh handling, and installation identity.
+        await models.login(providerId, "oauth", this.interaction(ctx, action === "login-device"),
+          { getDeviceId: () => this.store.deviceId() });
+      } catch (error) {
+        const reason = cleanText(error instanceof Error ? error.message : String(error), 220);
+        throw new Error(`Account login failed (${name}): ${reason}. The main Pi login was not modified. If browser authorization fails, retry with /jar accounts login-device ${providerId} ${name}.`);
+      }
     }
     if (!existing) this.store.save(account);
     if (existing) this.store.saveHealth(name, {});
