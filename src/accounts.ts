@@ -149,6 +149,9 @@ export class Accounts {
       if (!account || account.provider !== providerId) {
         throw new Error(`Account ${name} is not configured for provider ${providerId}`);
       }
+      if (!this.store.hasCredentials(account)) {
+        throw new Error(`Account ${name} has no available credentials. Sign in again or restore its environment variable first`);
+      }
       if (current.accounts.length && !current.accounts.includes(name)) {
         throw new Error(`Account ${name} is excluded by this profile's allowlist`);
       }
@@ -162,6 +165,20 @@ export class Accounts {
     this.update(Object.keys(nextPinned).length ? { ...rest, pinned: nextPinned } : rest, ctx);
     ctx.ui.notify(name ? `Pinned ${providerId} to ${name} (no automatic failover to another account for this provider)`
       : `Automatic account selection restored for ${providerId}`, "info");
+  }
+
+  /** Sign out without touching another provider or Pi's primary credentials. */
+  async logout(name: string, ctx: ExtensionContext): Promise<void> {
+    if (!ctx.isIdle()) throw new Error("Finish the current model request before signing out");
+    this.store.logout(name);
+    this.router.invalidate(name);
+    const current = this.settings();
+    const pins = Object.fromEntries(Object.entries(current.pinned ?? {})
+      .filter(([, account]) => account !== name));
+    const { pinned: _previous, ...rest } = current;
+    this.update(Object.keys(pins).length ? { ...rest, pinned: pins } : rest, ctx);
+    await this.ready(ctx);
+    ctx.ui.notify(`Signed out ${name} locally. The account label remains available for reconnecting.`, "info");
   }
 
   /** Remove only the selected account's private storage; never touch Pi's primary login. */
@@ -207,6 +224,10 @@ export class Accounts {
       ctx.ui.notify(`Account routing: ${this.settings().mode}\n${rows.join("\n") || "No accounts configured"}`, "info");
       return;
     }
+    if (action === "logout" && providerId && !name) {
+      await this.logout(providerId, ctx);
+      return;
+    }
     if (action === "pin" && providerId && name && !env && !extra.length) {
       this.pin(providerId, name, ctx);
       return;
@@ -237,7 +258,7 @@ export class Accounts {
     }
     if (!["add", "login", "login-device"].includes(action) || !providerId || !name || extra.length
       || (action === "add" && (!env || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(env))) || (action !== "add" && env)) {
-      throw new Error("Usage: /jar accounts [manage|list|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
+      throw new Error("Usage: /jar accounts [manage|list|logout NAME|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
     }
     if (!ctx.isIdle()) throw new Error("Wait for active model work before adding an account");
     const provider = this.originals.get(providerId) ?? ctx.modelRegistry.getProvider(providerId);
