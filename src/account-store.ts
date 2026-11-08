@@ -1,4 +1,5 @@
-import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Provider } from "@earendil-works/pi-ai";
@@ -84,6 +85,47 @@ export class AccountStore {
     }
     return accounts;
   }
+  /**
+   * Share Pi's installation identity when its global settings already have one.
+   * Otherwise persist a private stable ID for native provider login flows that need it.
+   * Never modify Pi's own settings or primary credentials.
+   */
+  deviceId(): string {
+    try {
+      const raw = JSON.parse(readFileSync(join(this.root, "..", "settings.json"), "utf8")) as { deviceId?: unknown };
+      if (typeof raw?.deviceId === "string" && /^[\da-f-]{36}$/i.test(raw.deviceId)) return raw.deviceId;
+    } catch { /* Pi has not assigned an installation ID yet. */ }
+    this.ensureRoot();
+    const path = join(this.root, "device-id");
+    try {
+      privatePath(path, false);
+      const id = readFileSync(path, "utf8").trim();
+      if (!/^[\da-f-]{36}$/i.test(id)) throw new Error("Invalid private account device ID");
+      return id;
+    } catch (error) { if (!missing(error)) throw error; }
+    const id = randomUUID();
+    try { writeFileSync(path, id + "\n", { flag: "wx", mode: 0o600 }); return id; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return this.deviceId();
+      throw error;
+    }
+  }
+
+  /** Remove one account's private credentials, never Pi's main login or arbitrary files. */
+  remove(name: string): void {
+    if (!this.list().some(account => account.name === name)) throw new Error("Unknown account: " + name);
+    const directory = this.directory(name);
+    privatePath(directory, true);
+    const files = readdirSync(directory);
+    const expected = new Set(["account.json", "auth.json", "health.json"]);
+    for (const file of files) {
+      if (!expected.has(file)) throw new Error(`Account ${name} has unexpected files or active locks; close other Pi sessions before removing it`);
+      privatePath(join(directory, file), false);
+    }
+    for (const file of files) unlinkSync(join(directory, file));
+    rmdirSync(directory);
+  }
+
   /** Reserve the name before login so two sessions cannot silently overwrite an account. */
   reserve(name: string): void {
     this.ensureRoot();
