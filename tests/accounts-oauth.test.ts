@@ -61,9 +61,19 @@ test("native OAuth refresh is locked per account, quota probes coalesce, main lo
   const runtime = createModels({ credentials: primary }); runtime.setProvider(router.wrap(provider));
   const results = await Promise.all(Array.from({ length: 4 }, () => runtime.streamSimple(model, context).result()));
   assert.ok(results.every(result => result.stopReason === "stop"));
-  assert.deepEqual(calls, Array(4).fill("b-fresh"));
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every(key => ["a-fresh", "b-fresh"].includes(key)),
+    "only named account credentials are routed, even before async quota checks complete");
   assert.deepEqual(refreshed.sort(), ["a", "b"]);
+  // The first request must not await quota IO. Once background probes finish,
+  // the next request can rank the cached quota snapshot deterministically.
+  for (let i = 0; i < 40 && !["a", "b"].every(name => store.health(name).checkedAt); i++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(["a", "b"].every(name => store.health(name).checkedAt), "quota probes eventually populate shared health");
   assert.equal(lookups, 2);
+  await runtime.streamSimple(model, context).result();
+  assert.equal(calls.at(-1), "b-fresh", "quota-first uses cached remaining capacity");
   assert.deepEqual(await primary.read("anthropic"), main);
   assert.match(readFileSync(join(store.root, "b", "auth.json"), "utf8"), /b-fresh/);
   assert.doesNotMatch(readFileSync(join(store.root, "b", "account.json"), "utf8"), /refresh|fresh/);
@@ -92,11 +102,13 @@ test("native OAuth refresh is locked per account, quota probes coalesce, main lo
   const abort = new AbortController();
   const cancelled = waiting.streamSimple(model, context, { signal: abort.signal }).result();
   const healthy = waiting.streamSimple(model, context).result();
-  await ready; abort.abort();
+  abort.abort();
+  await ready;
   assert.equal((await cancelled).stopReason, "aborted");
-  release();
+  // The healthy request completes while quota fetch is still deliberately held.
   assert.equal((await healthy).stopReason, "stop");
   assert.equal(pendingLookups, 2);
+  release();
 
   // Regression: two OAuth subscriptions from the SAME provider must keep their
   // native Pi credential stores isolated while rotating and enforcing allowlists.
