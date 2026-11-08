@@ -4,6 +4,8 @@ Route a selected model across accounts **of the same provider** without creating
 
 ## Set up accounts
 
+Open the interactive manager with **`/jar accounts`**. Its searchable menu supports keyboard and mouse navigation and lets you add OAuth/API-key accounts, renew logins, view status, change routing policy or profile allowlists, and remove local credentials. **`/jar accounts list`** shows the same account status without opening the manager. All commands below remain available for scripting/manual use.
+
 For subscriptions, sign in independently for each account:
 
 ```text
@@ -12,7 +14,11 @@ For subscriptions, sign in independently for each account:
 /jar accounts mode sticky
 ```
 
-Open the sign-in URL shown by Pi and complete the provider's flow. Use the correct browser account/profile for each login. Anthropic and other providers with a native OAuth login also work. Repeating `login PROVIDER NAME` renews an existing OAuth account; it never imports/copies Pi's main login or its refresh token. An interrupted first login leaves an unactivated private directory; retry with a new name rather than silently overwriting credentials.
+Pi-Jar delegates authentication to **Pi's native `ModelRuntime.login()` and the provider's own OAuth flow**, using the same built-in method selection, authorization URLs, credential persistence and refresh logic as Pi's `/login`. Each named account gets a separate private credential file, so the main Pi login is neither copied nor overwritten.
+
+**Browser login troubleshooting:** For OpenAI Codex, choose **Device code** in Pi's provider login-method prompt, or run `/jar accounts login-device openai-codex work`. Open the verification URL on any browser and enter the displayed code. This avoids the `localhost:1455` callback, which may not reach Pi over SSH, containers or remote development. If using browser login, open the full authorization URL and, if the callback does not reach Pi, paste the **full redirected URL or authorization code** into the manual-code prompt. Pi-Jar now closes that prompt when the native callback succeeds instead of leaving a blocked modal behind. The provider must support device code for `login-device`.
+
+Use the correct browser account/profile for each login. Anthropic and other providers with a native OAuth login also work. Repeating `login PROVIDER NAME` renews an existing OAuth account; it never imports/copies Pi's main login or its refresh token. An interrupted first login leaves an unactivated private directory; retry with a new name rather than silently overwriting credentials.
 
 For API keys, first supply distinct environment variables through your normal secret manager or shell environment, then reference their **names**, not their values:
 
@@ -32,6 +38,8 @@ Enable or disable routing directly:
 /jar routing off
 /jar routing status
 ```
+
+To remove a configured account, open `/jar accounts`, select the account, and choose **Remove local account and credentials**. Confirm explicitly. Removal checks that the private directory contains only known account files and refuses to delete it while lock or unexpected files remain. It does not revoke the provider session; revoke it at the provider when needed.
 
 `on` keeps an already-active policy, or selects sticky when routing was off. `off` restores the original provider/authentication. These settings apply to the active profile. To select a particular policy, use `/jar routing quota-first` (also accepts `sticky` and `round-robin`).
 
