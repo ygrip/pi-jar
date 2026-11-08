@@ -111,6 +111,25 @@ export class AccountStore {
     }
   }
 
+  /** Check credential presence without reading or exposing secret values. */
+  hasCredentials(account: AccountDefinition): boolean {
+    if (account.auth === "env") return Boolean(account.env && process.env[account.env]);
+    const path = this.credentialPath(account.name);
+    try { privatePath(path, false); return true; }
+    catch (error) { if (missing(error)) return false; throw error; }
+  }
+
+  /** Sign out one OAuth account while keeping its label for reconnect. */
+  logout(name: string): void {
+    const account = this.list().find(item => item.name === name);
+    if (!account) throw new Error("Unknown account: " + name);
+    if (account.auth !== "oauth") throw new Error("API-key accounts must be removed or their environment changed");
+    const path = this.credentialPath(name);
+    try { privatePath(path, false); unlinkSync(path); }
+    catch (error) { if (!missing(error)) throw error; }
+    this.saveHealth(name, {});
+  }
+
   /** Remove one account's private credentials, never Pi's main login or arbitrary files. */
   remove(name: string): void {
     if (!this.list().some(account => account.name === name)) throw new Error("Unknown account: " + name);
