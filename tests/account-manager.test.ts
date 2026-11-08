@@ -162,6 +162,7 @@ test("OMP-style account hub shows native provider pools, quota flags and respect
       assert.match(wide, /ACCOUNTS/);
       assert.match(wide, /personal/);
       assert.match(wide, /70% left/);
+      assert.match(wide, /LAST USED/, "last automatically selected provider account is visible");
       assert.match(wide, /COOLDOWN/);
       const compact = view.render(42);
       assert.ok(compact.every((line: string) => visibleWidth(line) <= 42));
@@ -173,7 +174,7 @@ test("OMP-style account hub shows native provider pools, quota flags and respect
   const accounts = { store: { list: () => definitions, hasCredentials: () => true },
     policy: () => ({ mode: "sticky", accounts: [], pinned: {} }),
     router: { status: () => [
-      { name: "personal", provider: "openai-codex", remaining: 70 },
+      { name: "personal", provider: "openai-codex", remaining: 70, lastUsed: true },
       { name: "work", provider: "openai-codex", remaining: 0, blockedUntil: Date.now() + 60_000 },
       { name: "team", provider: "anthropic", remaining: 40 }
     ] } };
