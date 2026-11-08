@@ -181,3 +181,113 @@ test("OMP-style account hub shows native provider pools, quota flags and respect
   const result = await openAccountHub(ctx as never, accounts as never, { provider: "openai-codex" });
   assert.deepEqual(result, { kind: "account", provider: "openai-codex", name: "personal" });
 });
+
+
+test("profile access clearly distinguishes All from restricted checkboxes", async () => {
+  const members = [
+    { version: 1, name: "work", provider: "openai", auth: "env" },
+    { version: 1, name: "personal", provider: "openai", auth: "env" }
+  ];
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: [] };
+  const seen: string[] = [];
+  let step = 0;
+  const accounts = {
+    store: { list: () => members, hasCredentials: () => true },
+    router: { status: () => [] },
+    policy: () => policy,
+    command: async (command: string) => {
+      if (command === "use all") policy = { ...policy, accounts: [] };
+      else if (command.startsWith("use ")) policy = { ...policy, accounts: command.slice(4).split(",") };
+    }
+  };
+  const ctx = { hasUI: true, mode: "tui", model: { provider: "openai" },
+    modelRegistry: { getAll: () => [{ provider: "openai" }], getProvider: () => ({ id: "openai", name: "OpenAI" }) },
+    ui: { notify() {}, custom: async (factory: Function) => new Promise(resolve => {
+      const view = factory(mockTui, mockTheme, {}, resolve);
+      const output = view.render(110).join("\n");
+      if (step === 0 || step === 2) view.handleInput("p");
+      else if (step === 1) {
+        seen.push(output);
+        view.handleInput("\x1b[B"); view.handleInput("\r"); // Restrict to work
+      } else if (step === 3) {
+        seen.push(output);
+        view.handleInput("\r"); // Explicitly restore All
+      } else view.handleInput("\x1b");
+      step++;
+    }) } };
+  await openAccountManager(ctx as never, accounts as never);
+  assert.deepEqual(policy.accounts, [], "returning to All explicitly removes restrictions");
+  assert.match(seen[0]!, /\[x\] All accounts · unrestricted/);
+  assert.match(seen[0]!, /Restrict to openai \/ work/);
+  assert.doesNotMatch(seen[0]!, /\[ \] openai \/ work/, "unrestricted accounts are never misleadingly unchecked");
+  assert.match(seen[1]!, /\[ \] All accounts · remove restrictions/);
+  assert.match(seen[1]!, /\[x\] openai \/ work/);
+  assert.deepEqual(step, 5);
+});
+
+test("offline provider accounts remain visible and can be removed through the UI", async () => {
+  let members = [{ version: 1, name: "old-work", provider: "disabled-plugin", auth: "oauth" }];
+  const removed: string[] = [];
+  const policy: AccountRoutingSettings = { mode: "sticky", accounts: [] };
+  let step = 0;
+  const accounts = {
+    store: { list: () => members, hasCredentials: () => true },
+    router: { status: () => [] },
+    policy: () => policy,
+    remove: async (name: string) => { removed.push(name); members = []; }
+  };
+  const ctx = { hasUI: true, mode: "tui",
+    modelRegistry: { getAll: () => [], getProvider: () => undefined },
+    ui: { notify() {}, custom: async (factory: Function) => new Promise(resolve => {
+      const view = factory(mockTui, mockTheme, {}, resolve);
+      const content = view.render(100).join("\n");
+      if (step === 0) {
+        assert.match(content, /disabled-plugin.*OFFLINE/);
+        assert.match(content, /old-work/);
+        assert.doesNotMatch(content, /Switch \/ pin provider account/);
+        view.handleInput("\t"); view.handleInput("\r");
+      } else if (step === 1) {
+        assert.match(content, /unavailable provider/);
+        view.handleInput("\x1b[B"); view.handleInput("\r"); // Confirm local remove
+      } else view.handleInput("\x1b");
+      step++;
+    }) } };
+  await openAccountManager(ctx as never, accounts as never);
+  assert.deepEqual(removed, ["old-work"]);
+  assert.deepEqual(members, []);
+  assert.equal(step, 3);
+});
+
+test("hub search filters same-provider account rows, retaining provider-name search", async () => {
+  const members = [
+    { version: 1, name: "work", provider: "openai-codex", auth: "oauth" },
+    { version: 1, name: "personal", provider: "openai-codex", auth: "oauth" }
+  ];
+  const accounts = {
+    store: { list: () => members, hasCredentials: () => true },
+    router: { status: () => [] },
+    policy: () => ({ mode: "sticky", accounts: [] })
+  };
+  const ctx = { hasUI: true, mode: "tui", model: { provider: "openai-codex" },
+    modelRegistry: { getAll: () => [{ provider: "openai-codex" }], getProvider: () => ({ id: "openai-codex", name: "Codex" }) },
+    ui: { custom: async (factory: Function) => new Promise(resolve => {
+      const view = factory(mockTui, mockTheme, {}, resolve);
+      view.render(100);
+      view.handleInput("/");
+      for (const c of "work") view.handleInput(c);
+      view.handleInput("\r");
+      const matched = view.render(100).join("\n");
+      assert.match(matched, /work · OAuth/);
+      assert.doesNotMatch(matched, /personal · OAuth/);
+      view.handleInput("/");
+      for (let i = 0; i < 4; i++) view.handleInput("\x7f"); // Clear search
+      for (const c of "codex") view.handleInput(c);
+      view.handleInput("\r");
+      const byProvider = view.render(100).join("\n");
+      assert.match(byProvider, /work · OAuth/);
+      assert.match(byProvider, /personal · OAuth/);
+      view.handleInput("\x1b");
+    }) } };
+  const result = await openAccountHub(ctx as never, accounts as never);
+  assert.deepEqual(result, { kind: "close" });
+});
