@@ -13,6 +13,21 @@ import { icon as glyph, type IconKey } from "./icons.ts";
 const keyHint = (key: IconKey, action: string) => glyph(key) + " " + action;
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
+type EditorKeybindings = ConstructorParameters<typeof CustomEditor>[2];
+
+/** Show native bindings, including Pi's existing Ctrl+J fallback; never remap editor input. */
+function newlineHint(keybindings?: EditorKeybindings): string {
+  let keys: readonly string[] = ["shift+enter", "ctrl+j"];
+  if (typeof keybindings?.getKeys === "function") keys = keybindings.getKeys("tui.input.newLine");
+  const labels: string[] = [];
+  for (const key of keys) {
+    if (key === "shift+enter" || key === "shift+return") labels.push(glyph("shiftEnter"));
+    else if (key === "ctrl+j") labels.push("Ctrl+J");
+    else labels.push(key);
+  }
+  if (!labels.length) return "newline unbound";
+  return labels.join("/") + " newline";
+}
 type MouseEvent = Parameters<NonNullable<EditorComponent["handleMouse"]>>[0];
 
 const PHASE_MOODS: Record<WorkingPhase, readonly MascotMood[]> = {
@@ -279,12 +294,13 @@ class ThemedEditor implements EditorComponent {
   render(width: number): string[] {
     const text = this.base.getText();
     const ghost = text === "" ? this.decor.ghost() : undefined;
+    const hint = this.decor.hint();
     const below = this.decor.attachments(text);
     const icon = this.decor.icon(width);
     const session = this.decor.session();
     const paintedIcon = this.decor.paintedIcon(width);
     const framed = roundedInput(this.base.render(width < 8 ? width : width - 2), width, this.focused, this.theme, this.paint, icon, session, {
-      ...(ghost ? { ghost } : {}), ...(paintedIcon ? { paintedIcon } : {}), profile: this.decor.profile?.(), dim: this.decor.dim,
+      ...(ghost ? { ghost } : {}), ...(hint ? { hint } : {}), ...(paintedIcon ? { paintedIcon } : {}), profile: this.decor.profile?.(), dim: this.decor.dim,
       ...(below ? { below } : {})
     });
     const perch = width >= 8 ? this.decor.perch(width) ?? [] : [];
@@ -327,6 +343,7 @@ export class ComposerStyle {
   private suggestions?: SuggestionState;
   private unsubscribe?: () => void;
   private colors?: { fg(color: string, text: string): string };
+  private keybindings?: EditorKeybindings;
   /** Chips for the last draft; image paths hit the filesystem, so reuse them briefly across repaints. */
   private chips?: { text: string; cwd: string; at: number; chips: string[] };
 
@@ -343,9 +360,7 @@ export class ComposerStyle {
     session: () => this.session,
     profile: () => this.profile,
     ghost: () => this.suggestions?.text,
-    hint: () => this.suggestions?.text
-      ? `${keyHint("tab", "accept")} · ${keyHint("enter", "send")} · ${keyHint("shiftEnter", "newline")}`
-      : `${keyHint("enter", "send")} · ${keyHint("shiftEnter", "newline")} · /plan · /goal`,
+    hint: () => this.composerHint(),
     accept: () => {
       const text = this.suggestions?.text;
       if (text) this.suggestions!.clear();
@@ -365,6 +380,12 @@ export class ComposerStyle {
       return this.chips.chips.map((chip) => this.colors?.fg("accent", chip) ?? chip).join(this.colors?.fg("dim", "   ") ?? "   ");
     }
   };
+
+  private composerHint(): string {
+    const editing = `${keyHint("enter", "send")} · ${newlineHint(this.keybindings)}`;
+    if (this.suggestions?.text) return `${keyHint("tab", "accept")} · ${editing}`;
+    return `${editing} · /plan · /goal`;
+  }
 
   /** Tasks share the mascot's perch instead of reserving a separate vertical widget. */
   setTasksVisible(visible: boolean): void { this.tasksVisible = visible; }
@@ -469,6 +490,7 @@ export class ComposerStyle {
       this.session = sessionDisplayName(manager?.getSessionName?.(), manager?.getSessionId?.());
       const factory: EditorFactory = (tui, theme, keys) => {
         this.tui = tui;
+        this.keybindings = keys;
         this.colors = ctx.ui.theme;
         const paint = (text: string) => ctx.ui.theme?.fg("accent", text) ?? theme.borderColor(text);
         return previous

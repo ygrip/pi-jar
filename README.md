@@ -50,6 +50,12 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 - In fullscreen, selecting text copies it automatically (**Pi → Copy on select**, on by default). pi-jar's own views never capture drags, so selection works over the welcome, composer, plan view and dialogs.
 - In regular mode, use your terminal's own copy-on-select option if it has one.
 
+### Multiline prompts: Shift+Return and Ctrl+J
+
+**Enter sends; Shift+Return inserts a newline. Ctrl+J is Pi's existing default newline alternative**, useful when a terminal does not distinguish Shift+Return from Return. Pi-jar does not add or remap either binding. The composer displays your configured newline shortcuts, including the Ctrl+J fallback when enabled; `/hotkeys` lists the active bindings.
+
+Pi 1.5 fixes Apple Terminal's local Shift+Return fallback for setups sending ESC + Return. Other terminals, IDE terminals, tmux, SSH, and WSL can still discard modifier information; an extension cannot recover Shift from an ordinary Return event. If Shift+Return still submits, use Ctrl+J and check [Pi's terminal setup guide](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/terminal-setup.md). Report your terminal/version, OS, Pi version, and whether `/jar composer off` changes the behavior. Restore styling with `/jar composer on`.
+
 ## Commands and shortcuts
 
 | Command | Purpose |
