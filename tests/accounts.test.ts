@@ -100,6 +100,62 @@ test("routing policies preserve sticky affinity, rotate, and respect profile all
   await ask(); assert.equal(f.calls.at(-1), "missing"); // direct provider call, no runtime auth
 });
 
+test("per-provider account pin preserves independent provider pools and automatic retry", async t => {
+  const f = fixture(t);
+  const otherModel: Model<Api> = { ...model, provider: "other", id: "other-model" };
+  process.env.JAR_OTHER_ACCOUNT = "other-key";
+  t.after(() => { delete process.env.JAR_OTHER_ACCOUNT; });
+  f.store.reserve("third");
+  f.store.save({ version: 1, name: "third", provider: "other", auth: "env", env: "JAR_OTHER_ACCOUNT" });
+  const otherCalls: string[] = [];
+  const otherProvider: Provider = {
+    ...f.provider, id: "other", getModels: () => [otherModel],
+    streamSimple: (_model, _context, options) => {
+      otherCalls.push(options?.apiKey ?? "missing");
+      const output = createAssistantMessageEventStream();
+      output.push({ type: "done", reason: "stop", message: { ...message(options?.apiKey ?? "missing"), provider: "other", model: "other-model" } });
+      output.end();
+      return output;
+    }
+  };
+  let config: AccountRoutingSettings = { mode: "sticky", accounts: [], pinned: { openai: "b" } };
+  const router = new AccountRouter(f.store, () => config);
+  assert.equal((await router.wrap(f.provider).streamSimple(model, context).result()).stopReason, "stop");
+  assert.equal(f.calls.at(-1), "key-b", "pin applies to matching provider only");
+  assert.equal((await router.wrap(otherProvider).streamSimple(otherModel, context).result()).stopReason, "stop");
+  assert.deepEqual(otherCalls, ["other-key"], "another provider retains its own credentials");
+  f.fail(429);
+  const pinnedResult = await router.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(pinnedResult.stopReason, "error", "explicit pin does not route to another account");
+  assert.deepEqual(f.calls, ["key-b", "key-b"]);
+  config = { mode: "sticky", accounts: [] };
+  const resumed = await router.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(resumed.stopReason, "stop");
+  assert.equal(f.calls.at(-1), "key-a", "automatic routing can fall back after pinned account cooldown");
+});
+
+test("pin commands validate provider ownership, persist profile policy, and clean up on exclusion", async t => {
+  const f = fixture(t);
+  let config: AccountRoutingSettings = { mode: "sticky", accounts: [] };
+  const notices: string[] = [];
+  const accounts = new Accounts({} as never, () => config, next => { config = next; }, f.directory);
+  const ctx = { ui: { notify: (message: string) => notices.push(message) } };
+  accounts.pin("openai", "b", ctx as never);
+  assert.deepEqual(config.pinned, { openai: "b" });
+  assert.deepEqual(parseAccountRouting(JSON.parse(accounts.environment()[ACCOUNT_ROUTING_ENV]!)), config);
+  await accounts.command("use a", ctx as never);
+  assert.equal(config.pinned, undefined, "excluding a pin clears it rather than stranding it");
+  assert.throws(() => accounts.pin("openai", "b", ctx as never), /excluded/);
+  await accounts.command("use all", ctx as never);
+  assert.throws(() => accounts.pin("not-openai", "b", ctx as never), /not configured for provider/);
+  accounts.pin("openai", "a", ctx as never);
+  accounts.pin("openai", undefined, ctx as never);
+  assert.equal(config.pinned, undefined);
+  assert.ok(notices.some(text => text.includes("Automatic account selection restored")));
+  assert.deepEqual(parseAccountRouting({ mode: "sticky", accounts: [], pinned: { openai: "../bad" } }),
+    { mode: "off", accounts: [] }, "invalid pinned identities fail closed");
+});
+
 test("429 retries once per account before output, with shared cooldown", async t => {
   const f = fixture(t); f.fail(429);
   const runtime = createModels(); runtime.setProvider(f.router.wrap(f.provider));
