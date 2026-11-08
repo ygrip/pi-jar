@@ -3,7 +3,7 @@ import test from "node:test";
 import { ComposerStyle, roundedInput } from "../src/composer.ts";
 import { icon, iconSet, setIconSet } from "../src/icons.ts";
 
-test("task widget owns the perch only while tasks are visible", () => {
+test("mascot stays anchored to the composer as task widgets appear and disappear", () => {
   const style = new ComposerStyle();
   style.setActivity("idle", false);
   let factory: any = () => ({
@@ -19,11 +19,11 @@ test("task widget owns the perch only while tasks are visible", () => {
   assert.equal(style.enable(ctx as never), true);
   const editor = factory({ terminal: { rows: 24 }, requestRender() {} }, { borderColor: (text: string) => text }, {});
   assert.equal(editor.render(80).length, 9);
-  style.setTasksVisible(true);
-  assert.equal(editor.render(80).length, 3, "mascot must not be duplicated above the composer");
-  assert.equal(style.renderMascot(80)?.length, 6, "widget can still render the shared mascot");
-  style.setTasksVisible(false);
-  assert.equal(editor.render(80).length, 9, "perch returns when the task widget disappears");
+  // The task widget can be hidden, clipped, or removed independently of the editor.
+  // The composer always owns Ember, so the mascot never relies on widget lifecycle.
+  assert.equal(editor.render(80).length, 9, "mascot remains above the editor during task updates");
+  assert.equal(style.renderMascot(80)?.length, 6, "sprite still renders on its own");
+  assert.equal(editor.render(80).length, 9, "repeated renders keep the perch");
   style.setMascot(false);
   assert.equal(style.renderMascot(80), undefined);
   style.disable(ctx as never);
