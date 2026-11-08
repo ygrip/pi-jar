@@ -4,7 +4,9 @@ Route a selected model across accounts **of the same provider** without creating
 
 ## Set up accounts
 
-Open the interactive manager with **`/jar accounts`**. Its searchable menu supports keyboard and mouse navigation and lets you add OAuth/API-key accounts, renew logins, view status, change routing policy or profile allowlists, and remove local credentials. **`/jar accounts list`** shows the same account status without opening the manager. All commands below remain available for scripting/manual use.
+Open the provider-first interactive manager with **`/jar accounts`** (also **`/jar settings` → Pi → Manage accounts**). Inspired by OMP's multiple-account workflow, it groups accounts by **native Pi provider**, with searchable keyboard/mouse menus for **Connect**, **Switch/pin**, **Auto**, **Reconnect**, **Sign out**, **Remove**, **Routing policy**, **Profile access**, and **Quota & limits**. **`/jar accounts list`** displays status without the UI. All commands below remain available for scripting/manual use.
+
+**Provider isolation:** `openai-codex` accounts form their own pool, independent of `anthropic`, `openai`, or any other provider. Switching a Codex account does not alter Anthropic's routing, models, or roles. Pi-Jar does not change a model/provider to chase another account.
 
 For subscriptions, sign in independently for each account:
 
@@ -39,7 +41,7 @@ Enable or disable routing directly:
 /jar routing status
 ```
 
-To remove a configured account, open `/jar accounts`, select the account, and choose **Remove local account and credentials**. Confirm explicitly. Removal checks that the private directory contains only known account files and refuses to delete it while lock or unexpected files remain. It does not revoke the provider session; revoke it at the provider when needed.
+To sign out without losing the account label, open `/jar accounts`, choose the provider/account and **Sign out**. Or use `/jar accounts logout NAME`. Reconnecting the same label invokes Pi's native OAuth flow again. To delete the account label and local credentials entirely, choose **Remove local account credentials** and confirm. Removal rejects unexpected private files or locks and never touches Pi's primary login. Neither action revokes a provider-side session; revoke it at the provider when required.
 
 `on` keeps an already-active policy, or selects sticky when routing was off. `off` restores the original provider/authentication. These settings apply to the active profile. To select a particular policy, use `/jar routing quota-first` (also accepts `sticky` and `round-robin`).
 
@@ -55,18 +57,27 @@ Open **`/jar settings` → Pi → Account routing policy**, or use:
 - **round-robin** — rotate eligible accounts in each process.
 - **quota-first** — prefer the account with the most remaining quota in its most constrained active window; prefer fewer local in-flight requests when quota ties. Known quota ranks above unknown quota.
 
+**Switching versus routing:** Open **Switch active account** and select a provider. Choose **Automatic** to keep `sticky`, `round-robin`, or `quota-first` routing across all eligible accounts **of that provider**, including safe pre-output HTTP 429 failover. Choosing an individual account **pins only that provider** and intentionally disables automatic failover to another account until you unpin it. The same options are available as commands:
+
+```text
+/jar accounts pin openai-codex work
+/jar accounts auto openai-codex
+```
+
+A pin must refer to a configured, authenticated account allowed by the active profile; incompatible pins are removed automatically when an account is excluded, signed out, or deleted. The default is automatic routing, with no pins. Pins are profile-scoped and inherited by subagents as non-secret routing policy.
+
 The account status lists remaining subscription quota, shared cooldowns, and quota-lookup warnings. The footer identifies the selected account and uses its fresh quota rather than the main login's limits. `/usage` retains Pi's original token/cost accounting, including provider-reported billing totals in Pi 1.5; switching accounts does not reset session cost. There is no separate account-cost ledger.
 
 ## Profiles, roles and subagents
 
-The policy and optional account allowlist belong to the active profile:
+The policy, per-provider pins, and optional account allowlist belong to the active profile:
 
 ```text
 /jar accounts use work,personal
 /jar accounts use all
 ```
 
-An empty allowlist (`all`) permits all configured accounts. A named allowlist only permits those accounts; it never falls back to an excluded account or Pi's main login for a routed provider. Account names are global and unique; credentials are not embedded in profiles or project files.
+An empty allowlist (`all`) permits all configured accounts. A named allowlist applies **across** providers, so don't use it just to switch between two accounts for one provider: use per-provider **Switch / pin** instead. An allowlist never falls back to an excluded account or Pi's main login for a routed provider. Account names are global and unique; credentials are not embedded in profiles or project files.
 
 Keep roles unchanged, for example `/roles set worker openai-codex/gpt-6.1-terra`. Routing happens below model selection, including advisor/commit side calls, compaction, and chat calls from subagents. At every spawn/relaunch, a child inherits the parent's policy and allowlist; pi-jar adds no tokens to its environment. Native OAuth refresh locks coordinate credential refresh, and quota/cooldown files are updated under a per-account lock so concurrent processes cannot erase each other's cooldowns. Rotation cursors and in-flight counts are process-local, not a distributed scheduler. A request keeps the policy and allowlist it was dispatched with; changes apply to the next request.
 
