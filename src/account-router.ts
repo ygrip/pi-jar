@@ -13,6 +13,7 @@ interface AccountState {
   models: ReturnType<AccountStore["models"]>;
   health: AccountHealth;
   pending?: Promise<void>;
+  invalidated?: boolean;
   nextCheck: number;
   unavailableUntil?: number;
   quotaError?: string;
@@ -95,9 +96,11 @@ export class AccountRouter {
     const now = this.now();
     if (state.pending) return waitForQuota(state.pending, signal);
     if (state.nextCheck > now) return;
+    if (state.invalidated || this.states.get(state.definition.name) !== state) return;
     const shared = this.store.health(state.definition.name);
     state.health = shared;
     if (typeof shared.checkedAt === "number" && shared.checkedAt <= now && shared.checkedAt + QUOTA_TTL_MS > now) return;
+    const generation = shared.credentialGeneration;
     state.pending = (async () => {
       let quota: Quota | undefined;
       try {
@@ -107,11 +110,18 @@ export class AccountRouter {
         // Preserve known limits during endpoint outages; do not mistake unknown quota for zero.
         state.quotaError = "Quota lookup unavailable; provider limits still apply";
       }
+      // An idle session can sign out/reconnect while an unbilled quota probe is
+      // still running. Guard both this process's runtime and the persisted
+      // identity epoch, so another Pi process cannot resurrect old credentials' quota.
+      if (state.invalidated || this.states.get(state.definition.name) !== state) return;
       if (quota) {
         const checkedAt = this.now();
-        state.health = this.store.updateHealth(state.definition.name, current => ({ ...current, quota, checkedAt }));
+        state.health = this.store.updateHealth(state.definition.name, current =>
+          state.invalidated || this.states.get(state.definition.name) !== state
+            || current.credentialGeneration !== generation
+            ? current : { ...current, quota, checkedAt });
       }
-      state.nextCheck = this.now() + QUOTA_TTL_MS;
+      if (!state.invalidated) state.nextCheck = this.now() + QUOTA_TTL_MS;
     })().finally(() => { state.pending = undefined; });
     return waitForQuota(state.pending, signal);
   }
@@ -191,6 +201,8 @@ export class AccountRouter {
     return selected;
   }
   invalidate(name: string): void {
+    const state = this.states.get(name);
+    if (state) state.invalidated = true;
     this.states.delete(name);
     // Re-login, sign-out, or deletion invalidates the account's last-used marker.
     for (const [provider, selected] of this.sticky) if (selected === name) this.sticky.delete(provider);
