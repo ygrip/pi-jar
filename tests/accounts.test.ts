@@ -555,3 +555,95 @@ test("provider-specific cooldown never blocks healthy accounts belonging to anot
   assert.deepEqual(f.calls, ["key-b"]);
   assert.equal(f.router.status().find(account => account.name === "b")?.lastUsed, true);
 });
+
+
+test("removing the only configured allowlisted identity is rejected even before a later account is added", async t => {
+  const f = fixture(t);
+  f.store.remove("b"); // The account directory now contains only the explicitly allowed identity.
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: ["a"] };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, f.directory);
+  await assert.rejects(() => accounts.remove("a", { isIdle: () => true } as never), /last allowed account/);
+  assert.deepEqual(policy.accounts, ["a"]);
+  assert.deepEqual(f.store.list().map(account => account.name), ["a"]);
+  f.store.reserve("later");
+  f.store.save({ version: 1, name: "later", provider: "openai", auth: "env", env: "JAR_TEST_B" });
+  const routed = new AccountRouter(f.store, () => policy).wrap(f.provider);
+  const result = await routed.streamSimple(model, context).result();
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-a"], "adding a new account cannot inherit access after rejected removal");
+});
+
+test("CLI remove works for orphaned providers and refuses invalid or unknown names", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-orphan-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, directory);
+  accounts.store.reserve("orphan");
+  accounts.store.save({ version: 1, name: "orphan", provider: "deleted-plugin", auth: "oauth" });
+  const ctx = { isIdle: () => true, ui: { notify() {} },
+    modelRegistry: { getAll: () => [], getProvider: () => undefined } };
+  await accounts.command("remove orphan", ctx as never);
+  assert.deepEqual(accounts.store.list(), []);
+  await assert.rejects(() => accounts.command("remove orphan", ctx as never), /Unknown account/);
+  await assert.rejects(() => accounts.command("remove ..\/private", ctx as never), /Unknown account|names must/);
+});
+
+test("routing does not await delayed quota endpoints and bounds concurrent catalog checks", async () => {
+  const providerId = "openai-codex";
+  const routedModel: Model<Api> = { ...model, provider: providerId };
+  const definitions = Array.from({ length: 12 }, (_, index) => ({
+    version: 1 as const, name: `pool-${index}`, provider: providerId, auth: "oauth" as const
+  }));
+  let active = 0, maximum = 0, checked = 0, probes = 0;
+  const outstanding: Array<() => void> = [];
+  const fakeStore = {
+    list: () => definitions,
+    hasCredentials: () => true,
+    health: () => ({}),
+    updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    models: () => Promise.resolve({
+      getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
+      getAllAvailable: async () => {
+        active++;
+        maximum = Math.max(maximum, active);
+        try { await new Promise(resolve => setTimeout(resolve, 30)); checked++; return [routedModel]; }
+        finally { active--; }
+      },
+      streamSimple: () => {
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: "done", reason: "stop",
+          message: { ...message("routed"), provider: providerId, model: routedModel.id } });
+        stream.end();
+        return stream;
+      }
+    })
+  } as unknown as AccountStore;
+  const native: Provider = {
+    id: providerId, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] },
+    getModels: () => [routedModel],
+    stream: () => { throw new Error("not called"); },
+    streamSimple: () => { throw new Error("not called"); }
+  };
+  const quotaFetcher = async () => {
+    probes++;
+    await new Promise<void>(resolve => { outstanding.push(resolve); });
+    return { fiveHour: { used: 25 } };
+  };
+  const router = new AccountRouter(fakeStore, () => ({ mode: "round-robin", accounts: [] }), Date.now, quotaFetcher);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      router.wrap(native).streamSimple(routedModel, context).result(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("quota probe blocked account routing")), 1000);
+      })
+    ]);
+    assert.equal(result.stopReason, "stop");
+    assert.equal(checked, 12, "all eligible account catalogs were validated");
+    assert.ok(maximum > 1 && maximum <= 4, `expected bounded catalog concurrency, got ${maximum}`);
+    assert.ok(probes > 0, "quota probes still run without gating the model request");
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    for (const release of outstanding) release();
+  }
+});
