@@ -2,7 +2,7 @@
 
 A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earendil-works/pi). pi-jar turns the terminal into a more expressive agent workspace with a living pixel-fire welcome, an adaptive composer, switchable **profiles**, first-class **plan**, **goal** and **role** workflows, tracked tasks, reviewable changes, background shells and parallel subagents.
 
-> Works with the current `@earendil-works/*` Pi API. Pi's core packages are peer dependencies (`"*"`), so pi-jar always runs against the Pi you have installed; it is tested against Pi 1.2.0.
+> Requires Pi **1.5.0+** (`@earendil-works/*` 1.x). Native provider/credential APIs handle account routing and locked OAuth refresh; Pi 1.5's streaming, tool parsing and provider-reported usage improvements remain intact.
 
 ## See it in action
 
@@ -15,10 +15,11 @@ A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earend
 | Area | What you get |
 | --- | --- |
 | **Welcome** | A natural pixel flame (rounded base, swaying tip, wisps, embers and sparks) over a large `π`; a large, flame-colored welcome message up top; a live card with project, git, session, plan, goal, tasks and roles; clickable actions (fullscreen) or keyboard hints (regular mode). |
-| **Composer** | Rounded input that grows with your draft (up to ~60% of the terminal), click-to-place cursor in fullscreen, dim **next-prompt suggestions** you accept with <kbd>Tab</kbd>, and **Ember** — a tiny flame mascot that blinks, cheers, focuses, dozes and reacts. |
+| **Composer** | Rounded input that grows with your draft (up to ~60% of the terminal), click-to-place cursor in fullscreen, dim **next-prompt suggestions** you accept with <kbd>Tab</kbd>, and **Ember** — a tiny flame mascot in your theme's accent color that blinks, hops with eased timing, focuses, dozes and reacts. While the agent works, the elapsed time and Ember keep moving even during silent reasoning, at a cadence bounded by session size. |
 | **Plan mode** | Read-only exploration; the agent must write a structured plan file and submit it. You review it in a split view (headings on the left, section on the right) and approve, compact-and-approve, refine or stop. |
 | **Goal mode** | Set an outcome; the agent must break it into tracked tasks and keeps working until they are done, then an **auditor** pass verifies the goal before it can be marked complete. |
 | **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `implement`, `advisor`, `moderator`, `scout`, `worker`, `reviewer`, `task`, `commit`, plus your own) with aliases, effort, per-role fallback models and project overrides. |
+| **Accounts** | Opt-in same-provider account routing: sticky, round-robin or quota-first, profile allowlists, native OAuth refresh, shared quota/cooldown metadata, and bounded pre-output 429 failover. Roles and model IDs stay unchanged. [Setup and limits](docs/MULTI_ACCOUNT.md). |
 | **Advisor** | A second-opinion model: the agent calls `jar_advisor` when you ask or after two failed attempts, `/advisor [focus]` asks on demand, and opt-in automatic gates consult it when the agent repeats the same tool call or keeps failing. |
 | **Usage & context** | `/usage` shows session cost and tokens per model (advisor and commit calls included) and plan-limit bars with reset times; `/context` draws a grid of what fills the context window, with a per-file, per-skill and per-tool breakdown; `/cache-breaks` names the tool, system section or message whose change forced a costly prompt-cache rewrite. |
 | **Commit** | `/jar commit [note]` drafts a message for the staged changes with the `commit` role, lets you edit it, then commits (never pushes). |
@@ -49,6 +50,12 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 - In fullscreen, selecting text copies it automatically (**Pi → Copy on select**, on by default). pi-jar's own views never capture drags, so selection works over the welcome, composer, plan view and dialogs.
 - In regular mode, use your terminal's own copy-on-select option if it has one.
 
+### Multiline prompts: Shift+Return and Ctrl+J
+
+**Enter sends; Shift+Return inserts a newline. Ctrl+J is Pi's existing default newline alternative**, useful when a terminal does not distinguish Shift+Return from Return. Pi-jar does not add or remap either binding. The composer displays your configured newline shortcuts, including the Ctrl+J fallback when enabled; `/hotkeys` lists the active bindings.
+
+Pi 1.5 fixes Apple Terminal's local Shift+Return fallback for setups sending ESC + Return. Other terminals, IDE terminals, tmux, SSH, and WSL can still discard modifier information; an extension cannot recover Shift from an ordinary Return event. If Shift+Return still submits, use Ctrl+J and check [Pi's terminal setup guide](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/terminal-setup.md). Report your terminal/version, OS, Pi version, and whether `/jar composer off` changes the behavior. Restore styling with `/jar composer on`.
+
 ## Commands and shortcuts
 
 | Command | Purpose |
@@ -63,6 +70,8 @@ Pi only delivers mouse events in its **fullscreen** TUI mode. In regular mode th
 | `/jar commit [note]` | Draft a commit message for the staged changes with the `commit` role, edit it, and commit. Offers `git add -A` when nothing is staged. |
 | `/jar` · `/jar settings` | Visual and workflow preferences. |
 | `/jar status` | One-line status summary. |
+| `/jar routing on\|off` | Enable account routing (sticky when previously off) or restore normal Pi authentication. `/jar routing status` shows current routing/account quota. |
+| `/jar accounts` | List account quota/cooldown status. `login PROVIDER NAME`, `add PROVIDER NAME ENV_VAR`, `mode off\|sticky\|round-robin\|quota-first`, `use all\|name1,name2`. [Multi-account routing](docs/MULTI_ACCOUNT.md). |
 | `/jar perf` | Long-session diagnostics on demand: branch entries, context sampling, parent and child RSS, retained/hibernated subagents and recovery worktrees, render requests vs. frames, shell output, discussion and quota cache. |
 | `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Searchable, scrollable checklist; ←/→ folds/unfolds subtasks. |
 | `/jar tasks collapse\|expand\|toggle` · `/jar tasks scroll N` | Collapse/expand the compact task widget or scroll it by N rows. |

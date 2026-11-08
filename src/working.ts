@@ -25,6 +25,8 @@ export class WorkingState {
   private tools = new Map<string, string>();
   private startedAt?: number;
   private outputTokens = 0;
+  /** When the current request started; undefined while idle. */
+  get started(): number | undefined { return this.startedAt; }
   get phase(): WorkingPhase {
     if (this.waiting) return "waiting";
     if (this.tools.size) return "tool";

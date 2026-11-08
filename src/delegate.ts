@@ -379,6 +379,8 @@ interface ChildEvent {
 export interface DelegateHooks {
   /** Extra environment for each child process: read again when a hibernated child relaunches. */
   env?: () => Record<string, string>;
+  /** Parent environment variables the child must not inherit (e.g. credentials of excluded accounts). */
+  withheldEnv?: () => readonly string[];
   /** A successful edit/write by the child, with the path it gave. */
   edited?(path: string): void;
   /** CLI arguments continuing this child's own session file, or undefined to refuse it. Without it the child never hibernates. */
@@ -711,6 +713,7 @@ export function startDelegate(run: DelegateRun, args: string[], prompt: string, 
     try {
       const env = { ...process.env };
       for (const key of [CHILD_BASELINE_ENV, CHILD_WORKTREE_ENV, CHILD_TOOLS_ENV, CHILD_SKILL_READS_ENV, ...DISCUSSION_ENV_KEYS]) delete env[key];
+      for (const key of hooks.withheldEnv?.() ?? []) delete env[key];
       child = spawnProcess(invocation.command, invocation.args, { cwd, shell: false, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"], env: { ...env, ...hooks.env?.(), [CHILD_ENV]: "1" } });
     } catch (error) {
       finish("failed", error instanceof Error ? error.message : String(error));
@@ -1266,6 +1269,8 @@ export interface DelegateOptions {
   changed?: () => void;
   /** Discussion broker environment for one child spawn; idempotent per key and read again on every relaunch. */
   discussionEnv?: (key: string, name: string) => Record<string, string> | undefined;
+  /** Parent environment variables withheld from every child spawn; read again on every relaunch. */
+  withheldEnv?: () => readonly string[];
   /** The agent was permanently stopped or discarded: release its discussion identity. */
   discussionRetire?: (key: string) => void;
   /** Unread discussion messages waiting for an agent, shown in the moderator's fleet line. */
@@ -1815,6 +1820,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
         }
         // Read at every spawn, so a relaunch after hibernation reaches the current discussion broker.
         hooks.env = () => ({ ...env, ...discussionEnv(key, run.name) });
+        hooks.withheldEnv = options.withheldEnv;
         const argsFor = (resume?: string) => delegateArgs(run.model, thinkingByRun.get(run.index), write, process.argv,
           session && resume ? { ...session, resume } : session, run.mode === "scout" ? toolsByRun.get(run.index) : undefined,
           { ...(extensionPlan ? { extensions: extensionPlan } : {}), ...(skillPlans[run.index - 1] ? { skills: skillPlans[run.index - 1] } : {}) });

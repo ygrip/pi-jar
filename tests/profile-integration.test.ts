@@ -9,6 +9,64 @@ import piJar from "../extensions/index.ts";
 import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY } from "../src/profiles.ts";
 import { defaultVisualSettings, saveVisualSettings, SETTINGS_FILE } from "../src/settings.ts";
 import { openJarSettings } from "../src/settings-ui.ts";
+import { AccountStore } from "../src/account-store.ts";
+
+test("account commands preserve uppercase environment variable names and never persist API-key values", async () => {
+  const previous = process.env.JAR_ACCOUNT_COMMAND_TEST;
+  process.env.JAR_ACCOUNT_COMMAND_TEST = "secret-never-persisted";
+  try {
+    await fixture(async ({ ctx, directory, commands, notices }) => {
+      ctx.modelRegistry.getProvider = () => ({ id: "openai", auth: { apiKey: { name: "OpenAI" } } });
+      await commands.get("jar")("accounts add openai work JAR_ACCOUNT_COMMAND_TEST", ctx);
+      const accounts = new AccountStore(directory).list();
+      assert.equal(accounts[0]?.env, "JAR_ACCOUNT_COMMAND_TEST");
+      assert.doesNotMatch(readFileSync(join(directory, "pi-jar-accounts", "work", "account.json"), "utf8"), /secret-never-persisted/);
+      assert.ok(notices.some((notice: string) => notice.includes("Account work added")));
+    });
+  } finally {
+    if (previous === undefined) delete process.env.JAR_ACCOUNT_COMMAND_TEST;
+    else process.env.JAR_ACCOUNT_COMMAND_TEST = previous;
+  }
+});
+
+test("/jar routing on/off persists active-profile policy and status reports it", async () => {
+  await fixture(async ({ directory, commands, ctx, notices }) => {
+    await commands.get("jar")("routing on", ctx);
+    assert.equal(new ProfileStore(directory).active().settings.accountRouting.mode, "sticky");
+    await commands.get("jar")("routing quota-first", ctx);
+    await commands.get("jar")("routing on", ctx);
+    assert.equal(new ProfileStore(directory).active().settings.accountRouting.mode, "quota-first");
+    await commands.get("jar")("routing off", ctx);
+    assert.equal(new ProfileStore(directory).active().settings.accountRouting.mode, "off");
+    await commands.get("jar")("routing status", ctx);
+    assert.ok(notices.some((notice: string) => notice.includes("Account routing: off")));
+  });
+});
+
+test("settings-driven routing changes refresh model availability like /jar routing", async () => {
+  const previous = process.env.JAR_ROUTING_REFRESH_TEST;
+  process.env.JAR_ROUTING_REFRESH_TEST = "secret";
+  try {
+    await fixture(async ({ ctx, commands }) => {
+      const refreshed: string[][] = [];
+      ctx.modelRegistry.getProvider = () => ({ id: "openai", auth: { apiKey: { name: "OpenAI" } }, getModels: () => [] });
+      ctx.modelRegistry.getAll = () => [];
+      ctx.modelRegistry.refresh = async (options: { providers: string[] }) => { refreshed.push(options.providers); };
+      await commands.get("jar")("accounts add openai work JAR_ROUTING_REFRESH_TEST", ctx);
+      await commands.get("jar")("routing on", ctx);
+      const viaCommand = refreshed.length;
+      assert.ok(viaCommand > 0, "/jar routing on refreshes availability");
+      // `use` changes settings only through the shared settings path (the same one the settings UI uses).
+      await commands.get("jar")("accounts use work", ctx);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(refreshed.length > viaCommand, "a settings change also refreshes availability");
+      assert.deepEqual(refreshed.at(-1), ["openai"]);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.JAR_ROUTING_REFRESH_TEST;
+    else process.env.JAR_ROUTING_REFRESH_TEST = previous;
+  }
+});
 
 async function fixture(run: (h: any) => Promise<void>, active = "Default", initialEntries: any[] = [], legacyAccent?: "azure") {
   const directory = mkdtempSync(join(tmpdir(), "pi-jar-profile-integration-"));
@@ -54,6 +112,7 @@ async function fixture(run: (h: any) => Promise<void>, active = "Default", initi
   piJar({ on: (name: string, handler: Function) => events.set(name, [...(events.get(name) ?? []), handler]),
     registerCommand: (name: string, options: any) => commands.set(name, options.handler),
     registerShortcut: (name: string, options: any) => shortcuts.set(name, options.handler), registerTool() {}, getCommands: () => [],
+    registerProvider() {},
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     setModel: async (model: any) => { ctx.model = model; await emit("model_select", { source: "set" }); if (failModel && model.id === "writer") throw new Error("Model activation failed"); return true; },
     getThinkingLevel: () => "off", setThinkingLevel() {}

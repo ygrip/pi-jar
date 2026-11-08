@@ -393,7 +393,7 @@ export class ModelRoleManager {
     if (scope === "project") this.project = next; else this.global = next;
   }
 
-  register(openUi?: (ctx: ExtensionContext) => Promise<void>, options: { activateDefault?: () => boolean; beforeSessionStart?: (ctx: ExtensionContext) => { roles?: RoleConfig; profileId?: string } | undefined } = {}): void {
+  register(openUi?: (ctx: ExtensionContext) => Promise<void>, options: { activateDefault?: () => boolean; beforeSessionStart?: (ctx: ExtensionContext) => { roles?: RoleConfig; profileId?: string } | undefined | Promise<{ roles?: RoleConfig; profileId?: string } | undefined> } = {}): void {
     const manual = (_event: unknown, ctx: ExtensionContext) => {
       if (this.applying) return;
       this.manualEpoch++;
@@ -402,7 +402,7 @@ export class ModelRoleManager {
     this.pi.on("model_select", manual);
     this.pi.on("thinking_level_select", manual);
     this.pi.on("session_start", async (_event, ctx) => {
-      const profile = options.beforeSessionStart?.(ctx);
+      const profile = await options.beforeSessionStart?.(ctx);
       this.load(ctx.cwd, profile?.roles, profile?.profileId);
       this.active = undefined;
       // Delegated children already received their role model/effort via CLI arguments.

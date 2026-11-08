@@ -5,6 +5,7 @@ import { isMaxSubagents, defaultVisualSettings, loadVisualSettings, type JarVisu
 import { ACCENT_NAMES } from "./accent.ts";
 import { FOOTER_FIELDS } from "./footer-settings.ts";
 import { ICON_SETS } from "./icons.ts";
+import { parseAccountRouting } from "./account-settings.ts";
 
 export interface JarProfile { id: string; name: string; theme: string; settings: JarVisualSettings; roles: RoleConfig }
 interface ProfileDocument { version: 1; active: string; profiles: JarProfile[] }
@@ -54,7 +55,8 @@ function normalizeProfile(value: unknown): JarProfile | undefined {
   // Removed context controls must not survive a profile switch or subsequent save.
   const { contextDiet: _diet, contextBudget: _budget, ...supported } = settings;
   return { id: raw.id as string, name: raw.name, theme: raw.theme, settings: { ...supported,
-    cacheDiagnostics: settings.cacheDiagnostics ?? true, readCache: settings.readCache ?? false } as unknown as JarVisualSettings, roles: parseRoleConfig(raw.roles) };
+    cacheDiagnostics: settings.cacheDiagnostics ?? true, readCache: settings.readCache ?? false,
+    accountRouting: parseAccountRouting(settings.accountRouting) } as unknown as JarVisualSettings, roles: parseRoleConfig(raw.roles) };
 }
 function atomicSave(file: string, document: ProfileDocument): string {
   mkdirSync(join(file, ".."), { recursive: true });

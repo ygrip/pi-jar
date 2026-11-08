@@ -24,6 +24,7 @@ import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { openProfiles, type ProfileAction } from "../src/profile-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
 import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
+import { Accounts, inheritedAccountRouting } from "../src/accounts.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
 import { jarCommit } from "../src/commit.ts";
 import { registerAdvisor } from "../src/advisor.ts";
@@ -40,6 +41,7 @@ import { registerTaskTool } from "../src/task-tool.ts";
 import { TASK_ENTRY, TodoStore, todoTotals } from "../src/tasks.ts";
 import { formatCost, sessionCost } from "../src/usage.ts";
 import { WorkingState } from "../src/working.ts";
+import { ActivityClock, activityDelay } from "../src/activity-clock.ts";
 import { ChangeTracker } from "../src/changes.ts";
 import { CHILD_ENV, DelegateRegistry, registerDelegate, SUBAGENT_MESSAGE, type DelegateRun } from "../src/delegate.ts";
 import { CHILD_WORKTREE_ENV, workspacePathAllowed } from "../src/delegate-worktree.ts";
@@ -104,6 +106,9 @@ export default function piJar(pi: ExtensionAPI): void {
   installCompactBuiltinTools(pi, { readCache: () => visualSettings.readCache === true });
   let demo = false;
   let visualSettings = defaultVisualSettings();
+  const inheritedRouting = inheritedAccountRouting();
+  const accounts = new Accounts(pi, () => inheritedRouting ?? visualSettings.accountRouting,
+    (accountRouting, ctx) => applyVisualSettings({ ...visualSettings, accountRouting }, ctx));
   let profileStore: ProfileStore | undefined;
   let animations = visualSettings.animations;
   let enabled = visualSettings.ui;
@@ -153,6 +158,25 @@ export default function piJar(pi: ExtensionAPI): void {
   let welcomeStatuses = (): ReadonlyMap<string, string> => new Map();
   const working = new WorkingState();
   let workingIndicatorKey = "";
+  let workingMessage: string | undefined;
+  /** Liveness while a turn runs silently: elapsed label and mascot pose, bounded by the render tier. */
+  let activityContext: ExtensionContext | undefined;
+  const activityClock = new ActivityClock({
+    tick: (now) => {
+      if (activityContext) applyWorking(activityContext);
+      composer.tick(now);
+    },
+    nextDelay: (now) => {
+      const startedAt = working.started;
+      if (startedAt === undefined || !enabled) return undefined;
+      return activityDelay(now, startedAt, renders?.tier.backgroundMs, composer.nextActiveFrameDelay(now));
+    }
+  });
+  const syncActivity = (ctx: ExtensionContext) => {
+    if (working.started === undefined || !ctx.hasUI || ctx.mode !== "tui") { activityClock.stop(); activityContext = undefined; return; }
+    activityContext = ctx;
+    if (activityClock.active) activityClock.reschedule(); else activityClock.start();
+  };
   let openSettings: (ctx: ExtensionContext) => Promise<void> = async () => {};
   let settingsOpen = false;
   const discussionClient = delegatedChild ? discussionClientFromEnv() : undefined;
@@ -338,10 +362,16 @@ export default function piJar(pi: ExtensionAPI): void {
       return undefined;
     }
   };
-  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild, beforeSessionStart: initializeProfiles });
+  modelRoles.register((ctx) => openRolesUi(ctx, modelRoles), { activateDefault: () => !delegatedChild,
+    beforeSessionStart: async (ctx) => {
+      const profile = initializeProfiles(ctx);
+      await accounts.ready(ctx);
+      return profile;
+    } });
   let delegateController: DelegateController | undefined;
   registerDelegate(pi, modelRoles, subagents, { changes: () => changes, changed: refreshChanges,
-    discussionEnv: (key, name) => discussion?.childEnv(key, name),
+    discussionEnv: (key, name) => ({ ...discussion?.childEnv(key, name), ...accounts.environment() }),
+    withheldEnv: () => accounts.withheldEnvironment(),
     discussionRetire: (key) => discussion?.retire(key),
     discussionUnread: (key) => discussion?.unreadFor(key) ?? 0,
     discussionDigest: () => discussion?.digest(),
@@ -386,15 +416,19 @@ export default function piJar(pi: ExtensionAPI): void {
     if (!ctx.hasUI || ctx.mode !== "tui") return;
     composer.setActivity(enabled ? working.phase : "idle", animations);
     try {
-      if (!enabled) { workingIndicatorKey = ""; ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); return; }
+      if (!enabled) { workingIndicatorKey = ""; workingMessage = undefined; ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); return; }
       const view = working.view(animations, (color, text) => ctx.ui.theme?.fg(color, text) ?? text,
         Date.now(), ctx.thinkingLevel);
-      ctx.ui.setWorkingMessage?.(view.message);
-      const indicatorKey = `${working.phase}:${animations}`;
+      // Every message change redraws the transcript; the activity clock calls this each second.
+      if (view.message !== workingMessage) { workingMessage = view.message; ctx.ui.setWorkingMessage?.(view.message); }
+      // Small and medium sessions get a moving spinner at their background cadence; large
+      // sessions keep a static one because each frame redraws the whole transcript.
+      const spinMs = renders?.tier.minEntries !== undefined && renders.tier.minEntries < LARGE_SESSION_ENTRIES && animations
+        ? renders.tier.backgroundMs : undefined;
+      const indicatorKey = `${working.phase}:${animations}:${spinMs ?? "static"}`;
       if (indicatorKey !== workingIndicatorKey) {
-        // Pi's normal streaming/tool lifecycle already causes renders. A static indicator avoids
-        // forcing the entire transcript to repaint on a timer in long sessions.
-        ctx.ui.setWorkingIndicator({ frames: [view.frames[0] ?? "✢"] });
+        if (spinMs !== undefined && view.frames.length > 1) ctx.ui.setWorkingIndicator({ frames: view.frames, intervalMs: Math.max(spinMs, 160) });
+        else ctx.ui.setWorkingIndicator({ frames: [view.frames[0] ?? "✢"] });
         workingIndicatorKey = indicatorKey;
       }
     } catch { /* Working decoration must never interrupt a Pi turn. */ }
@@ -674,7 +708,14 @@ export default function piJar(pi: ExtensionAPI): void {
       ctx.ui.notify(`Accent ${next.accent} is not loaded`, "warning");
       return;
     }
+    const routingChanged = JSON.stringify(next.accountRouting) !== JSON.stringify(visualSettings.accountRouting);
     visualSettings = next;
+    // Same activation as /jar routing: install or restore providers, then refresh model availability.
+    if (routingChanged) {
+      void accounts.ready(ctx).catch((error: unknown) => {
+        ctx.ui.notify(`Account routing: ${error instanceof Error ? error.message : String(error)}`, "error");
+      });
+    }
     setIconSet(next.icons);
     enabled = next.ui;
     animations = next.animations;
@@ -692,6 +733,7 @@ export default function piJar(pi: ExtensionAPI): void {
     composer.setActivity(enabled ? working.phase : "idle", animations);
     suggest.sync();
     applyWorking(ctx);
+    syncActivity(ctx);
     if (!wasEnabled && enabled) showWelcome(ctx);
     else if (!hadMotion && animations && welcomeTui && !welcomeInterval) {
       { welcomeInterval = setInterval(() => { welcomeFrame++; welcomeTui?.requestRender(); }, WELCOME_INTERVAL_MS); welcomeInterval.unref?.(); }
@@ -736,6 +778,7 @@ export default function piJar(pi: ExtensionAPI): void {
       modelRoles.load(ctx.cwd, next.roles, next.id);
       composer.setProfile(next.name);
       applyVisualSettings(next.settings, ctx, { persist: false, accent: false });
+      await accounts.ready(ctx);
       if (!await modelRoles.activate("default", ctx, true)) ctx.ui.notify("Profile loaded, but its default model is unavailable; keeping the current model", "warning");
       repaint("profile"); welcomeTui?.requestRender();
       ctx.ui.notify(`Profile: ${next.name}`, "info");
@@ -803,6 +846,7 @@ export default function piJar(pi: ExtensionAPI): void {
   };
   pi.on("session_start", (event, ctx) => {
     sideUsage.clear();
+    sessionPin = undefined;
     if (!profileStore) initializeProfiles(ctx);
     composer.setProfile(profileStore?.activeName ?? "Default");
     setIconSet(visualSettings.icons);
@@ -909,49 +953,65 @@ export default function piJar(pi: ExtensionAPI): void {
     }, 90);
     welcomeTui.requestRender();
   };
-  pi.on("input", (event, ctx) => {
-    if (profileStore && !conversationStarted(profileEntries(ctx))) {
-      const id = profileStore.active().id;
-      if (pinnedProfileId(profileEntries(ctx)) !== id) pi.appendEntry?.(PROFILE_ENTRY, { version: 1, id });
+  /**
+   * Profile pin and whether the conversation began, read from the session once and then kept
+   * current here, so prompts and turn starts never re-walk a long session.
+   */
+  let sessionPin: { id?: string; started: boolean } | undefined;
+  const pinState = (ctx: ExtensionContext) => {
+    if (!sessionPin) {
+      const entries = profileEntries(ctx);
+      sessionPin = { id: pinnedProfileId(entries), started: conversationStarted(entries) };
     }
+    return sessionPin;
+  };
+  const pinProfile = (ctx: ExtensionContext) => {
+    if (!profileStore) return;
+    const state = pinState(ctx);
+    const id = profileStore.active().id;
+    if (state.id === id) return;
+    pi.appendEntry?.(PROFILE_ENTRY, { version: 1, id });
+    state.id = id;
+  };
+  pi.on("input", (event, ctx) => {
+    if (profileStore && !pinState(ctx).started) pinProfile(ctx);
     if (event.source !== "interactive") return;
     dismissWelcome(ctx);
     if (!todosAcknowledged && todos?.all().every((item) => item.done)) { todosAcknowledged = true; updateTaskWidget(ctx); }
   });
   pi.on("agent_start", (_event, ctx) => {
-    if (profileStore && pinnedProfileId(profileEntries(ctx)) !== profileStore.active().id) {
-      pi.appendEntry?.(PROFILE_ENTRY, { version: 1, id: profileStore.active().id });
-    }
-    dismissWelcome(ctx); working.start(); applyWorking(ctx); refreshQuota(ctx);
+    pinProfile(ctx);
+    dismissWelcome(ctx); working.start(); applyWorking(ctx); syncActivity(ctx); refreshQuota(ctx);
   });
-  pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); });
+  pi.on("turn_start", (_event, ctx) => { working.start(); applyWorking(ctx); syncActivity(ctx); });
   pi.on("message_end", (event, ctx) => {
     // Every message (user, assistant, tool result) moves the context window, and a tool-heavy turn
     // ends many: count the entry and let the sampler recompute once per window, not per message.
     renders?.addEntries(1);
     contextUsage?.markDirty(() => ctx.getContextUsage());
+    if (event.message.role === "user" && sessionPin) sessionPin.started = true;
     if (event.message.role === "assistant") {
       working.reportOutputTokens(event.message.usage?.output ?? 0);
       addMessageCost(event.message);
-      applyWorking(ctx);
+      applyWorking(ctx); syncActivity(ctx);
       repaint("cost", "background");
     }
   });
   pi.on("tool_execution_start", (event, ctx) => {
-    working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx);
+    working.toolStart(event.toolCallId, event.toolName); applyWorking(ctx); syncActivity(ctx);
   });
   pi.on("tool_execution_end", (event, ctx) => {
-    working.toolEnd(event.toolCallId); applyWorking(ctx);
+    working.toolEnd(event.toolCallId); applyWorking(ctx); syncActivity(ctx);
   });
-  pi.on("ui_prompt_start", (_event, ctx) => { working.prompt(true); applyWorking(ctx); });
-  pi.on("ui_prompt_end", (_event, ctx) => { working.prompt(false); applyWorking(ctx); });
+  pi.on("ui_prompt_start", (_event, ctx) => { working.prompt(true); applyWorking(ctx); syncActivity(ctx); });
+  pi.on("ui_prompt_end", (_event, ctx) => { working.prompt(false); applyWorking(ctx); syncActivity(ctx); });
   // A request may span several tool turns; keep its elapsed time and reported tokens until agent_end.
-  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); refreshQuota(ctx); });
-  pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); sampleFooter(ctx); });
+  pi.on("turn_end", (_event, ctx) => { applyWorking(ctx); syncActivity(ctx); refreshQuota(ctx); });
+  pi.on("agent_end", (_event, ctx) => { working.end(); applyWorking(ctx); syncActivity(ctx); sampleFooter(ctx); });
   pi.on("agent_before_settle", (event) => { if (event.outcome === "error") composer.flash("error"); });
   // Retries or compaction after agent_end may have added messages; otherwise the agent_end sample stands.
   pi.on("agent_settled", (_event, ctx) => {
-    working.end(); applyWorking(ctx); if (contextUsage?.dirty) sampleFooter(ctx); refreshQuota(ctx);
+    working.end(); applyWorking(ctx); syncActivity(ctx); if (contextUsage?.dirty) sampleFooter(ctx); refreshQuota(ctx);
   });
   pi.on("session_tree", (_event, ctx) => {
     let branch: readonly unknown[] = [];
@@ -977,6 +1037,8 @@ export default function piJar(pi: ExtensionAPI): void {
   pi.on("thinking_level_select", (_event, _ctx) => repaint("effort"));
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); sampleFooter(ctx); });
   pi.on("session_shutdown", (_event, ctx) => {
+    sessionPin = undefined;
+    activityClock.stop(); activityContext = undefined;
     clearSessionBranchCache(ctx);
     stopWelcome(ctx);
     composer.disable(ctx);
@@ -1055,12 +1117,22 @@ export default function piJar(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("jar", {
-    description: "Pi-jar settings, read-only history, to-dos, prompts, quota and animations",
+    description: "Pi-jar settings, accounts, read-only history, to-dos, prompts, quota and animations",
     handler: async (args, ctx) => {
       const command = args.trim().toLowerCase();
       if (!command && ctx.hasUI && ctx.mode === "tui" || command === "settings") {
         if (!ctx.hasUI || ctx.mode !== "tui") { ctx.ui.notify("Settings require the interactive TUI", "warning"); return; }
         await openSettings(ctx);
+        return;
+      }
+      if (command === "routing" || command.startsWith("routing ")) {
+        try { await accounts.routing(args.trim().slice("routing".length).trim(), ctx); }
+        catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+        return;
+      }
+      if (command === "accounts" || command.startsWith("accounts ")) {
+        try { await accounts.command(args.trim().slice("accounts".length).trim(), ctx); }
+        catch (error) { ctx.ui.notify((error as Error).message, "error"); }
         return;
       }
       if (!command || command === "status") {
@@ -1231,7 +1303,7 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "quota on" && quotaCache) { quotaCache.enabled = true; quotaDisabledByUser = false; refreshQuota(ctx); }
       else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaDisabledByUser = true; quotaCache.stop(); }
       else {
-        ctx.ui.notify("Usage: /jar [status|perf|settings|activity|shells|sessions [search]|icons [unicode|nerd|ascii]|commit [note]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
+        ctx.ui.notify("Usage: /jar [status|perf|settings|routing on/off|accounts|activity|shells|sessions [search]|icons [unicode|nerd|ascii]|commit [note]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;
       }
       if (!["animations on", "animations off", "ui on", "ui off"].includes(command)) installUi(ctx);

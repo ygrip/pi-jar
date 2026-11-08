@@ -53,6 +53,29 @@ const MAX_REQUEST_BYTES = 16 * 1024;
 const MAX_REPLY_BYTES = 256 * 1024;
 const MAX_CONNECTIONS = 64;
 const IO_TIMEOUT_MS = 5_000;
+/** How long a starting turn may wait for unread mail; the broker is local, so this is generous. */
+export const INBOX_DEADLINE_MS = 250;
+
+/**
+ * Resolve with `work`'s value if it settles within `ms`, otherwise with undefined; a later value
+ * goes to `late` instead of being lost.
+ */
+export function withinDeadline<T>(work: Promise<T | undefined>, ms: number, late: (value: T | undefined) => void): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    let expired = false;
+    const timer = setTimeout(() => { expired = true; resolve(undefined); }, ms);
+    timer.unref?.();
+    void work.then((value) => {
+      if (expired) { late(value); return; }
+      clearTimeout(timer);
+      resolve(value);
+    }, () => {
+      if (expired) return;
+      clearTimeout(timer);
+      resolve(undefined);
+    });
+  });
+}
 const SOCKET_NAME = "broker.sock";
 /** macOS caps a Unix socket path near 104 bytes. */
 const MAX_SOCKET_PATH = 100;
@@ -456,13 +479,26 @@ export function registerDiscussionTool(pi: ExtensionAPI, transport: () => Discus
   // At a natural boundary only: unread mail joins the turn that is starting anyway, as one hidden message
   // that already carries it, so reading it costs no list call. Discussion traffic never sends a message
   // or triggers a turn, so agents cannot wake each other into a loop.
+  // Reading the inbox marks mail read, so a reply that misses this turn's deadline is kept for the next.
+  // Late mail belongs to the session that read it: a session change discards it and any read still
+  // in flight, so one session's messages are never injected into another session's prompt.
+  let late: string[] = [];
+  let generation = 0;
+  const newSession = () => { generation++; late = []; };
+  pi.on?.("session_start", newSession);
+  pi.on?.("session_shutdown", newSession);
   pi.on?.("before_agent_start", async () => {
     const broker = transport();
     if (!broker) return;
-    let inbox: ListResult;
-    // Advisory only: a broker failure surfaces on the agent's next jar_discuss call instead of delaying this turn.
-    try { inbox = await broker.inbox(); } catch { return; }
-    const content = inboxNotice(inbox);
-    if (content) return { message: { customType: DISCUSSION_NOTICE, display: false, content } };
+    const carried = late.splice(0);
+    const readIn = generation;
+    // Advisory only: never hold the model request on the broker. A slow reply joins the next turn;
+    // a failure surfaces on the agent's next jar_discuss call.
+    const reading = broker.inbox().then(inboxNotice, () => undefined);
+    const content = await withinDeadline(reading, INBOX_DEADLINE_MS, (notice) => {
+      if (notice && readIn === generation) late.push(notice);
+    });
+    const notices = [...carried, ...(content ? [content] : [])];
+    if (notices.length) return { message: { customType: DISCUSSION_NOTICE, display: false, content: notices.join("\n\n") } };
   });
 }

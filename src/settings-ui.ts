@@ -5,6 +5,7 @@ import { FOOTER_FIELDS, type FooterField } from "./footer-settings.ts";
 import { ICON_SETS } from "./icons.ts";
 import { GOAL_ROUND_CHOICES, MAX_SUBAGENT_CHOICES, type JarAccent, type JarVisualSettings } from "./settings.ts";
 import type { ProfileAction } from "./profile-ui.ts";
+import { ACCOUNT_ROUTING_MODES } from "./account-settings.ts";
 
 const LABELS: Record<FooterField, string> = {
   model: "Model", effort: "Model effort", sessionName: "Session name", cwd: "Working directory",
@@ -42,7 +43,7 @@ export async function openJarSettings(
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
     let choosing: "goalRounds" | "maxSubagents" | undefined;
     const choices = () => choosing === "maxSubagents" ? MAX_SUBAGENT_CHOICES : GOAL_ROUND_CHOICES;
-    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 8 : page === "profiles" ? 2 : 7;
+    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? 9 : page === "profiles" ? 2 : 7;
     // Back on the row that opened the picker.
     const finishChoice = () => { selected = choosing === "maxSubagents" ? 3 : 2; choosing = undefined; };
     const piError = (error: unknown) => ctx.ui.notify("Could not change Pi setting: " + (error as Error).message, "error");
@@ -78,6 +79,11 @@ export async function openJarSettings(
         else if (index === 5) update({ ...state, advisorGates: !state.advisorGates });
         else if (index === 6) update({ ...state, cacheDiagnostics: !state.cacheDiagnostics });
         else if (index === 7) update({ ...state, readCache: !state.readCache });
+        else if (index === 8) {
+          const currentIndex = ACCOUNT_ROUTING_MODES.indexOf(state.accountRouting.mode);
+          const mode = ACCOUNT_ROUTING_MODES[(currentIndex + 1) % ACCOUNT_ROUTING_MODES.length]!;
+          update({ ...state, accountRouting: { ...state.accountRouting, mode } });
+        }
       } else if (index === 0) {
         const at = Math.max(0, accents.indexOf(state.accent));
         update({ ...state, accent: accents[(at + 1) % accents.length]! });
@@ -166,7 +172,8 @@ export async function openJarSettings(
             row(4, "Advisor (jar_advisor, /advisor)", state.advisor ? "ON" : "OFF", state.advisor),
             row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates),
             row(6, "Cache diagnostics (explain cache breaks)", state.cacheDiagnostics ? "ON" : "OFF", state.cacheDiagnostics),
-            row(7, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache)
+            row(7, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache),
+            row(8, "Account routing policy", state.accountRouting.mode.toUpperCase(), state.accountRouting.mode !== "off")
           ] : page === "profiles" ? [
             row(0, "Switch profile…", profiles!.activeName(), true),
             row(1, "Create profile…", "OPEN", true)
