@@ -154,7 +154,7 @@ export class AccountStore {
     mkdirSync(this.directory(name), { mode: 0o700 });
   }
   /**
-   * Remove only an EMPTY, private, incomplete reservation. Never delete a
+   * Remove only an empty, private, incomplete reservation. Never delete a
    * credential, account metadata, lock or other file left by a partial login.
    * This is safe for automatic cleanup after an unsuccessful first login and
    * explicit /jar accounts recover NAME for older interrupted attempts.
@@ -163,7 +163,23 @@ export class AccountStore {
     this.ensureRoot();
     const directory = this.directory(name);
     privatePath(directory, true);
-    if (readdirSync(directory).length > 0) {
+    const files = readdirSync(directory);
+    // Pi ModelRuntime creates an empty auth.json as part of initialization,
+    // even when browser authorization fails before any credential is issued.
+    // Only an empty JSON object is provably credential-free. Never remove
+    // populated/malformed auth files, metadata, locks or unknown files.
+    if (files.length === 1 && files[0] === "auth.json") {
+      const path = join(directory, "auth.json");
+      privatePath(path, false);
+      const raw = readFileSync(path, "utf8");
+      let auth: unknown;
+      try { auth = JSON.parse(raw); }
+      catch { throw new Error(`Reservation ${name} contains an unreadable auth file; no credentials were removed`); }
+      if (!auth || typeof auth !== "object" || Array.isArray(auth) || Object.keys(auth).length > 0) {
+        throw new Error(`Reservation ${name} contains credential data; inspect it manually before reuse (nothing deleted)`);
+      }
+      unlinkSync(path);
+    } else if (files.length > 0) {
       throw new Error(`Reservation ${name} contains files; inspect it manually before reuse (no credentials were removed)`);
     }
     rmdirSync(directory);
