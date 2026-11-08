@@ -15,7 +15,7 @@ const mockTheme = { fg: (_color: string, text: string) => text };
 const mockTui = { requestRender() {}, terminal: { rows: 24 } };
 
 test("interactive account manager can change routing policy and return to the menu", async () => {
-  const actions = ["r", 1, "esc"] as const; // hub shortcut, sticky, close hub
+  const actions: Array<string | number> = ["r", 1, "esc"]; // hub shortcut, sticky, close hub
   let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
   const accounts = {
     store: { list: () => [] },
@@ -47,7 +47,7 @@ test("interactive account manager can change routing policy and return to the me
 });
 
 test("OMP-style provider switching only pins the chosen provider", async () => {
-  const actions = ["s", 1, "esc"] as const; // hub switch on selected Anthropic provider, pin team, close hub
+  const actions: Array<string | number> = ["s", 1, "esc"]; // hub switch on selected Anthropic provider, pin team, close hub
   const members = [
     { version: 1, name: "personal", provider: "openai-codex", auth: "oauth" },
     { version: 1, name: "work", provider: "openai-codex", auth: "oauth" },
