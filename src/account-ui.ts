@@ -135,7 +135,7 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
     const remaining = status?.remaining === undefined ? "quota unknown" : `${status.remaining}% left`;
     const connected = accounts.store.hasCredentials(account) ? "" : " · SIGNED OUT / MISSING KEY";
     const cooldown = status?.blockedUntil && status.blockedUntil > Date.now() ? " · cooldown" : "";
-    const pin = accounts.policy().pinned?.[account.provider] === account.name ? " · PINNED" : "";
+    const pin = accounts.policy().pinned?.[account.provider] === account.name ? " · PINNED" : status?.lastUsed ? " · LAST USED" : "";
     const allowed = accounts.policy().accounts;
     const excluded = allowed.length && !allowed.includes(account.name) ? " · excluded" : "";
     return `${account.name} · ${account.auth === "oauth" ? "OAuth" : "API key"} · ${remaining}${cooldown}${pin}${excluded}${connected}`;
