@@ -13,7 +13,7 @@ export interface AccountDefinition {
   auth: "oauth" | "env";
   env?: string;
 }
-export interface AccountHealth { blockedUntil?: number; quota?: import("./quota.ts").Quota; checkedAt?: number }
+export interface AccountHealth { blockedUntil?: number; quota?: import("./quota.ts").Quota; checkedAt?: number; credentialGeneration?: string }
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
 /** Health updates hold the lock for one small read and write; anything older crashed mid-update. */
 const HEALTH_LOCK_STALE_MS = 10_000;
@@ -127,7 +127,7 @@ export class AccountStore {
     const path = this.credentialPath(name);
     try { privatePath(path, false); unlinkSync(path); }
     catch (error) { if (!missing(error)) throw error; }
-    this.saveHealth(name, {});
+    this.resetHealthForCredentialChange(name);
   }
 
   /** Remove one account's private credentials, never Pi's main login or arbitrary files. */
@@ -145,10 +145,32 @@ export class AccountStore {
     rmdirSync(directory);
   }
 
-  /** Reserve the name before login so two sessions cannot silently overwrite an account. */
+  /**
+   * Reserve the name before login so another session cannot silently reuse it.
+   * Incomplete older reservations must be explicitly recovered, never overwritten.
+   */
   reserve(name: string): void {
     this.ensureRoot();
     mkdirSync(this.directory(name), { mode: 0o700 });
+  }
+  /**
+   * Remove only an EMPTY, private, incomplete reservation. Never delete a
+   * credential, account metadata, lock or other file left by a partial login.
+   * This is safe for automatic cleanup after an unsuccessful first login and
+   * explicit /jar accounts recover NAME for older interrupted attempts.
+   */
+  discardEmptyReservation(name: string): void {
+    this.ensureRoot();
+    const directory = this.directory(name);
+    privatePath(directory, true);
+    if (readdirSync(directory).length > 0) {
+      throw new Error(`Reservation ${name} contains files; inspect it manually before reuse (no credentials were removed)`);
+    }
+    rmdirSync(directory);
+  }
+  /** Advance an identity epoch when OAuth changes, invalidating old quota probes across processes. */
+  resetHealthForCredentialChange(name: string): void {
+    this.saveHealth(name, { credentialGeneration: randomUUID() });
   }
   save(account: AccountDefinition): void {
     privatePath(this.directory(account.name), true);
