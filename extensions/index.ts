@@ -193,13 +193,11 @@ export default function piJar(pi: ExtensionAPI): void {
     if (open.length) todosAcknowledged = false;
     const visible = enabled && items.length > 0 && (open.length > 0 || !todosAcknowledged);
     try {
+      // Tasks stay in their own widget; Ember must remain visible next to the editor even
+      // when a session grows or the task widget is clipped/removed by the TUI.
       ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (tui, theme) =>
-        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState, {
-          render: (width) => composer.enabled ? composer.renderMascot(width) : undefined,
-          poke: () => composer.pokeMascot()
-        }));
-      composer.setTasksVisible(visible);
-    } catch { composer.setTasksVisible(false); /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
+        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState));
+    } catch { /* Optional task widget failure must never hide the mascot. */ }
   };
   registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
   let changes: ChangeTracker | undefined;
