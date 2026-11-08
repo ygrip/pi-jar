@@ -47,7 +47,7 @@ test("interactive account manager can change routing policy and return to the me
 });
 
 test("OMP-style provider switching only pins the chosen provider", async () => {
-  const actions = ["s", 0, 1, "esc"] as const; // hub switch, provider picker, account picker, close hub
+  const actions = ["s", 1, "esc"] as const; // hub switch on selected Anthropic provider, pin team, close hub
   const members = [
     { version: 1, name: "personal", provider: "openai-codex", auth: "oauth" },
     { version: 1, name: "work", provider: "openai-codex", auth: "oauth" },
