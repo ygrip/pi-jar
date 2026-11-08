@@ -490,8 +490,11 @@ test("separate providers maintain independent same-provider routing and never bo
   await second.streamSimple(secondary, context).result();
   assert.deepEqual(f.calls, ["key-a", "key-b"], "rotation uses only the first provider's pool");
   assert.deepEqual(secondKeys, ["second-secret", "second-secret"], "second provider never borrows first-provider credentials");
-  const wrong = await second.streamSimple(model, context).result();
-  assert.equal(wrong.stopReason, "error", "a model from another provider is not eligible for this pool");
+  // The model ID is deliberately identical to the second provider's model.
+  // The provider ID, not a coincidentally matching model name, is the boundary.
+  const wrong = await second.streamSimple({ ...secondary, provider: model.provider }, context).result();
+  assert.equal(wrong.stopReason, "error", "a model with a matching ID from another provider is still rejected");
+  assert.match(wrong.errorMessage ?? "", /cannot be routed through second/);
   assert.deepEqual(secondKeys, ["second-secret", "second-secret"]);
   // Providers may expose identical model IDs. Routing must compare provider
   // identity first, not merely the model ID, or cross-provider auth can leak.
