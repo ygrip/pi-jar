@@ -35,7 +35,7 @@ test("interactive account manager can change routing policy and return to the me
         if (choice === "r" || choice === "s") view.handleInput(choice);
         else if (choice === "esc") view.handleInput("\x1b");
         else {
-          for (let index = 0; index < choice!; index++) view.handleInput("\x1b[B");
+          if (typeof choice === "number") for (let index = 0; index < choice; index++) view.handleInput("\x1b[B");
           view.handleInput("\r");
         }
       })
@@ -74,7 +74,7 @@ test("OMP-style provider switching only pins the chosen provider", async () => {
         if (choice === "r" || choice === "s") view.handleInput(choice);
         else if (choice === "esc") view.handleInput("\x1b");
         else {
-          for (let index = 0; index < choice!; index++) view.handleInput("\x1b[B");
+          if (typeof choice === "number") for (let index = 0; index < choice; index++) view.handleInput("\x1b[B");
           view.handleInput("\r");
         }
       })
