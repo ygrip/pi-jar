@@ -127,7 +127,11 @@ export class AccountRouter {
     const accounts = this.store.list().filter(account => account.provider === provider.id
       && (!settings.accounts.length || settings.accounts.includes(account.name))
       && (!pinnedName || account.name === pinnedName)
-      && !tried.has(account.name));
+      && !tried.has(account.name)
+      // The ModelRuntime may hold a credential in memory after another Pi process
+      // signs out or an API-key environment variable disappears. A fresh request
+      // must never select an account whose configured credential source is gone.
+      && this.store.hasCredentials(account));
     const states = accounts.map(account => this.state(account, provider));
     await Promise.all(states.map(state => this.refreshQuota(state, signal)));
     signal?.throwIfAborted();
