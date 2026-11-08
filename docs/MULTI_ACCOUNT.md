@@ -68,6 +68,13 @@ A pin must refer to a configured, authenticated account allowed by the active pr
 
 The account status lists remaining subscription quota, shared cooldowns, and quota-lookup warnings. The footer identifies the selected account and uses its fresh quota rather than the main login's limits. `/usage` retains Pi's original token/cost accounting, including provider-reported billing totals in Pi 1.5; switching accounts does not reset session cost. There is no separate account-cost ledger.
 
+
+### Provider-scoped routing
+
+Pi-Jar never creates shadow providers such as `openai-codex-2` and never rewrites the active provider/model ID. Every account is tied to its exact Pi provider ID. Automatic sticky, round-robin and quota-first selection run **only within that provider's pool**, with profile allowlist and individual account health applied before selection. A clean HTTP 429 can fail over to another eligible account of that same provider before any content or usage is exposed; a pinned account intentionally does not fail over. Cross-provider fallback is *only* possible through an explicitly configured model-role fallback, not the account router.
+
+In the hub, selecting a named account pins that provider under the active Pi-Jar profile. It does **not** switch the model or affect other providers' account pools. Selecting `Automatic selection` clears the pin. If routing was off, selecting/pinning an account enables `sticky` so the choice takes effect. Profile restrictions are enforced before pinning, and excluding a pinned account clears its pin. Policies are captured per request, so a UI change never reroutes an already-running response.
+
 ## Profiles, roles and subagents
 
 The policy, per-provider pins, and optional account allowlist belong to the active profile:
