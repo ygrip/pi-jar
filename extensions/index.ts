@@ -813,7 +813,7 @@ export default function piJar(pi: ExtensionAPI): void {
       (next) => applyVisualSettings(next, ctx), loadedAccents(ctx), piPreferences(ctx), profileStore ? {
         activeName: () => profileStore?.activeName ?? "Default",
         open: (action) => profileUi(ctx, action)
-      } : undefined); }
+      } : undefined, () => openAccountManager(ctx, accounts)); }
     finally { settingsOpen = false; }
   };
   pi.registerCommand("profiles", {
