@@ -477,11 +477,10 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
   pi.registerTool({
     name: SHELL_TOOL,
     label: "shell",
-    description: "Background jobs: services, watchers and long commands; finite commands under ~2 min (build, test, git) belong in bash. start returns immediately, or with waitMs waits (≤30s) for exit and returns the exit code and output in one call. output returns only lines new since your last read (all: true for the trailing window). peek/list read status, wait blocks boundedly on selected finite jobs, kill stops the process tree. Completion notifications are compact, coalesced and arrive at the next safe turn boundary; they cannot interrupt an in-flight response, so when no useful work remains call wait instead of idling. Results read via output/peek/list/wait/start-with-waitMs are acknowledged and do not replay. Set watch to a regex for the line you wait for (e.g. \"listening|ready|error\"); mark never-ending jobs purpose: service, never wait on services, and kill shells you no longer need.",
+    description: "Background jobs: services, watchers and long commands (finite commands under ~2 min belong in bash). start returns at once, or with waitMs (≤30s) waits for exit and returns exit code and output together. output returns only new lines (all: true for the trailing window). peek/list show status, wait blocks boundedly on chosen jobs, kill stops the process tree. Completion notices arrive at the next safe turn boundary and cannot interrupt a response; with no other work, call wait. Results already read are not replayed. Set watch to a regex for the line you wait for (e.g. \"listening|ready|error\"); mark never-ending jobs purpose: service and never wait on them; kill shells you no longer need.",
     promptSnippet: "Services, watchers and long jobs in the background.",
     promptGuidelines: [
-      "Use bash for finite commands expected under ~2 min (build, test, git); jar_shell only for services, watchers or long jobs; short-but-uncertain: jar_shell start with waitMs.",
-      "Don't poll jar_shell; keep working, then wait on explicit ids before the final summary. Never claim a check passed without its exit code."
+      "Use bash for finite commands under ~2 min; jar_shell for services, watchers or long jobs (short but uncertain: start with waitMs). Don't poll; wait on explicit ids before the final summary. Never claim a check passed without its exit code."
     ],
     parameters: Parameters,
     async execute(_id, params, signal, _update, ctx) {

@@ -7,6 +7,8 @@ import type { AccountDefinition, AccountHealth, AccountStore } from "./account-s
 import type { AccountRoutingSettings } from "./account-settings.ts";
 import { fetchQuota, QUOTA_TTL_MS, type Quota, type QuotaProvider } from "./quota.ts";
 
+/** Longest a quota-first request waits for first-ever quota probes. */
+const COLD_QUOTA_WAIT_MS = 500;
 type StreamOptions = SimpleStreamOptions | ApiStreamOptions<Api>;
 interface AccountState {
   definition: AccountDefinition;
@@ -134,71 +136,93 @@ export class AccountRouter {
       throw new RoutingError(`Model ${model.provider}/${model.id} does not belong to routed provider ${provider.id}`);
     }
     const pinnedName = settings.pinned?.[provider.id];
+    const unreadable: string[] = [];
     const accounts = this.store.list().filter(account => account.provider === provider.id
       && (!settings.accounts.length || settings.accounts.includes(account.name))
       && (!pinnedName || account.name === pinnedName)
       && !tried.has(account.name)
-      // The ModelRuntime may hold a credential in memory after another Pi process
-      // signs out or an API-key environment variable disappears. A fresh request
-      // must never select an account whose configured credential source is gone.
-      && this.store.hasCredentials(account));
+      && this.hasUsableCredentials(account, unreadable));
     const states = accounts.map(account => this.state(account, provider));
     // Remote quota endpoints can stall for seconds. Routing uses the latest shared
     // quota snapshot and starts coalesced refreshes asynchronously, never gating
     // a healthy request on a usage endpoint. Provider 429 remains authoritative.
+    const coldProbes: Promise<void>[] = [];
     for (const state of states) {
       state.health = this.store.health(state.definition.name);
-      void this.refreshQuota(state).catch(() => {
+      const probe = this.refreshQuota(state).catch(() => {
         state.quotaError = "Quota lookup unavailable; provider limits still apply";
       });
+      if (state.health.quota === undefined) coldProbes.push(probe);
+    }
+    // quota-first ranks by remaining quota, so with no snapshot at all the order would be
+    // arbitrary. Give the first probes a short, bounded head start; other modes never wait.
+    if (settings.mode === "quota-first" && coldProbes.length) {
+      await this.waitBriefly(Promise.all(coldProbes), COLD_QUOTA_WAIT_MS);
+      for (const state of states) state.health = this.store.health(state.definition.name);
     }
     signal?.throwIfAborted();
     const candidates = states.filter(state =>
       (state.health.blockedUntil ?? 0) <= this.now()
       && remainingQuota(state.health.quota, this.now()) !== 0
       && (state.unavailableUntil ?? 0) <= this.now());
-    // Credential-scoped catalog validation can involve IO. Bound parallelism
-    // avoids N sequential delays without spawning unbounded provider requests.
-    const eligibleFlags = new Array<boolean>(candidates.length).fill(false);
-    let nextIndex = 0;
-    const check = async () => {
-      while (true) {
-        signal?.throwIfAborted();
-        const index = nextIndex++;
-        if (index >= candidates.length) return;
-        const state = candidates[index]!;
-        try {
-          const models = await (await state.models).getAllAvailable(provider.id, { signal });
-          eligibleFlags[index] = models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
-            && (candidate.type ?? "chat") === (model.type ?? "chat") && candidate.api === model.api);
-        } catch {
-          signal?.throwIfAborted();
-          state.unavailableUntil = this.now() + 60_000;
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(4, candidates.length) }, () => check()));
-    signal?.throwIfAborted();
-    const eligible = candidates.filter((_, index) => eligibleFlags[index]);
-    if (!eligible.length) throw new RoutingError(`No eligible ${provider.id} account for ${model.id}; check /jar accounts, profile allowlist, login and quota resets`);
-    if (settings.mode === "quota-first") {
-      eligible.sort((a, b) => (remainingQuota(b.health.quota, this.now()) ?? -1) - (remainingQuota(a.health.quota, this.now()) ?? -1)
-        || a.inFlight - b.inFlight || a.definition.name.localeCompare(b.definition.name));
-    } else if (settings.mode === "sticky") {
-      const name = this.sticky.get(provider.id);
-      const index = eligible.findIndex(state => state.definition.name === name);
-      if (index > 0) eligible.unshift(eligible.splice(index, 1)[0]!);
-    } else if (settings.mode === "round-robin") {
-      const cursor = this.cursor.get(provider.id) ?? 0;
-      const index = cursor % eligible.length;
-      this.cursor.set(provider.id, cursor + 1);
-      eligible.push(...eligible.splice(0, index));
+    const selected = await this.firstEligible(this.preferenceOrder(candidates, provider.id, settings), provider, model, signal);
+    if (!selected) {
+      const skipped = unreadable.length ? ` (skipped accounts with unreadable credentials: ${unreadable.join(", ")})` : "";
+      throw new RoutingError(`No eligible ${provider.id} account for ${model.id}; check /jar accounts, profile allowlist, login and quota resets${skipped}`);
     }
-    const selected = eligible[0]!;
     this.sticky.set(provider.id, selected.definition.name);
     this.onRoute?.(selected.definition.name, provider.id, selected.health);
     selected.inFlight++;
     return selected;
+  }
+  /**
+   * The ModelRuntime may hold a credential in memory after another Pi process signs out or an
+   * API-key variable disappears, so a fresh request re-checks the configured credential source.
+   * One account with a broken file must not fail the whole provider: skip it and report it.
+   */
+  private hasUsableCredentials(account: AccountDefinition, unreadable: string[]): boolean {
+    try { return this.store.hasCredentials(account); }
+    catch { unreadable.push(account.name); return false; }
+  }
+  private async waitBriefly(work: Promise<unknown>, ms: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>(resolve => { timer = setTimeout(resolve, ms); });
+    try { await Promise.race([work, timeout]); }
+    finally { if (timer) clearTimeout(timer); }
+  }
+  /** Most preferred first. Failover walks this list, so only the winner is ever validated. */
+  private preferenceOrder(candidates: AccountState[], providerId: string, settings: AccountRoutingSettings): AccountState[] {
+    const ordered = [...candidates];
+    if (!ordered.length) return ordered;
+    if (settings.mode === "quota-first") {
+      ordered.sort((a, b) => (remainingQuota(b.health.quota, this.now()) ?? -1) - (remainingQuota(a.health.quota, this.now()) ?? -1)
+        || a.inFlight - b.inFlight || a.definition.name.localeCompare(b.definition.name));
+    } else if (settings.mode === "sticky") {
+      const name = this.sticky.get(providerId);
+      const index = ordered.findIndex(state => state.definition.name === name);
+      if (index > 0) ordered.unshift(ordered.splice(index, 1)[0]!);
+    } else if (settings.mode === "round-robin") {
+      const cursor = this.cursor.get(providerId) ?? 0;
+      this.cursor.set(providerId, cursor + 1);
+      ordered.push(...ordered.splice(0, cursor % ordered.length));
+    }
+    return ordered;
+  }
+  /** Credential-scoped catalog validation: the first account that serves this exact model wins. */
+  private async firstEligible(ordered: AccountState[], provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<AccountState | undefined> {
+    for (const state of ordered) {
+      signal?.throwIfAborted();
+      try {
+        const models = await (await state.models).getAllAvailable(provider.id, { signal });
+        const serves = models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
+          && (candidate.type ?? "chat") === (model.type ?? "chat") && candidate.api === model.api);
+        if (serves) return state;
+      } catch {
+        signal?.throwIfAborted();
+        state.unavailableUntil = this.now() + 60_000;
+      }
+    }
+    return undefined;
   }
   invalidate(name: string): void {
     const state = this.states.get(name);

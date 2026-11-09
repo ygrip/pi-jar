@@ -2,6 +2,9 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { popup } from "./popup.ts";
 import type { Accounts } from "./accounts.ts";
+import type { AccountDefinition } from "./account-store.ts";
+import type { AccountRouteStatus } from "./account-router.ts";
+import type { AccountRoutingSettings } from "./account-settings.ts";
 
 export type AccountHubAction =
   | { kind: "close" | "add" | "routing" | "allowlist" | "switch" | "limits"; provider?: string }
@@ -29,9 +32,24 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
     let accountHits: Array<{ y: number; index: number }> = [];
     let columnSplit = -1;
 
+    // Account files, health files and policy are read from disk. Read each once per input
+    // event instead of once per helper call; render() and handlers share the same snapshot.
+    let storedAccounts: AccountDefinition[] | undefined;
+    let routeStatuses: AccountRouteStatus[] | undefined;
+    let routingPolicy: AccountRoutingSettings | undefined;
+    const accountList = (): AccountDefinition[] => storedAccounts ??= accounts.store.list();
+    const statusList = (): AccountRouteStatus[] => routeStatuses ??= accounts.router.status();
+    const policy = (): AccountRoutingSettings => routingPolicy ??= accounts.policy();
+    const refreshSnapshot = () => { storedAccounts = undefined; routeStatuses = undefined; routingPolicy = undefined; };
+    // A malformed credential file must degrade to "SIGN IN", not crash the dashboard.
+    const hasCredentials = (account: AccountDefinition): boolean => {
+      try { return accounts.store.hasCredentials(account); }
+      catch { return false; }
+    };
+
     const groups = () => {
       const known = ctx.modelRegistry.getAll().map(model => model.provider);
-      const configured = accounts.store.list().map(account => account.provider);
+      const configured = accountList().map(account => account.provider);
       // Stored accounts stay visible when their provider plugin is uninstalled.
       return [...new Set([...known, ...configured])]
         .sort((a, b) => a.localeCompare(b));
@@ -42,7 +60,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
       const words = query.split(/\s+/);
       return groups().filter(id => {
         const provider = ctx.modelRegistry.getProvider(id);
-        const members = accounts.store.list().filter(account => account.provider === id);
+        const members = accountList().filter(account => account.provider === id);
         const terms = [id, provider?.name ?? "", ...members.map(member => member.name)].join(" ").toLocaleLowerCase();
         return words.every(word => terms.includes(word));
       });
@@ -63,18 +81,18 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
       const words = query.split(/\s+/).filter(Boolean);
       const providerTerms = `${provider} ${registered?.name ?? ""}`.toLocaleLowerCase();
       const providerMatch = words.every(word => providerTerms.includes(word));
-      const members = accounts.store.list().filter(account => account.provider === provider
+      const members = accountList().filter(account => account.provider === provider
         && (providerMatch || words.every(word => `${providerTerms} ${account.name}`.toLocaleLowerCase().includes(word))));
-      const pinned = accounts.policy().pinned?.[provider];
-      const statuses = accounts.router.status();
-      const allow = accounts.policy().accounts;
+      const pinned = policy().pinned?.[provider];
+      const statuses = statusList();
+      const allow = policy().accounts;
       return [
-        ...(registered ? [{ kind: "auto" as const, label: `Automatic selection · ${accounts.policy().mode}${pinned ? "" : " · current"}` }] : []),
+        ...(registered ? [{ kind: "auto" as const, label: `Automatic selection · ${policy().mode}${pinned ? "" : " · current"}` }] : []),
         ...members.map(account => {
           const status = statuses.find(item => item.name === account.name);
           const quota = status?.remaining === undefined ? "quota ?" : `${Math.round(status.remaining)}% left`;
           const blocked = (status?.blockedUntil ?? 0) > Date.now();
-          const missing = !accounts.store.hasCredentials(account);
+          const missing = !hasCredentials(account);
           const excluded = allow.length > 0 && !allow.includes(account.name);
           const flags = [pinned === account.name ? "PINNED" : "", !pinned && status?.lastUsed ? "LAST USED" : "", blocked ? "COOLDOWN" : "",
             missing ? "SIGN IN" : "", excluded ? "EXCLUDED" : ""].filter(Boolean).join(" · ");
@@ -129,6 +147,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
     return {
       invalidate() { search.invalidate(); },
       handleInput(data: string) {
+        refreshSnapshot();
         if (searching) {
           if (matchesKey(data, Key.escape)) { searching = false; search.setValue(""); }
           else if (matchesKey(data, Key.enter)) searching = false;
@@ -159,6 +178,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         tui.requestRender();
       },
       handleMouse(event: TuiMouseEvent) {
+        refreshSnapshot();
         if (event.type === "wheel" && event.wheelDelta) { move(Math.sign(event.wheelDelta) * 3); tui.requestRender(); return { handled: true }; }
         if (event.type !== "click" || event.button !== "left") return;
         const provider = providerHits.find(hit => hit.y === event.y);
@@ -170,13 +190,12 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         const available = Math.max(1, width);
         const providers = matching();
         const provider = currentProvider();
-        const allAccounts = accounts.store.list();
+        const allAccounts = accountList();
         const rows = choices();
         accountIndex = Math.max(0, Math.min(accountIndex, rows.length - 1));
         providerHits = []; accountHits = []; columnSplit = -1;
-        const policy = accounts.policy();
         const headerLine = header(" pi-jar  /  Accounts", available);
-        const summary = normal(` Pi native providers · ${allAccounts.length} accounts · ${policy.mode.toUpperCase()} · selected: ${provider ?? "none"}`, available);
+        const summary = normal(` Pi native providers · ${allAccounts.length} accounts · ${policy().mode.toUpperCase()} · selected: ${provider ?? "none"}`, available);
         const searchLine = searching ? search.render(Math.max(1, available))[0]! : theme.fg("dim", " / search · Tab switch pane · Enter open · Esc close");
         const out = [headerLine, summary, normal(searchLine, available), theme.fg("dim", "─".repeat(available))];
         const detail = (item: (typeof rows)[number], index: number, max: number): string => {

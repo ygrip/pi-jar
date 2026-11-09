@@ -588,7 +588,7 @@ test("CLI remove works for orphaned providers and refuses invalid or unknown nam
   await assert.rejects(() => accounts.command("remove ..\/private", ctx as never), /Unknown account|names must/);
 });
 
-test("routing does not await delayed quota endpoints and bounds concurrent catalog checks", { timeout: 10000 }, async () => {
+test("routing does not await delayed quota endpoints and validates only the preferred catalog", { timeout: 10000 }, async () => {
   const providerId = "openai-codex";
   const routedModel: Model<Api> = { ...model, provider: providerId };
   const definitions = Array.from({ length: 12 }, (_, index) => ({
@@ -639,8 +639,8 @@ test("routing does not await delayed quota endpoints and bounds concurrent catal
       })
     ]);
     assert.equal(result.stopReason, "stop");
-    assert.equal(checked, 12, "all eligible account catalogs were validated");
-    assert.ok(maximum > 1 && maximum <= 4, `expected bounded catalog concurrency, got ${maximum}`);
+    assert.equal(checked, 1, "only the winning account's catalog is validated");
+    assert.equal(maximum, 1, "catalogs are validated one at a time in preference order");
     assert.ok(probes > 0, "quota probes still run without gating the model request");
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -727,4 +727,22 @@ test("stale quota from old OAuth credentials cannot return after logout or recon
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(store.health("work").quota, undefined, "persistent epoch prevents cross-process stale writes");
   assert.ok(store.health("work").credentialGeneration);
+});
+
+test("an account whose credential check throws is skipped and reported, not fatal", async t => {
+  const f = fixture(t);
+  const original = f.store.hasCredentials.bind(f.store);
+  f.store.hasCredentials = account => {
+    if (account.name === "a") throw new Error("unsafe permissions");
+    return original(account);
+  };
+  const routed = f.router.wrap(f.provider);
+  const result = await routed.streamSimple(model, context).result();
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-b"]);
+
+  f.store.hasCredentials = () => { throw new Error("unsafe permissions"); };
+  const failed = await routed.streamSimple(model, context).result();
+  assert.equal(failed.stopReason, "error");
+  assert.match(failed.errorMessage ?? "", /unreadable credentials: a, b/);
 });

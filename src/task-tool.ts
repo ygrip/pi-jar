@@ -87,7 +87,7 @@ export function registerTaskTool(
   pi.registerTool({
     name: "jar_todo",
     label: "tasks",
-    description: "Maintain session tasks. write sets the complete current plan (omitted tasks are removed; each item has content, status, optional activeForm and one level of `subtasks`, whose completion completes the parent; progress counts leaves). update changes one task by stable id, append adds genuinely new work mid-run (not a new plan), remove deletes one task tree; start/done/open/edit are concise status operations. Stable IDs are returned for every task.",
+    description: "Maintain session tasks. write sets the complete plan (omitted tasks are removed; items have content, status, optional activeForm and one level of `subtasks`, whose completion completes the parent). update changes one task by id, append adds new work mid-run, remove deletes a task tree; start/done/open/edit are short status operations. IDs are returned for every task.",
     promptSnippet: "Track work with 3+ steps or several requests in jar_todo (skip trivial requests and questions): write the complete plan for a new request, start fresh once the old list is completed.",
     promptGuidelines: [
       "Keep exactly one leaf in_progress; mark it completed right after verifying it. Never batch completions or complete partial, failing or blocked work: keep it open and add a task for the blocker.",

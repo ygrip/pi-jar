@@ -45,12 +45,6 @@ export function composerIcon(phase: WorkingPhase, frame = 0): string {
   const moods = PHASE_MOODS[phase];
   return mascotFace(moods[frame % moods.length] ?? "idle");
 }
-export function shortSessionId(id?: string): string {
-  const clean = id?.trim();
-  if (!clean) return "";
-  const tail = clean.includes("-") ? clean.split("-").at(-1)! : clean;
-  return tail.slice(0, 8);
-}
 
 const SESSION_FIRST = ["ember", "quiet", "steady", "silver", "warm", "clear", "gentle", "lunar"] as const;
 const SESSION_LAST = ["trail", "lantern", "forge", "orbit", "harbor", "path", "spark", "grove"] as const;
@@ -409,8 +403,6 @@ export class ComposerStyle {
     return `${editing} · /plan · /goal`;
   }
 
-  /** Tasks share the mascot's perch instead of reserving a separate vertical widget. */
-  pokeMascot(): void { this.decor.poke(); }
   renderMascot(width: number): string[] | undefined {
     if (!this.mascotOn || width < 40) return undefined;
     let mood: MascotMood = "idle";

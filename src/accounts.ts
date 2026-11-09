@@ -194,8 +194,9 @@ export class Accounts {
     if (current.accounts.length === 1 && current.accounts[0] === name) {
       throw new Error("Removing the last allowed account would enable other accounts. Choose a different profile allowlist or explicitly 'use all' first");
     }
-    this.store.remove(name);
+    // Same order as logout(): stop background quota probes before touching account files.
     this.router.invalidate(name);
+    this.store.remove(name);
     const pins = Object.fromEntries(Object.entries(current.pinned ?? {}).filter(([, account]) => account !== name));
     const { pinned: _previous, ...rest } = current;
     this.update(Object.keys(pins).length
