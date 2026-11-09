@@ -1,17 +1,19 @@
-import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Provider } from "@earendil-works/pi-ai";
-import { validAccountName } from "./account-settings.ts";
+import { validAccountName, validProviderId } from "./account-settings.ts";
 
 export interface AccountDefinition {
   version: 1;
   name: string;
   provider: string;
-  /** OAuth credentials stay in the account's private auth.json, never in settings/profiles. */
+  /** Named OAuth credentials are private unless source is the linked Pi login. */
   auth: "oauth" | "env";
   env?: string;
+  /** Reuse Pi's primary auth.json and refresh lock; never duplicate its OAuth tokens. */
+  source?: "native";
 }
 export interface AccountHealth { blockedUntil?: number; quota?: import("./quota.ts").Quota; checkedAt?: number; credentialGeneration?: string }
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -51,7 +53,8 @@ function missing(error: unknown): boolean { return (error as NodeJS.ErrnoExcepti
 /** Only global, private account files are trusted. No project credentials, commands or custom endpoints. */
 export class AccountStore {
   readonly root: string;
-  constructor(directory: string) { this.root = join(directory, "pi-jar-accounts"); }
+  readonly agentDirectory: string;
+  constructor(directory: string) { this.agentDirectory = directory; this.root = join(directory, "pi-jar-accounts"); }
   private directory(name: string): string {
     if (!validAccountName(name)) throw new Error("Account names must be lowercase letters, digits and hyphens (1–32 characters)");
     return join(this.root, name);
@@ -77,13 +80,54 @@ export class AccountStore {
       const raw = value as Partial<AccountDefinition> | undefined;
       if (!raw || raw.version !== 1 || raw.name !== name || typeof raw.provider !== "string"
         || raw.provider.length === 0 || raw.provider.length > 256 || /[\u0000-\u001f\u007f]/.test(raw.provider) || !["oauth", "env"].includes(raw.auth ?? "")
-        || (raw.auth === "env" && (typeof raw.env !== "string" || !ENV_NAME.test(raw.env)))) {
+        || (raw.auth === "env" && (typeof raw.env !== "string" || !ENV_NAME.test(raw.env)))
+        || (raw.source !== undefined && (raw.source !== "native" || raw.auth !== "oauth"))) {
         throw new Error(`Invalid account metadata: ${name}`);
       }
       this.credentialPath(name);
-      accounts.push({ version: 1, name, provider: raw.provider, auth: raw.auth!, env: raw.env });
+      accounts.push({ version: 1, name, provider: raw.provider, auth: raw.auth!, env: raw.env, source: raw.source });
     }
     return accounts;
+  }
+  /**
+   * Auto-link OAuth logins already held by native Pi. Only the credential metadata
+   * (provider and type) is enumerated via Pi's public ModelRuntime API. Never read,
+   * copy, or persist the native access/refresh tokens in an account directory.
+   *
+   * Registration is idempotent, preserves user-created names, and is safe when
+   * multiple Pi processes start at once. A Pi sign-out leaves the linked label
+   * disconnected until native Pi signs in again.
+   */
+  async discoverNativeAccounts(supportsOAuth: (providerId: string) => boolean): Promise<AccountDefinition[]> {
+    const authPath = join(this.agentDirectory, "auth.json");
+    if (!existsSync(authPath)) return [];
+    const runtime = await ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false });
+    const known = this.list();
+    for (const credential of await runtime.listCredentials()) {
+      const provider = credential.providerId;
+      if (credential.type !== "oauth" || !validProviderId(provider) || !supportsOAuth(provider)) continue;
+      if (known.some(account => account.source === "native" && account.provider === provider)) continue;
+      const simple = "pi-" + provider.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      const hash = createHash("sha256").update(provider).digest("hex").slice(0, 8);
+      const fallback = "pi-" + provider.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 20) + "-" + hash;
+      const name = validAccountName(simple) && !known.some(account => account.name === simple) ? simple : fallback;
+      if (!validAccountName(name) || known.some(account => account.name === name)) continue;
+      try { this.reserve(name); }
+      catch (error) {
+        // Another Pi process may have registered the same native account first.
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw error;
+      }
+      const account: AccountDefinition = { version: 1, name, provider, auth: "oauth", source: "native" };
+      try { this.save(account); }
+      catch (error) {
+        // A failed registration is never allowed to delete existing credentials.
+        try { this.discardEmptyReservation(name); } catch { /* retain unexpected files for manual inspection */ }
+        throw error;
+      }
+      known.push(account);
+    }
+    return known.filter(account => account.source === "native");
   }
   /**
    * Share Pi's installation identity when its global settings already have one.
@@ -118,7 +162,7 @@ export class AccountStore {
    */
   hasCredentials(account: AccountDefinition): boolean {
     if (account.auth === "env") return Boolean(account.env && process.env[account.env]);
-    const path = this.credentialPath(account.name);
+    const path = account.source === "native" ? join(this.agentDirectory, "auth.json") : this.credentialPath(account.name);
     let raw: string;
     try { privatePath(path, false); raw = readFileSync(path, "utf8"); }
     catch (error) { if (missing(error)) return false; throw error; }
@@ -146,6 +190,7 @@ export class AccountStore {
   async logout(name: string): Promise<void> {
     const account = this.list().find(item => item.name === name);
     if (!account) throw new Error("Unknown account: " + name);
+    if (account.source === "native") throw new Error("This is Pi\'s primary login; use Pi /logout to sign out, not /jar accounts logout");
     if (account.auth !== "oauth") throw new Error("API-key accounts must be removed or their environment changed");
     const runtime = await ModelRuntime.create({ authPath: this.credentialPath(name), modelsPath: null, refreshOnCreate: false });
     await runtime.logout(account.provider);
@@ -154,7 +199,9 @@ export class AccountStore {
 
   /** Remove one account's private credentials, never Pi's main login or arbitrary files. */
   remove(name: string): void {
-    if (!this.list().some(account => account.name === name)) throw new Error("Unknown account: " + name);
+    const account = this.list().find(account => account.name === name);
+    if (!account) throw new Error("Unknown account: " + name);
+    if (account.source === "native") throw new Error("Pi\'s native login cannot be removed here; sign out through Pi /logout");
     const directory = this.directory(name);
     privatePath(directory, true);
     const files = readdirSync(directory);
@@ -232,7 +279,8 @@ export class AccountStore {
   async models(account: AccountDefinition, provider: Provider): Promise<ModelRuntime> {
     // Pi 1.5's public runtime owns file locking and rotated OAuth-token persistence.
     // Disable catalog IO and models.json: only this account's captured provider is used.
-    const models = await ModelRuntime.create({ authPath: this.credentialPath(account.name), modelsPath: null, refreshOnCreate: false });
+    const authPath = account.source === "native" ? join(this.agentDirectory, "auth.json") : this.credentialPath(account.name);
+    const models = await ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false });
     if (account.auth === "env") {
       models.registerNativeProvider({ ...provider, auth: { apiKey: {
         name: "Account environment key",
