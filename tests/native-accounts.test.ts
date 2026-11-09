@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +15,7 @@ const oauth = (value: string): OAuthCredential => ({
   type: "oauth", access: value, refresh: "refresh-" + value, expires: Date.now() + 3600_000
 });
 
-function fixture(t: Parameters<typeof test>[1] extends never ? never : { after: (fn: () => void) => void }) {
+function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), "jar-native-login-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
