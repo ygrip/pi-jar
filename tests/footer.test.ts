@@ -69,6 +69,10 @@ test("footer visibility toggles suppress fields and long CJK names and paths fit
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
     if (width >= 32) assert.ok(lines.every((line) => visibleWidth(line) === width));
   }
+  const savedSettings = { ...DEFAULT_FOOTER_SETTINGS, cost: true };
+  const costFooter = renderFooter({ ...view, settings: savedSettings, cost: "chat cost $1" }, 120, plain).join(" ");
+  assert.match(costFooter, /\$1/);
+  assert.doesNotMatch(costFooter, /chat cost/);
   assert.match(renderFooter(view, 80, plain)[1] ?? "", /日本/);
   assert.match(renderFooter(view, 80, plain)[1] ?? "", /…[^ ]*project/);
   const hidden = renderFooter({ ...view, settings: {

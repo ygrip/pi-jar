@@ -18,8 +18,21 @@ test("mascot stays anchored to the composer as task widgets appear and disappear
   };
   assert.equal(style.enable(ctx as never), true);
   const editor = factory({ terminal: { rows: 24 }, requestRender() {} }, { borderColor: (text: string) => text }, {});
+  let taskClick: { x: number; y: number } | undefined;
+  style.setPerchPanel(() => ({
+    render: (width) => { assert.ok(width >= 16); return ["▸ Tasks", " "]; },
+    handleMouse: (event) => { taskClick = { x: event.x, y: event.y }; return { handled: true }; }
+  }));
   assert.equal(editor.render(80).length, 9);
-  // The task widget can be hidden, clipped, or removed independently of the editor.
+  // Tasks share Ember's perch instead of consuming an independent widget row.
+  const perch: string[] = editor.render(80).slice(0, 6);
+  assert.ok(perch.some((row) => row.includes("▸ Tasks")));
+  const taskRow = perch.find((row) => row.includes("▸ Tasks"))!;
+  assert.ok(taskRow.indexOf("▸ Tasks") >= 17, "task heading has three columns of spacing after the mascot");
+  editor.handleMouse?.({ type: "click", button: "left", x: 18, y: 2, width: 80, height: 12 } as never);
+  assert.deepEqual(taskClick, { x: 1, y: 0 }, "task clicks map into the panel's own coordinates");
+  assert.ok(editor.render(40).some((row: string) => row.includes("▸ Tasks")), "compact mascot keeps the task panel visible");
+  assert.ok(editor.render(20).some((row: string) => row.includes("▸ Tasks")), "very narrow terminals stack the task panel");
   // The composer always owns Ember, so the mascot never relies on widget lifecycle.
   assert.equal(editor.render(80).length, 9, "mascot remains above the editor during task updates");
   assert.equal(style.renderMascot(80)?.length, 6, "sprite still renders on its own");

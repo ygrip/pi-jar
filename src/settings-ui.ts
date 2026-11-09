@@ -13,7 +13,7 @@ const LABELS: Record<FooterField, string> = {
   extras: "Extension statuses", branch: "Git branch"
 };
 
-type Page = "appearance" | "footer" | "pi" | "profiles";
+type Page = "appearance" | "footer" | "pi" | "accounts" | "profiles";
 
 /** Pi-level preferences pi-jar can toggle (written to Pi's own settings). */
 export interface PiPreferences {
@@ -33,7 +33,7 @@ export async function openJarSettings(
   manageAccounts?: () => Promise<void>
 ): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
-  const PAGES: Page[] = profiles ? ["appearance", "footer", "pi", "profiles"] : ["appearance", "footer", "pi"];
+  const PAGES: Page[] = ["appearance", "footer", "pi", "accounts", ...(profiles ? ["profiles" as const] : [])];
   let lastPage: Page = "appearance";
   while (true) {
   const action = await popup<ProfileAction | "accounts" | undefined>(ctx, (tui, theme, _keys, done) => {
@@ -44,7 +44,17 @@ export async function openJarSettings(
       name === "default" || ["gray", "pink", "teal", "azure", "violet", "amber"].includes(name))];
     let choosing: "goalRounds" | "maxSubagents" | undefined;
     const choices = () => choosing === "maxSubagents" ? MAX_SUBAGENT_CHOICES : GOAL_ROUND_CHOICES;
-    const fields = () => choosing ? choices().length : page === "footer" ? FOOTER_FIELDS.length : page === "pi" ? (manageAccounts ? 10 : 9) : page === "profiles" ? 2 : 7;
+    const fields = () => {
+      if (choosing) return choices().length;
+      if (page === "footer") return FOOTER_FIELDS.length;
+      if (page === "pi") return 8;
+      if (page === "accounts") {
+        if (manageAccounts) return 2;
+        return 1;
+      }
+      if (page === "profiles") return 2;
+      return 7;
+    };
     // Back on the row that opened the picker.
     const finishChoice = () => { selected = choosing === "maxSubagents" ? 3 : 2; choosing = undefined; };
     const piError = (error: unknown) => ctx.ui.notify("Could not change Pi setting: " + (error as Error).message, "error");
@@ -62,6 +72,16 @@ export async function openJarSettings(
         lastPage = page;
         done(index === 0 ? "switch" : "create");
         return;
+      } else if (page === "accounts") {
+        if (index === 0) {
+          const currentIndex = ACCOUNT_ROUTING_MODES.indexOf(isUnsafeRouting(state.accountRouting) ? "quota-first" : state.accountRouting.mode);
+          const mode = ACCOUNT_ROUTING_MODES[(currentIndex + 1) % ACCOUNT_ROUTING_MODES.length]!;
+          update({ ...state, accountRouting: withRoutingMode(state.accountRouting, mode) });
+        } else if (index === 1 && manageAccounts) {
+          lastPage = page;
+          done("accounts");
+          return;
+        }
       } else if (page === "footer") {
         const field = FOOTER_FIELDS[index];
         if (field) update({ ...state, footer: { ...state.footer, [field]: !state.footer[field] } });
@@ -80,17 +100,7 @@ export async function openJarSettings(
         else if (index === 5) update({ ...state, advisorGates: !state.advisorGates });
         else if (index === 6) update({ ...state, cacheDiagnostics: !state.cacheDiagnostics });
         else if (index === 7) update({ ...state, readCache: !state.readCache });
-        else if (index === 8) {
-          // An unsafe policy cycles to "off" first: the explicit reset to Pi's own login.
-          const currentIndex = ACCOUNT_ROUTING_MODES.indexOf(isUnsafeRouting(state.accountRouting) ? "quota-first" : state.accountRouting.mode);
-          const mode = ACCOUNT_ROUTING_MODES[(currentIndex + 1) % ACCOUNT_ROUTING_MODES.length]!;
-          update({ ...state, accountRouting: withRoutingMode(state.accountRouting, mode) });
-        }
-        else if (index === 9 && manageAccounts) {
-          lastPage = page;
-          done("accounts");
-          return;
-        }
+
       } else if (index === 0) {
         const at = Math.max(0, accents.indexOf(state.accent));
         update({ ...state, accent: accents[(at + 1) % accents.length]! });
@@ -143,7 +153,8 @@ export async function openJarSettings(
           if (event.x >= 2 && event.x < Math.min(width - 2, 19)) { page = "appearance"; selected = 0; }
           else if (event.x >= 19 && event.x < Math.min(width - 2, 32)) { page = "footer"; selected = 0; }
           else if (event.x >= 32 && event.x < Math.min(width - 2, 41)) { page = "pi"; selected = 0; }
-          else if (profiles && event.x >= 41 && event.x < width - 2) { page = "profiles"; selected = 0; }
+          else if (manageAccounts && event.x >= 41 && event.x < Math.min(width - 2, 56)) { page = "accounts"; selected = 0; }
+          else if (profiles && event.x >= (manageAccounts ? 56 : 41) && event.x < width - 2) { page = "profiles"; selected = 0; }
           else return;
           tui.requestRender(); return { handled: true, focus: true };
         }
@@ -163,6 +174,7 @@ export async function openJarSettings(
         const tabs = line(theme.fg(page === "appearance" ? "accent" : "muted", "[ Appearance ]")
           + "   " + theme.fg(page === "footer" ? "accent" : "muted", "[ Footer ]")
           + "   " + theme.fg(page === "pi" ? "accent" : "muted", "[ Pi ]")
+          + "   " + theme.fg(page === "accounts" ? "accent" : "muted", "[ Accounts ]")
           + (profiles ? "   " + theme.fg(page === "profiles" ? "accent" : "muted", "[ Profiles ]") : ""));
         const prefs = pi?.get();
         const divider = theme.fg("dim", "├" + "─".repeat(Math.max(0, width - 2)) + "┤");
@@ -179,9 +191,10 @@ export async function openJarSettings(
             row(4, "Advisor (jar_advisor, /advisor)", state.advisor ? "ON" : "OFF", state.advisor),
             row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates),
             row(6, "Cache diagnostics (explain cache breaks)", state.cacheDiagnostics ? "ON" : "OFF", state.cacheDiagnostics),
-            row(7, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache),
-            row(8, "Account routing policy", isUnsafeRouting(state.accountRouting) ? "BLOCKED (unsafe)" : state.accountRouting.mode.toUpperCase(), state.accountRouting.mode !== "off"),
-            ...(manageAccounts ? [row(9, "Manage accounts…", "OPEN", true)] : [])
+            row(7, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache)
+          ] : page === "accounts" ? [
+            row(0, "Account routing policy", isUnsafeRouting(state.accountRouting) ? "BLOCKED (unsafe)" : state.accountRouting.mode.toUpperCase(), state.accountRouting.mode !== "off"),
+            ...(manageAccounts ? [row(1, "Manage accounts…", "OPEN", true)] : [])
           ] : page === "profiles" ? [
             row(0, "Switch profile…", profiles!.activeName(), true),
             row(1, "Create profile…", "OPEN", true)
@@ -198,13 +211,13 @@ export async function openJarSettings(
         const rows = allRows.slice(start, start + pageSize());
         return [top, tabs, divider,
           line(theme.fg("accent", choosing === "maxSubagents" ? " MAX SUBAGENTS · RETAINED LIVE POOL"
-            : choosing === "goalRounds" ? " GOAL AUTO ROUNDS" : page === "footer" ? " FOOTER VISIBILITY" : page === "pi" ? " PI & WORKFLOWS" : page === "profiles" ? " PROFILES" : " APPEARANCE & MOTION")),
+            : choosing === "goalRounds" ? " GOAL AUTO ROUNDS" : page === "footer" ? " FOOTER VISIBILITY" : page === "pi" ? " PI & WORKFLOWS" : page === "accounts" ? " ACCOUNTS" : page === "profiles" ? " PROFILES" : " APPEARANCE & MOTION")),
           line(theme.fg("dim", explainPool() ? " Live pool includes idle/paused subagents"
             : choosing ? " Select a value; Enter/click to save, Esc to cancel"
             : page === "footer" ? ` Footer fields ${start + 1}–${start + rows.length}/${fields()}`
             : page === "pi" ? (selected === 6 ? " Names what changed when a call re-sent cached context (/cache-breaks)"
               : selected === 7 ? " An unchanged re-read of the same range returns a short stub" : " Fullscreen mode enables clicks and copy-on-select")
-            : page === "profiles" ? " Switch only in a fresh, idle session; roles via /roles" : " Accent cycles through loaded themes")),
+            : page === "accounts" ? " Add provider accounts, manage sign-in and routing" : page === "profiles" ? " Switch only in a fresh, idle session; roles via /roles" : " Accent cycles through loaded themes")),
           ...rows,
           line(theme.fg("dim", choosing ? " ↑↓: choose · Enter/click: save · Esc: cancel"
             : " Tab: section · ↑↓: choose · Enter/click: change · Esc")),

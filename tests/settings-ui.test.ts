@@ -138,18 +138,18 @@ test("retired context controls are absent and remaining Pi settings keep working
       pane.handleInput(" ");
       assert.equal(state.readCache, true);
       assert.equal(state.cacheDiagnostics, true);
-      pane.handleInput("\x1b[B");
+      pane.handleInput("\x1b[B"); // wraps to the first Pi row
+      assert.match(text(), /❯ Mouse clicks/);
+      pane.handleInput("\t");
       assert.match(text(), /❯ Account routing policy\s+OFF/);
       pane.handleInput(" ");
       assert.equal(state.accountRouting.mode, "sticky");
-      pane.handleInput("\x1b[B"); // wraps to the first Pi row
-      assert.match(text(), /❯ Mouse clicks/);
     }
   } };
   await openJarSettings(ctx as never, () => state, (next) => { state = next; saves++; }, []);
 });
 
-test("Pi settings opens the interactive account manager and returns to settings", async () => {
+test("Accounts settings opens the interactive account manager and returns to settings", async () => {
   let state = startState();
   let openCount = 0;
   let popups = 0;
@@ -158,9 +158,12 @@ test("Pi settings opens the interactive account manager and returns to settings"
     custom: async (factory: Function) => new Promise(resolve => {
       const pane: Pane = factory({ requestRender() {}, terminal: { rows: 24 } }, { fg: (_color: string, text: string) => text }, {}, resolve);
       if (popups++ === 0) {
-        pane.handleInput("\t"); pane.handleInput("\t");
-        for (let index = 0; index < 9; index++) pane.handleInput("\x1b[B");
-        assert.match(pane.render(80).join("\n"), /Manage accounts/);
+        pane.handleInput("\t"); pane.handleInput("\t"); pane.handleInput("\t");
+        const accounts = pane.render(80).join("\n");
+        assert.match(accounts, /ACCOUNTS/);
+        assert.match(accounts, /Account routing policy/);
+        assert.match(accounts, /Manage accounts/);
+        pane.handleInput("\x1b[B");
         pane.handleInput("\r");
       } else pane.handleInput("\x1b");
     })

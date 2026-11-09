@@ -40,6 +40,19 @@ test("usage totals the session per model, adds side calls and shows limit bars",
   assert.doesNotMatch(failed, /Loading/);
 });
 
+test("usage lists cached limits for every routed account", () => {
+  const stats = collectUsage([], []);
+  const lines = usageLines({ stats, quotaEnabled: true, now: Date.parse("2026-09-25T10:00:00Z"), accountQuotas: [
+    { name: "work", provider: "anthropic", quota: { fiveHour: { used: 25 } } },
+    { name: "backup", provider: "anthropic", quota: { week: { used: 80 } }, stale: true },
+    { name: "unknown", provider: "openai" }
+  ] }, 80, plain).join("\n");
+  assert.match(lines, /Account usage limits/);
+  assert.match(lines, /work · anthropic · 5h[\s\S]*25% used/);
+  assert.match(lines, /backup · anthropic · week · stale[\s\S]*80% used/);
+  assert.match(lines, /unknown · openai[\s\S]*quota unavailable/);
+});
+
 test("context breakdown splits categories, scales to the reported total and draws a 10×10 grid", () => {
   const view = contextBreakdown({
     model: "anthropic/opus", window: 200_000, reported: 40_000, reserve: 16_384,

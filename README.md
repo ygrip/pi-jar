@@ -25,7 +25,7 @@ A warm, role-aware TUI and workflow extension for [Pi](https://github.com/earend
 | **Roles** | Named model roles (`default`, `smol`, `slow`, `plan`, `implement`, `advisor`, `moderator`, `scout`, `worker`, `reviewer`, `task`, `commit`, plus your own) with aliases, effort, per-role fallback models and project overrides. |
 | **Accounts** | Opt-in same-provider account routing: sticky, round-robin or quota-first, profile allowlists, native OAuth refresh, shared quota/cooldown metadata, and bounded pre-output 429 failover. Roles and model IDs stay unchanged. [Setup and limits](docs/MULTI_ACCOUNT.md). |
 | **Advisor** | A second-opinion model: the agent calls `jar_advisor` when you ask or after two failed attempts, `/advisor [focus]` asks on demand, and opt-in automatic gates consult it when the agent repeats the same tool call or keeps failing. |
-| **Usage & context** | The footer's `chat cost` covers the active conversation branch; `/usage` includes advisor and commit calls too, with per-model tokens and plan-limit bars with reset times. `/context` draws a grid of what fills the context window, with a per-file, per-skill and per-tool breakdown; `/cache-breaks` names the tool, system section or message whose change forced a costly prompt-cache rewrite. |
+| **Usage & context** | The footer shows session cost; `/usage` includes advisor and commit calls, with per-model tokens and plan-limit bars with reset times. `/context` draws a grid of what fills the context window, with a per-file, per-skill and per-tool breakdown; `/cache-breaks` names the tool, system section or message whose change forced a costly prompt-cache rewrite. |
 | **Commit** | `/jar commit [note]` drafts a message for the staged changes with the `commit` role, lets you edit it, then commits (never pushes). |
 | **Tasks & questions** | A Claude/omp-style `jar_todo` checklist with subtasks and per-task progress that the agent maintains itself, and `jar_ask` structured questions with options, multi-select and free-form answers. |
 | **Change review** | Every file the agent or its editing subagents change is remembered as it was; `/diff` (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) shows changed files (each counted once) next to a colored diff, with accept or revert per file or all at once. |
@@ -75,7 +75,7 @@ Pi 1.5 fixes Apple Terminal's local Shift+Return fallback for setups sending ESC
 | `/jar` · `/jar settings` | Visual and workflow preferences. |
 | `/jar status` | One-line status summary. |
 | `/jar routing on\|off` | Enable account routing (sticky when previously off) or restore normal Pi authentication. `/jar routing status` shows current routing/account quota. |
-| `/jar accounts` | OMP-style provider/account hub (also in `/jar settings` → Pi → Manage accounts): searchable provider pools, account and quota status, switching/pinning, OAuth sign-in/out, routing policy, profile allowlist, and safe removal, all using Pi-native APIs. CLI: `list`, `login`, `login-device`, `logout NAME`, `add`, `mode`, `use`, `pin PROVIDER NAME`, `auto PROVIDER`. [Multi-account routing](docs/MULTI_ACCOUNT.md). |
+| `/jar accounts` | OMP-style provider/account hub (also in `/jar settings` → Accounts → Manage accounts): searchable provider pools, account and quota status, switching/pinning, OAuth sign-in/out, routing policy, profile allowlist, and safe removal, all using Pi-native APIs. CLI: `list`, `login`, `login-device`, `logout NAME`, `add`, `mode`, `use`, `pin PROVIDER NAME`, `auto PROVIDER`. [Multi-account routing](docs/MULTI_ACCOUNT.md). |
 | `/jar perf` | Long-session diagnostics on demand: branch entries, context sampling, parent and child RSS, retained/hibernated subagents and recovery worktrees, render requests vs. frames, shell output, discussion and quota cache. |
 | `/jar tasks [list\|add\|done\|open\|edit\|delete]` | Searchable, scrollable checklist; ←/→ folds/unfolds subtasks. |
 | `/jar tasks collapse\|expand\|toggle` · `/jar tasks scroll N` | Collapse/expand the compact task widget or scroll it by N rows. |
@@ -103,6 +103,25 @@ Pi 1.5 fixes Apple Terminal's local Shift+Return fallback for setups sending ESC
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> | Review agent changes (`/diff`) |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> | Search earlier prompts into the composer |
 | <kbd>Tab</kbd> / <kbd>→</kbd> in an empty composer | Accept the dim suggestion into the input (it is not sent) |
+
+### Set up multiple accounts
+
+Open `/jar settings` → **Accounts** → **Manage accounts** to add provider accounts, sign in, and choose routing. OAuth subscriptions can be added separately by provider and account name:
+
+```text
+/jar accounts login openai-codex work
+/jar accounts login openai-codex personal
+/jar accounts mode sticky
+```
+
+For API-key accounts, set key variables in Pi's environment, then add references by variable name (never paste a key into the command):
+
+```text
+/jar accounts add openai work WORK_OPENAI_API_KEY
+/jar accounts add openai personal PERSONAL_OPENAI_API_KEY
+```
+
+Routing defaults to off. Use **Accounts → Account routing policy** to enable sticky, round-robin, or quota-first routing. Setup details and credential-safety guidance: [Multi-account routing](docs/MULTI_ACCOUNT.md).
 
 ## Popup navigation
 

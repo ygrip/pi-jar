@@ -139,7 +139,7 @@ function footerLines(view: FooterView, width: number, theme: FooterTheme, hits: 
   const quota = view.quota;
   const windowList = [quota?.fiveHour && `5h ${Math.round(quota.fiveHour.used)}%`, quota?.week && `week ${Math.round(quota.week.used)}%`].filter((value): value is string => !!value);
   const windows = windowList.map((value, index) => index ? value : withIcon("quota", value));
-  const cost = view.cost ? metric("cost", "cost", cleanText(view.cost, 32)) : undefined;
+  const cost = view.cost ? cleanText(view.cost, 32).replace(/^chat cost\s+/, "") : undefined;
   const memory = view.memory ? metric("memory", "ram", view.memory) : undefined;
   const prefix = view.demo ? theme.fg("warning", "DEMO") : "";
   const effort = show.effort && view.effort ? theme.fg(EFFORT_COLORS[view.effort], THINKING_ICONS[view.effort] ? withIcon(THINKING_ICONS[view.effort]!, view.effort) : view.effort) : "";

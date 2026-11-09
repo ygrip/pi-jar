@@ -233,18 +233,23 @@ export default function piJar(pi: ExtensionAPI): void {
   // A finished list stays visible (all struck through) until the user's next prompt, like Claude.
   let todosAcknowledged = false;
   const taskWidgetState: TaskWidgetState = { expanded: false, scroll: undefined };
+  const taskPanel = (tui: TUI, theme: { fg(color: string, text: string): string }) =>
+    taskWidget(tui, theme as never, () => todos?.all() ?? [], taskWidgetState);
   const updateTaskWidget = (ctx: ExtensionContext) => {
     if (!ctx.hasUI || ctx.mode !== "tui") return;
     const items = todos?.all() ?? [];
     const open = items.filter((item) => !item.done);
     if (open.length) todosAcknowledged = false;
     const visible = enabled && items.length > 0 && (open.length > 0 || !todosAcknowledged);
+    // Keep a native widget when the custom composer is disabled or unavailable.
+    const inComposer = visible && composer.enabled;
+    composer.setPerchPanel(inComposer ? taskPanel : undefined);
     try {
-      // Tasks stay in their own widget; Ember must remain visible next to the editor even
-      // when a session grows or the task widget is clipped/removed by the TUI.
-      ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (tui, theme) =>
-        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState));
-    } catch { /* Optional task widget failure must never hide the mascot. */ }
+      ctx.ui.setWidget("pi-jar.todos", visible && !inComposer ? (tui, theme) =>
+        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState) : undefined);
+    } catch (error) {
+      ctx.ui.notify(`Task widget: ${String(error)}`, "error");
+    }
   };
   registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
   let changes: ChangeTracker | undefined;
@@ -363,6 +368,15 @@ export default function piJar(pi: ExtensionAPI): void {
   const advisor = registerAdvisor(pi, modelRoles, { enabled: () => !delegatedChild && visualSettings.advisor, gates: () => !delegatedChild && visualSettings.advisorGates, usage: sideUsage });
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     quota: (ctx) => quotaFor(ctx, welcomeStatuses(), Date.now()),
+    accountQuotas: () => accounts.store.list().map((account) => {
+      const health = accounts.store.health(account.name);
+      return {
+        name: account.name,
+        provider: account.provider,
+        quota: health.quota,
+        stale: !health.checkedAt || health.checkedAt + QUOTA_TTL_MS <= Date.now()
+      };
+    }),
     quotaFailure: (ctx) => {
       if (accounts.routesProvider(ctx.model?.provider)) return undefined;
       return quotaCache?.failure(ctx.model?.provider, Date.now());
@@ -783,6 +797,7 @@ export default function piJar(pi: ExtensionAPI): void {
     if (enabled && next.composer) composer.enable(ctx);
     else composer.disable(ctx);
     composer.setMascot(next.mascot);
+    updateTaskWidget(ctx);
     composer.setActivity(enabled ? working.phase : "idle", animations);
     suggest.sync();
     applyWorking(ctx);
@@ -973,6 +988,7 @@ export default function piJar(pi: ExtensionAPI): void {
     sampleFooter(ctx);
     composer.setMascot(visualSettings.mascot);
     if (visualSettings.composer && enabled) composer.enable(ctx);
+    updateTaskWidget(ctx);
     suggest.sync();
     if (!profileStore && visualSettings.accent !== "follow") selectAccent(ctx, visualSettings.accent);
     if (branch.length >= LARGE_SESSION_ENTRIES) {
@@ -1106,7 +1122,7 @@ export default function piJar(pi: ExtensionAPI): void {
     composer.disable(ctx);
     workingIndicatorKey = "";
     working.end();
-    try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
+    try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); composer.setPerchPanel(undefined); } } catch {}
     stopQuotaRefreshTimer();
     quotaCache?.stop();
     quotaCache = undefined;

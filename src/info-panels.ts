@@ -4,6 +4,7 @@ import type { CacheBreakState } from "./cache-breaks.ts";
 import { contextBreakdown, contextLines } from "./context-view.ts";
 import { openPanel, type Paint, type PanelTab } from "./panel.ts";
 import type { Quota } from "./quota.ts";
+import type { AccountQuota } from "./usage-view.ts";
 import type { SideUsage } from "./side-model.ts";
 import { collectUsage, usageLines } from "./usage-view.ts";
 import { sessionBranch } from "./session-branch.ts";
@@ -14,6 +15,7 @@ const DEFAULT_RESERVE = 16_384;
 export interface InfoPanelDeps {
   side: SideUsage;
   quota(ctx: ExtensionContext): Quota | undefined;
+  accountQuotas?(): readonly AccountQuota[];
   quotaFailure(ctx: ExtensionContext): { error: string; retryInMs: number } | undefined;
   quotaEnabled(): boolean;
   /** Start a limit lookup when nothing fresh is cached: opening `/usage` is an explicit request. */
@@ -73,6 +75,7 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
           stats: usage,
           ...(ctx.model?.provider ? { provider: ctx.model.provider } : {}),
           ...(quota ? { quota } : {}),
+          ...(deps.accountQuotas ? { accountQuotas: deps.accountQuotas() } : {}),
           ...(quotaFailure ? { quotaFailure } : {}),
           quotaEnabled: deps.quotaEnabled(), now: Date.now()
         }, width, fg);

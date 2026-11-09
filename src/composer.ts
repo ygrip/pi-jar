@@ -18,6 +18,8 @@ type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorCom
 type EditorKeybindings = ConstructorParameters<typeof CustomEditor>[2];
 /** The parts of Pi's Theme the composer reads; `colors` is absent on minimal/legacy themes. */
 type ComposerTheme = { fg(color: string, text: string): string; colors?: { accent?: Color } };
+type PerchPanel = { render(width: number): string[]; handleMouse?(event: MouseEvent): { handled?: boolean } | undefined };
+type PerchPanelFactory = (tui: TUI, theme: ComposerTheme) => PerchPanel;
 
 /** Show native bindings, including Pi's existing Ctrl+J fallback; never remap editor input. */
 function newlineHint(keybindings?: EditorKeybindings): string {
@@ -163,8 +165,9 @@ export interface ComposerDecor {
   icon(width: number): string;
   /** Painted icon, or undefined to use theme border colors. */
   paintedIcon(width: number): string | undefined;
-  /** Pixel sprite (or compact crown) above the frame, omitted when there is no room. */
+  /** Pixel sprite (or compact crown), with the task panel when it fits. */
   perch(width: number): readonly string[] | undefined;
+  handlePerchMouse?(event: MouseEvent): boolean;
   session(): string;
   profile?(): string;
   ghost(): string | undefined;
@@ -243,6 +246,7 @@ class RoundedEditor extends CustomEditor {
 
   override handleMouse(event: MouseEvent) {
     const y = event.y - this.tipRows;
+    if (y < 0 && this.decor.handlePerchMouse?.(event)) return { handled: true, focus: true };
     const inPet = y < 0 ? event.x >= 3 && event.x < 3 + (this.tipRows > 1 ? MASCOT_SPRITE_WIDTH : MASCOT_FACE_WIDTH)
       : y === 0 && this.decor.icon(event.width).startsWith("▐") && faceColumns(event.x);
     if (inPet) {
@@ -313,6 +317,7 @@ class ThemedEditor implements EditorComponent {
   setAutocompleteMaxVisible(value: number) { this.base.setAutocompleteMaxVisible?.(value); }
   handleMouse(event: MouseEvent) {
     const y = event.y - this.tipRows;
+    if (y < 0 && this.decor.handlePerchMouse?.(event)) return { handled: true, focus: true };
     if ((y < 0 && event.x >= 3 && event.x < 3 + (this.tipRows > 1 ? MASCOT_SPRITE_WIDTH : MASCOT_FACE_WIDTH))
       || (y === 0 && this.decor.icon(event.width).startsWith("▐") && faceColumns(event.x))) {
       if (event.type === "click" && event.button === "left") { this.decor.poke(); return { handled: true, focus: true }; }
@@ -337,6 +342,9 @@ export class ComposerStyle {
   private cwd = process.cwd();
   private lastKey = "";
   private readonly mascot = new Mascot();
+  private panelFactory?: PerchPanelFactory;
+  private panel?: PerchPanel;
+  private panelLayout?: { start: number; top: number; rows: number };
   private suggestions?: SuggestionState;
   private unsubscribe?: () => void;
   /** Read on every render so an accent/theme switch recolors without recreating the editor. */
@@ -371,8 +379,9 @@ export class ComposerStyle {
       const mood = this.animations ? this.mascot.mood() : "idle";
       return paintFace(mascotFace(mood), mood, this.paintWith(), undefined, this.palette());
     },
-    // Always anchor Ember to the editor. A separate task widget may be clipped or hidden.
-    perch: (width) => this.renderMascot(width),
+    // Keep Ember anchored to the editor; the task panel shares its perch when there is room.
+    perch: (width) => this.renderPerch(width),
+    handlePerchMouse: (event) => this.handlePerchMouse(event),
     session: () => this.session,
     profile: () => this.profile,
     ghost: () => this.suggestions?.text,
@@ -404,7 +413,7 @@ export class ComposerStyle {
   }
 
   renderMascot(width: number): string[] | undefined {
-    if (!this.mascotOn || width < 40) return undefined;
+    if (!this.mascotOn || width < 1) return undefined;
     let mood: MascotMood = "idle";
     let pose = 0;
     if (this.animations) {
@@ -427,6 +436,54 @@ export class ComposerStyle {
     return rows;
   }
   private perchCache?: { mood: MascotMood; pose: number; full: boolean; palette?: MascotPalette; theme?: ComposerTheme; rows: string[] };
+
+  setPerchPanel(factory?: PerchPanelFactory): void {
+    if (this.panelFactory === factory) {
+      if (this.enabled) this.tui?.requestRender();
+      return;
+    }
+    this.panelFactory = factory;
+    this.panel = undefined;
+    this.panelLayout = undefined;
+    if (this.enabled) this.tui?.requestRender();
+  }
+
+  private renderPerch(width: number): string[] {
+    const mascot = this.renderMascot(width) ?? [];
+    this.panelLayout = undefined;
+    if (!this.panelFactory || !this.tui) return mascot;
+    const theme = this.colors;
+    if (!theme) return mascot;
+    this.panel ??= this.panelFactory(this.tui, theme);
+    const start = 3 + MASCOT_SPRITE_WIDTH + 3;
+    if (!mascot.length || width - start < 16) {
+      const rows = this.panel.render(width);
+      this.panelLayout = { start: 0, top: mascot.length, rows: rows.length };
+      return [...mascot, ...rows];
+    }
+    const available = width - start;
+    const rows = this.panel.render(available);
+    if (!rows.length) return mascot;
+    const top = Math.max(0, Math.floor((mascot.length - rows.length) / 2));
+    const count = Math.max(mascot.length, top + rows.length);
+    const combined = Array.from({ length: count }, (_, index) => {
+      const row = mascot[index] ?? "";
+      const panelRow = rows[index - top];
+      if (panelRow === undefined) return row;
+      const spacer = " ".repeat(Math.max(0, start - visibleWidth(row)));
+      return row + spacer + truncateToWidth(panelRow, available);
+    });
+    this.panelLayout = { start, top, rows: rows.length };
+    return combined;
+  }
+
+  private handlePerchMouse(event: MouseEvent): boolean {
+    const layout = this.panelLayout;
+    if (!layout || !this.panel) return false;
+    const panelRow = event.y - layout.top;
+    if (event.x < layout.start || panelRow < 0 || panelRow >= layout.rows) return false;
+    return this.panel.handleMouse?.({ ...event, x: event.x - layout.start, y: panelRow })?.handled ?? false;
+  }
 
   /**
    * While a turn runs, when the next pose or mood can change, if the mascot animates at all.

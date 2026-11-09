@@ -53,7 +53,8 @@ function resetText(window: QuotaWindow, now: number): string {
   return `Resets ${when} (in ${duration(Math.max(0, at - now))})`;
 }
 
-export interface UsageView { stats: UsageStats; provider?: string; quota?: Quota; quotaFailure?: { error: string; retryInMs: number }; quotaEnabled: boolean; now: number }
+export interface AccountQuota { name: string; provider: string; quota?: Quota; stale?: boolean }
+export interface UsageView { stats: UsageStats; provider?: string; quota?: Quota; accountQuotas?: readonly AccountQuota[]; quotaFailure?: { error: string; retryInMs: number }; quotaEnabled: boolean; now: number }
 
 /** Claude-style usage page: session totals, per-model breakdown, then plan limit bars. */
 export function usageLines(view: UsageView, width: number, fg: Paint): string[] {
@@ -75,6 +76,27 @@ export function usageLines(view: UsageView, width: number, fg: Paint): string[] 
   for (const usage of [...stats.models, ...stats.side]) {
     const calls = stats.side.includes(usage) ? ` · ${usage.calls} call${usage.calls === 1 ? "" : "s"}` : "";
     lines.push("  " + row(usage.label, fg("success", money(usage.cost)), inner - 2), fg("dim", "    " + tokenLine(usage) + calls));
+  }
+  if (view.accountQuotas?.length) {
+    lines.push("", heading("Account usage limits"));
+    for (const account of view.accountQuotas) {
+      if (!account.quota || (!account.quota.fiveHour && !account.quota.week)) {
+        lines.push("  " + row(`${account.name} · ${account.provider}`, "quota unavailable", inner - 2));
+        continue;
+      }
+      for (const [label, window] of [["5h", account.quota.fiveHour], ["week", account.quota.week]] as const) {
+        if (!window) continue;
+        let accountLabel = `${account.name} · ${account.provider} · ${label}`;
+        if (account.stale) accountLabel += " · stale";
+        const used = Math.round(window.used);
+        const color = used >= 90 ? "error" : used >= 70 ? "warning" : "accent";
+        const suffix = ` ${used}% used`;
+        lines.push("  " + row(accountLabel, "", inner - 2));
+        lines.push("  " + bar(fg, window.used, Math.min(50, inner - 4 - suffix.length), color) + suffix);
+        const reset = resetText(window, now);
+        if (reset) lines.push(fg("dim", "  " + reset));
+      }
+    }
   }
   lines.push("", heading(`Plan usage limits${view.provider ? " · " + view.provider : ""}`));
   const windows: [string, QuotaWindow | undefined][] = [["Current session (5h)", view.quota?.fiveHour], ["Current week", view.quota?.week]];

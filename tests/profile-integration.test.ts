@@ -269,7 +269,7 @@ test("the settings Profiles tab only switches or creates, and creation does not 
       const component = factory({ requestRender() {} }, { fg: (_c: string, text: string) => text }, {}, (value: unknown) => { result = value; });
       const text = component.render(80).join("\n");
       if (screens++ === 0) {
-        for (let i = 0; i < 3; i++) component.handleInput("\t");
+        for (let i = 0; i < 4; i++) component.handleInput("\t");
         const rows = component.render(80).join("\n");
         assert.match(rows, /Switch profile…\s+Writing/);
         assert.match(rows, /Create profile…/);
