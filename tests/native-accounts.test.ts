@@ -109,7 +109,7 @@ test("native linked Codex and Anthropic routes use their own provider OAuth cred
   assert.equal((await router.wrap(codex.provider).streamSimple(codex.model, context).result()).stopReason, "stop");
   assert.equal((await router.wrap(anthropic.provider).streamSimple(anthropic.model, context).result()).stopReason, "stop");
   assert.deepEqual(keys, ["openai-codex:native-codex", "anthropic:native-anthropic"]);
-  assert.ok(router.status().every(item => item.inFlight === 0));
+  // A stream result can resolve on its terminal event before the router\'s async finally has drained.\n  for (let attempt = 0; attempt < 20 && router.status().some(item => item.inFlight !== 0); attempt++) {\n    await new Promise(resolve => setTimeout(resolve, 5));\n  }\n  assert.ok(router.status().every(item => item.inFlight === 0));
 });
 
 test("native login opens the browser for Codex and Anthropic while keeping provider method selection", async t => {
