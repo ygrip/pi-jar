@@ -1214,7 +1214,7 @@ export default function piJar(pi: ExtensionAPI): void {
           const subcommand = args.trim().slice("accounts".length).trim();
           const opensManager = !subcommand || subcommand.toLowerCase() === "manage";
           const interactive = ctx.hasUI && ctx.mode === "tui";
-          if (opensManager && interactive) await openAccountManager(ctx, accounts);
+          if (opensManager && interactive) { await accounts.ready(ctx); await openAccountManager(ctx, accounts); }
           else if (opensManager) await accounts.command("list", ctx);
           else await accounts.command(subcommand, ctx);
         } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
