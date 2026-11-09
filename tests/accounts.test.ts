@@ -746,3 +746,63 @@ test("an account whose credential check throws is skipped and reported, not fata
   assert.equal(failed.stopReason, "error");
   assert.match(failed.errorMessage ?? "", /unreadable credentials: a, b/);
 });
+
+test("a late 429 cannot cool down an identity reconnected under the same label", async t => {
+  const f = fixture(t);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let dispatched!: () => void;
+  const sent = new Promise<void>(resolve => { dispatched = resolve; });
+  const slow: Provider = { ...f.provider,
+    streamSimple: (m, c, options) => f.provider.streamSimple(m, c, { ...options,
+      onResponse: async (response, selected) => { dispatched(); await gate; await options?.onResponse?.(response, selected); } }) };
+  f.fail(429);
+  const pending = f.router.wrap(slow).streamSimple(model, context).result();
+  await sent;
+  // Another Pi process signs "a" out and reconnects a different identity: a new generation, clean health.
+  f.store.resetHealthForCredentialChange("a");
+  release();
+  await pending;
+  assert.equal(f.store.health("a").blockedUntil, undefined, "the old identity's 429 was not applied to the new one");
+  assert.ok(f.store.health("a").credentialGeneration);
+});
+
+test("a hung catalog check is skipped after its time limit instead of blocking later accounts", { timeout: 10000 }, async () => {
+  const providerId = "openai-codex";
+  const routedModel: Model<Api> = { ...model, provider: providerId };
+  const definitions = ["slow", "fast"].map(name => ({ version: 1 as const, name, provider: providerId, auth: "oauth" as const }));
+  const used: string[] = [];
+  let slowChecks = 0;
+  const fakeStore = {
+    list: () => definitions,
+    hasCredentials: () => true,
+    health: () => ({}),
+    updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    models: (account: { name: string }) => Promise.resolve({
+      getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
+      // The hung account never answers and ignores its abort signal.
+      getAllAvailable: account.name === "slow" ? () => { slowChecks++; return new Promise<never>(() => {}); } : async () => [routedModel],
+      streamSimple: () => {
+        used.push(account.name);
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: "done", reason: "stop", message: { ...message("routed"), provider: providerId, model: routedModel.id } });
+        stream.end();
+        return stream;
+      }
+    })
+  } as unknown as AccountStore;
+  const native: Provider = {
+    id: providerId, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] },
+    getModels: () => [routedModel],
+    stream: () => { throw new Error("not called"); },
+    streamSimple: () => { throw new Error("not called"); }
+  };
+  const router = new AccountRouter(fakeStore, () => ({ mode: "sticky", accounts: [] }), Date.now, async () => ({ fiveHour: { used: 0 } }), 50);
+  const routed = router.wrap(native);
+  const started = Date.now();
+  assert.equal((await routed.streamSimple(routedModel, context).result()).stopReason, "stop");
+  assert.ok(Date.now() - started < 2000, "first preferred account did not block the request");
+  assert.equal((await routed.streamSimple(routedModel, context).result()).stopReason, "stop");
+  assert.deepEqual(used, ["fast", "fast"]);
+  assert.equal(slowChecks, 1, "the hung account is cooled down, not re-probed on every request");
+});

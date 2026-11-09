@@ -93,8 +93,10 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
       `Automatic (${accounts.policy().mode})${selected ? "" : " · active"}`,
       ...members.map(account => `${account.name}${selected === account.name ? " · pinned" : ""}${allow.length && !allow.includes(account.name) ? " · excluded by profile" : ""}`)
     ];
+    const pinnedIndex = members.findIndex(account => account.name === selected);
     const choice = await promptChoice(ctx, `Switch account · ${id}`,
-      "Only this provider changes. Automatic mode preserves same-provider 429 failover; pinning intentionally disables account failover.", choices);
+      "Only this provider changes. Automatic mode preserves same-provider 429 failover; pinning intentionally disables account failover.", choices,
+      pinnedIndex + 1);
     if (choice === undefined) return;
     accounts.pin(id, choice === 0 ? undefined : members[choice - 1]!.name, ctx);
   };
@@ -133,17 +135,6 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
         else ctx.ui.notify("Choose All accounts to clear the profile allowlist.", "info");
       }
     }
-  };
-
-  const accountDescription = (account: AccountDefinition): string => {
-    const status = accounts.router.status().find(item => item.name === account.name);
-    const remaining = status?.remaining === undefined ? "quota unknown" : `${status.remaining}% left`;
-    const connected = accounts.store.hasCredentials(account) ? "" : " · SIGNED OUT / MISSING KEY";
-    const cooldown = status?.blockedUntil && status.blockedUntil > Date.now() ? " · cooldown" : "";
-    const pin = accounts.policy().pinned?.[account.provider] === account.name ? " · PINNED" : status?.lastUsed ? " · LAST USED" : "";
-    const allowed = accounts.policy().accounts;
-    const excluded = allowed.length && !allowed.includes(account.name) ? " · excluded" : "";
-    return `${account.name} · ${account.auth === "oauth" ? "OAuth" : "API key"} · ${remaining}${cooldown}${pin}${excluded}${connected}`;
   };
 
   const showLimits = async (providerId?: string): Promise<void> => {
@@ -196,29 +187,6 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
         "Keep account", "Delete local account & credentials"
       ]);
       if (confirmation === 1) await accounts.remove(account.name, ctx);
-    }
-  };
-
-  const providerMenu = async (providerId: string): Promise<void> => {
-    while (true) {
-      const members = definitions().filter(account => account.provider === providerId);
-      const pin = accounts.policy().pinned?.[providerId];
-      const choices = [
-        `Switch / pin account · ${pin ?? "automatic"}`,
-        ...members.map(accountDescription),
-        `Add account to ${providerId}…`,
-        "Quota & limits",
-        "Back"
-      ];
-      const choice = await promptChoice(ctx, `Provider · ${providerId}`,
-        `${members.length} account(s) · ${accounts.policy().mode} routing · native Pi provider`, choices);
-      if (choice === undefined || choice === choices.length - 1) return;
-      try {
-        if (choice === 0) await switchAccount(providerId);
-        else if (choice <= members.length) await manageAccount(members[choice - 1]!);
-        else if (choice === members.length + 1) await add(providerId);
-        else await showLimits(providerId);
-      } catch (error) { notifyError(error); }
     }
   };
 

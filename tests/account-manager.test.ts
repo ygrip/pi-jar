@@ -296,6 +296,53 @@ test("hub search filters same-provider account rows, retaining provider-name sea
 });
 
 
+test("hub redraws show quota and cooldown changes that arrive between two renders", { timeout: 10000 }, async () => {
+  const members = [{ version: 1, name: "work", provider: "openai-codex", auth: "oauth" }];
+  let status: Record<string, unknown> = { name: "work", provider: "openai-codex", remaining: 70, inFlight: 0, lastUsed: false };
+  const accounts = {
+    store: { list: () => members, hasCredentials: () => true },
+    router: { status: () => [status] },
+    policy: () => ({ mode: "sticky", accounts: [] })
+  };
+  const ctx = { hasUI: true, mode: "tui", model: { provider: "openai-codex" },
+    modelRegistry: { getAll: () => [{ provider: "openai-codex" }], getProvider: () => ({ id: "openai-codex", name: "Codex" }) },
+    ui: { custom: async (factory: Function) => new Promise(resolve => {
+      const view = factory(mockTui, mockTheme, {}, resolve);
+      assert.match(view.render(100).join("\n"), /work · OAuth · 70% left/);
+      // A background probe lands and another request makes the account the last used one; no key is pressed.
+      status = { ...status, remaining: 20, lastUsed: true, blockedUntil: Date.now() + 60_000 };
+      const next = view.render(100).join("\n");
+      assert.match(next, /work · OAuth · 20% left · LAST USED · COOLDOWN/);
+      assert.doesNotMatch(next, /70% left/);
+      view.handleInput("\x1b");
+    }) } };
+  assert.deepEqual(await openAccountHub(ctx as never, accounts as never), { kind: "close" });
+});
+
+test("hub lists providers with accounts first, opens an account on Tab+Enter and accepts capital shortcuts", { timeout: 10000 }, async () => {
+  const members = [{ version: 1, name: "work", provider: "zeta", auth: "oauth" }];
+  const accounts = {
+    store: { list: () => members, hasCredentials: () => true },
+    router: { status: () => [] },
+    policy: () => ({ mode: "sticky", accounts: [], pinned: { zeta: "work" } })
+  };
+  const ctx = (script: (view: any) => void) => ({ hasUI: true, mode: "tui", model: { provider: "zeta" },
+    modelRegistry: { getAll: () => [{ provider: "alpha" }, { provider: "zeta" }], getProvider: (id: string) => ({ id, name: id }) },
+    ui: { custom: async (factory: Function) => new Promise(resolve => script(factory(mockTui, mockTheme, {}, resolve))) } });
+
+  const listed = await openAccountHub(ctx(view => {
+    const text = view.render(100).join("\n");
+    assert.ok(text.indexOf("zeta (1)") < text.indexOf("alpha (0)"), "a provider with accounts is listed before empty ones");
+    view.handleInput("\t"); view.handleInput("\r"); // Tab lands on the account, not on the Automatic row
+  }) as never, accounts as never);
+  assert.deepEqual(listed, { kind: "account", provider: "zeta", name: "work" }, "Enter cannot silently clear the pin");
+
+  const added = await openAccountHub(ctx(view => { view.render(100); view.handleInput("A"); }) as never, accounts as never);
+  assert.deepEqual(added, { kind: "add", provider: "zeta" });
+  const routing = await openAccountHub(ctx(view => { view.render(100); view.handleInput("R"); }) as never, accounts as never);
+  assert.deepEqual(routing, { kind: "routing" });
+});
+
 test("failed native OAuth login releases an empty reservation and retries with same label", { timeout: 10000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), "pi-jar-failed-login-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

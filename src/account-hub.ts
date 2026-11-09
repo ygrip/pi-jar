@@ -49,10 +49,11 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
 
     const groups = () => {
       const known = ctx.modelRegistry.getAll().map(model => model.provider);
-      const configured = accountList().map(account => account.provider);
+      const configured = new Set(accountList().map(account => account.provider));
       // Stored accounts stay visible when their provider plugin is uninstalled.
+      // Providers that already have accounts come first, so they are never buried among dozens of others.
       return [...new Set([...known, ...configured])]
-        .sort((a, b) => a.localeCompare(b));
+        .sort((a, b) => Number(configured.has(b)) - Number(configured.has(a)) || a.localeCompare(b));
     };
     const matching = () => {
       const query = search.getValue().trim().toLocaleLowerCase();
@@ -112,11 +113,19 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
       state.accountIndex = accountIndex;
       done(provider ? { kind, provider } : { kind });
     };
+    // Entering the accounts pane lands on the first real account, not on the "Automatic selection"
+    // row: a second Enter must open that account's menu, never silently clear a pin.
+    const focusAccounts = () => {
+      if (pane === "accounts") return;
+      pane = "accounts";
+      const firstAccount = choices().findIndex(row => row.kind === "account");
+      accountIndex = Math.max(0, firstAccount);
+    };
     const openSelected = () => {
       const provider = currentProvider();
       state.pane = pane;
       state.accountIndex = accountIndex;
-      if (pane === "providers" && provider) { pane = "accounts"; accountIndex = 0; return; }
+      if (pane === "providers" && provider) { focusAccounts(); return; }
       const selected = choices()[accountIndex];
       if (!selected) return;
       if (selected.kind === "auto" && provider) {
@@ -148,30 +157,34 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
       invalidate() { search.invalidate(); },
       handleInput(data: string) {
         refreshSnapshot();
+        // Shortcuts are advertised as capitals, so accept either case (Caps Lock, Shift).
+        const shortcut = data.length === 1 ? data.toLowerCase() : data;
         if (searching) {
           if (matchesKey(data, Key.escape)) { searching = false; search.setValue(""); }
           else if (matchesKey(data, Key.enter)) searching = false;
+          else if (matchesKey(data, Key.up)) move(-1);
+          else if (matchesKey(data, Key.down)) move(1);
           else { search.handleInput(data); accountIndex = 0; }
           tui.requestRender(); return;
         }
         if (data === "/") { searching = true; search.focused = true; tui.requestRender(); return; }
         if (matchesKey(data, Key.escape)) { act("close"); return; }
         if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-          pane = "accounts";
+          focusAccounts();
         } else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
           pane = "providers";
         } else if (matchesKey(data, Key.up)) move(-1);
         else if (matchesKey(data, Key.down)) move(1);
         else if (matchesKey(data, Key.enter) || data === " ") openSelected();
-        else if (data === "a") {
+        else if (shortcut === "a") {
           const provider = currentProvider();
           if (!provider || ctx.modelRegistry.getProvider(provider)) act("add", provider);
-        } else if (data === "s") {
+        } else if (shortcut === "s") {
           const provider = currentProvider();
           if (provider && ctx.modelRegistry.getProvider(provider)) act("switch", provider);
-        } else if (data === "r") act("routing");
-        else if (data === "p") act("allowlist");
-        else if (data === "q") {
+        } else if (shortcut === "r") act("routing");
+        else if (shortcut === "p") act("allowlist");
+        else if (shortcut === "q") {
           const provider = currentProvider();
           if (provider && ctx.modelRegistry.getProvider(provider)) act("limits", provider);
         }
@@ -182,11 +195,14 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         if (event.type === "wheel" && event.wheelDelta) { move(Math.sign(event.wheelDelta) * 3); tui.requestRender(); return { handled: true }; }
         if (event.type !== "click" || event.button !== "left") return;
         const provider = providerHits.find(hit => hit.y === event.y);
-        if (provider && (columnSplit < 0 || event.x < columnSplit)) { state.provider = provider.id; pane = "accounts"; accountIndex = 0; tui.requestRender(); return { handled: true }; }
+        if (provider && (columnSplit < 0 || event.x < columnSplit)) { state.provider = provider.id; pane = "providers"; focusAccounts(); tui.requestRender(); return { handled: true }; }
         const account = accountHits.find(hit => hit.y === event.y);
         if (account && (columnSplit < 0 || event.x >= columnSplit)) { pane = "accounts"; accountIndex = account.index; openSelected(); tui.requestRender(); return { handled: true }; }
       },
       render(width: number): string[] {
+        // Quota probes and other Pi processes update health files while the hub is open, so every
+        // redraw reads a fresh snapshot (once; the helpers below share it).
+        refreshSnapshot();
         const available = Math.max(1, width);
         const providers = matching();
         const provider = currentProvider();
@@ -234,7 +250,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
           });
         }
         out.push(theme.fg("dim", "─".repeat(available)));
-        out.push(normal(" A add · S switch · R routing · P profile · Q quota · / search", available));
+        out.push(normal(" A add · S switch · R routing · P profile · Q quota · / search · Esc close", available));
         return out.map(line => truncateToWidth(line, available));
       }
     };

@@ -9,6 +9,8 @@ import { fetchQuota, QUOTA_TTL_MS, type Quota, type QuotaProvider } from "./quot
 
 /** Longest a quota-first request waits for first-ever quota probes. */
 const COLD_QUOTA_WAIT_MS = 500;
+/** One account's catalog check may not hold up the others: a slow or hung account is skipped after this. */
+const CATALOG_CHECK_TIMEOUT_MS = 5000;
 type StreamOptions = SimpleStreamOptions | ApiStreamOptions<Api>;
 interface AccountState {
   definition: AccountDefinition;
@@ -76,8 +78,10 @@ export class AccountRouter {
   private settings: () => AccountRoutingSettings;
   private now: () => number;
   private quotaFetcher: typeof fetchQuota;
+  private catalogTimeoutMs: number;
   constructor(store: AccountStore, settings: () => AccountRoutingSettings,
-    now: () => number = Date.now, quotaFetcher = fetchQuota) {
+    now: () => number = Date.now, quotaFetcher = fetchQuota, catalogTimeoutMs = CATALOG_CHECK_TIMEOUT_MS) {
+    this.catalogTimeoutMs = catalogTimeoutMs;
     this.store = store;
     this.settings = settings;
     this.now = now;
@@ -208,21 +212,36 @@ export class AccountRouter {
     }
     return ordered;
   }
-  /** Credential-scoped catalog validation: the first account that serves this exact model wins. */
+  /**
+   * Credential-scoped catalog validation: the first account that serves this exact model wins.
+   * Each check is time-limited, so a hung account is skipped (and cooled down) instead of
+   * blocking healthy accounts behind it.
+   */
   private async firstEligible(ordered: AccountState[], provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<AccountState | undefined> {
     for (const state of ordered) {
       signal?.throwIfAborted();
       try {
-        const models = await (await state.models).getAllAvailable(provider.id, { signal });
-        const serves = models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
-          && (candidate.type ?? "chat") === (model.type ?? "chat") && candidate.api === model.api);
-        if (serves) return state;
+        if (await this.servesModel(state, provider, model, signal)) return state;
       } catch {
         signal?.throwIfAborted();
         state.unavailableUntil = this.now() + 60_000;
       }
     }
     return undefined;
+  }
+  private async servesModel(state: AccountState, provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<boolean> {
+    const limit = AbortSignal.timeout(this.catalogTimeoutMs);
+    const checkSignal = signal ? AbortSignal.any([signal, limit]) : limit;
+    // A catalog check that ignores its abort signal must still lose the race.
+    const timedOut = new Promise<never>((_, reject) => {
+      limit.addEventListener("abort", () => reject(new Error("model catalog check timed out")), { once: true });
+    });
+    const check = (async () => {
+      const models = await (await state.models).getAllAvailable(provider.id, { signal: checkSignal });
+      return models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
+        && (candidate.type ?? "chat") === (model.type ?? "chat") && candidate.api === model.api);
+    })();
+    return Promise.race([check, timedOut]);
   }
   invalidate(name: string): void {
     const state = this.states.get(name);
@@ -250,10 +269,14 @@ export class AccountRouter {
   }
   private observeResponse<TModel>(state: AccountState,
     callback?: (response: ProviderResponse, model: TModel) => void | Promise<void>) {
+    // The identity this request was dispatched with. A late 429 must not cool down a different
+    // credential that was reconnected under the same label (possibly by another Pi process).
+    const generation = state.health.credentialGeneration;
     return async (response: ProviderResponse, model: TModel): Promise<void> => {
       if (response.status === 429) {
         const blockedUntil = retryAfter(response, this.now());
-        state.health = this.store.updateHealth(state.definition.name, current => ({ ...current, blockedUntil }));
+        state.health = this.store.updateHealth(state.definition.name, current =>
+          current.credentialGeneration !== generation ? current : { ...current, blockedUntil });
       }
       await callback?.(response, model);
     };
