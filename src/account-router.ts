@@ -11,9 +11,13 @@ import { fetchQuota, QUOTA_TTL_MS, type Quota, type QuotaProvider } from "./quot
 const COLD_QUOTA_WAIT_MS = 500;
 /** One account's catalog check may not hold up the others: a slow or hung account is skipped after this. */
 const CATALOG_CHECK_TIMEOUT_MS = 5000;
+/** Usage-endpoint lookups running at once per provider; a large pool queues instead of bursting. */
+const QUOTA_PROBE_CONCURRENCY = 4;
 type StreamOptions = SimpleStreamOptions | ApiStreamOptions<Api>;
 interface AccountState {
   definition: AccountDefinition;
+  /** Credential identity this runtime was built for; a change means the cached runtime is stale. */
+  generation?: string;
   models: ReturnType<AccountStore["models"]>;
   health: AccountHealth;
   pending?: Promise<void>;
@@ -79,6 +83,7 @@ export class AccountRouter {
   private now: () => number;
   private quotaFetcher: typeof fetchQuota;
   private catalogTimeoutMs: number;
+  private probeSlots = new Map<string, { active: number; waiting: Array<() => void> }>();
   constructor(store: AccountStore, settings: () => AccountRoutingSettings,
     now: () => number = Date.now, quotaFetcher = fetchQuota, catalogTimeoutMs = CATALOG_CHECK_TIMEOUT_MS) {
     this.catalogTimeoutMs = catalogTimeoutMs;
@@ -88,13 +93,46 @@ export class AccountRouter {
     this.quotaFetcher = quotaFetcher;
   }
 
+  /**
+   * One state per account label. Another Pi process can remove and re-create a label under a
+   * different provider, auth type, variable or identity, so a cached runtime is reused only while
+   * all of those still match; otherwise it is retired and rebuilt.
+   */
   private state(account: AccountDefinition, provider: Provider): AccountState {
+    const health = this.store.health(account.name);
     let state = this.states.get(account.name);
+    if (state && !this.sameIdentity(state, account, health)) {
+      state.invalidated = true;
+      this.states.delete(account.name);
+      this.dropLastUsed(account.name);
+      state = undefined;
+    }
     if (!state) {
-      state = { definition: account, models: this.store.models(account, provider), health: this.store.health(account.name), nextCheck: 0, inFlight: 0 };
+      state = { definition: account, generation: health.credentialGeneration, models: this.store.models(account, provider), health, nextCheck: 0, inFlight: 0 };
       this.states.set(account.name, state);
     }
+    state.health = health;
     return state;
+  }
+  private sameIdentity(state: AccountState, account: AccountDefinition, health: AccountHealth): boolean {
+    const known = state.definition;
+    return known.provider === account.provider && known.auth === account.auth && known.env === account.env
+      && state.generation === health.credentialGeneration;
+  }
+  private dropLastUsed(name: string): void {
+    for (const [provider, selected] of this.sticky) if (selected === name) this.sticky.delete(provider);
+  }
+  /** Runs `work` once a probe slot for this provider is free, so a large pool never bursts the usage endpoint. */
+  private async withProbeSlot<T>(provider: string, work: () => Promise<T>): Promise<T> {
+    let slot = this.probeSlots.get(provider);
+    if (!slot) { slot = { active: 0, waiting: [] }; this.probeSlots.set(provider, slot); }
+    if (slot.active < QUOTA_PROBE_CONCURRENCY) slot.active++;
+    else await new Promise<void>(resolve => slot.waiting.push(resolve)); // the finishing probe hands its slot over
+    try { return await work(); }
+    finally {
+      const next = slot.waiting.shift();
+      if (next) next(); else slot.active--;
+    }
   }
   private async refreshQuota(state: AccountState, signal?: AbortSignal): Promise<void> {
     const provider = state.definition.provider;
@@ -110,7 +148,11 @@ export class AccountRouter {
     state.pending = (async () => {
       let quota: Quota | undefined;
       try {
-        quota = await this.quotaFetcher(provider as QuotaProvider, async (id) => (await state.models).getAuth(id), AbortSignal.timeout(5000));
+        quota = await this.withProbeSlot(provider, async () => {
+          // Queued behind other probes: the account may have been signed out or replaced meanwhile.
+          if (state.invalidated || this.states.get(state.definition.name) !== state) return undefined;
+          return this.quotaFetcher(provider as QuotaProvider, async (id) => (await state.models).getAuth(id), AbortSignal.timeout(5000));
+        });
         state.quotaError = undefined;
       } catch {
         // Preserve known limits during endpoint outages; do not mistake unknown quota for zero.
@@ -152,7 +194,7 @@ export class AccountRouter {
     // a healthy request on a usage endpoint. Provider 429 remains authoritative.
     const coldProbes: Promise<void>[] = [];
     for (const state of states) {
-      state.health = this.store.health(state.definition.name);
+      // state() just read the health file; refreshQuota re-reads it only when a probe is due.
       const probe = this.refreshQuota(state).catch(() => {
         state.quotaError = "Quota lookup unavailable; provider limits still apply";
       });
@@ -248,7 +290,7 @@ export class AccountRouter {
     if (state) state.invalidated = true;
     this.states.delete(name);
     // Re-login, sign-out, or deletion invalidates the account's last-used marker.
-    for (const [provider, selected] of this.sticky) if (selected === name) this.sticky.delete(provider);
+    this.dropLastUsed(name);
   }
   status(): AccountRouteStatus[] {
     return this.store.list().map(account => {

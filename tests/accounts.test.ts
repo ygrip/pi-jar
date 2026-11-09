@@ -419,7 +419,7 @@ test("sign-out preserves OAuth account label and leaves Pi primary credentials u
   store.reserve("work");
   store.save({ version: 1, name: "work", provider: "openai-codex", auth: "oauth" });
   const authPath = join(store.root, "work", "auth.json");
-  writeFileSync(authPath, JSON.stringify({ stored: "oauth" }), { mode: 0o600 });
+  writeFileSync(authPath, JSON.stringify({ "openai-codex": { type: "oauth", access: "a", refresh: "r", expires: 1 } }), { mode: 0o600 });
   const primary = join(directory, "auth.json");
   writeFileSync(primary, "primary login", { mode: 0o600 });
   const definition = store.list()[0]!;
@@ -677,7 +677,8 @@ test("stale quota from old OAuth credentials cannot return after logout or recon
   store.reserve("work");
   store.save({ version: 1, name: "work", provider: providerId, auth: "oauth" });
   const authPath = join(store.root, "work", "auth.json");
-  writeFileSync(authPath, "old-token", { mode: 0o600 });
+  const signedIn = (token: string) => JSON.stringify({ [providerId]: { type: "oauth", access: token, refresh: token, expires: 1 } });
+  writeFileSync(authPath, signedIn("old-token"), { mode: 0o600 });
   store.models = async () => ({
     getAuth: async () => ({ auth: { apiKey: "fake-token" }, source: "oauth" }),
     getAllAvailable: async () => [codexModel],
@@ -712,7 +713,7 @@ test("stale quota from old OAuth credentials cannot return after logout or recon
 
   // Reconnect with a different identity; the provider ID and account name
   // stay the same, but a new credential generation is persisted.
-  writeFileSync(authPath, "new-token", { mode: 0o600 });
+  writeFileSync(authPath, signedIn("new-token"), { mode: 0o600 });
   store.resetHealthForCredentialChange("work");
   let startOther!: () => void, releaseOther!: (quota: { fiveHour: { used: number } }) => void;
   const otherStarted = new Promise<void>(resolve => { startOther = resolve; });
@@ -805,4 +806,103 @@ test("a hung catalog check is skipped after its time limit instead of blocking l
   assert.equal((await routed.streamSimple(routedModel, context).result()).stopReason, "stop");
   assert.deepEqual(used, ["fast", "fast"]);
   assert.equal(slowChecks, 1, "the hung account is cooled down, not re-probed on every request");
+});
+
+test("hasCredentials requires an OAuth entry for the account's provider", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-creds-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: "openai-codex", auth: "oauth" });
+  const account = store.list()[0]!;
+  const authPath = join(store.root, "work", "auth.json");
+  const states: Array<[string, boolean]> = [
+    ["{}", false],
+    [JSON.stringify({ anthropic: { type: "oauth", access: "x" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "api_key", key: "x" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: "y", expires: 1 } }), true]
+  ];
+  for (const [content, expected] of states) {
+    writeFileSync(authPath, content, { mode: 0o600 });
+    assert.equal(store.hasCredentials(account), expected, content);
+  }
+  writeFileSync(authPath, "not json", { mode: 0o600 });
+  assert.throws(() => store.hasCredentials(account), /unreadable credential file/);
+
+  // Pinning refuses an account whose auth file holds no credential for its provider.
+  writeFileSync(authPath, "{}", { mode: 0o600 });
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: [] };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, directory);
+  assert.throws(() => accounts.pin("openai-codex", "work", { ui: { notify() {} } } as never), /no available credentials/);
+});
+
+test("a label re-created under another provider in another process gets a fresh runtime", async t => {
+  const f = fixture(t);
+  const other: Model<Api> = { ...model, provider: "other", id: "other-model" };
+  const built: string[] = [];
+  const realModels = f.store.models.bind(f.store);
+  f.store.models = ((account: { name: string; provider: string }, provider: Provider) => {
+    built.push(`${account.name}:${account.provider}`);
+    return realModels(account as never, provider);
+  }) as never;
+  const router = new AccountRouter(f.store, () => ({ mode: "sticky", accounts: [] }));
+  await router.wrap(f.provider).streamSimple(model, context).result();
+  assert.ok(built.includes("a:openai"));
+  built.length = 0;
+
+  // Another process removes "a" and re-creates it for a different provider.
+  process.env.JAR_OTHER_A = "other-a";
+  t.after(() => { delete process.env.JAR_OTHER_A; });
+  f.store.remove("a");
+  f.store.reserve("a");
+  f.store.save({ version: 1, name: "a", provider: "other", auth: "env", env: "JAR_OTHER_A" });
+  const calls: string[] = [];
+  const otherProvider: Provider = { ...f.provider, id: "other", getModels: () => [other],
+    streamSimple: (_m, _c, options) => {
+      calls.push(options?.apiKey ?? "missing");
+      const output = createAssistantMessageEventStream();
+      output.push({ type: "done", reason: "stop", message: { ...message("ok"), provider: "other", model: "other-model" } });
+      output.end();
+      return output;
+    } };
+  assert.equal((await router.wrap(otherProvider).streamSimple(other, context).result()).stopReason, "stop");
+  assert.deepEqual(calls, ["other-a"]);
+  assert.ok(built.includes("a:other"), "the stale runtime was rebuilt, not reused");
+  assert.equal(f.store.health("a").blockedUntil, undefined, "the new identity was not cooled down");
+});
+
+test("quota probes for a large pool run at most four at a time per provider and all complete", { timeout: 10000 }, async () => {
+  const providerId = "openai-codex";
+  const routedModel: Model<Api> = { ...model, provider: providerId };
+  const definitions = Array.from({ length: 20 }, (_, index) => ({ version: 1 as const, name: `pool-${index}`, provider: providerId, auth: "oauth" as const }));
+  const fakeStore = {
+    list: () => definitions,
+    hasCredentials: () => true,
+    health: () => ({}),
+    updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    models: () => Promise.resolve({
+      getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
+      getAllAvailable: async () => [routedModel],
+      streamSimple: () => {
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: "done", reason: "stop", message: { ...message("ok"), provider: providerId, model: routedModel.id } });
+        stream.end();
+        return stream;
+      }
+    })
+  } as unknown as AccountStore;
+  const native: Provider = { id: providerId, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] }, getModels: () => [routedModel],
+    stream: () => { throw new Error("unused"); }, streamSimple: () => { throw new Error("unused"); } };
+  let active = 0, maximum = 0, finished = 0;
+  const quotaFetcher = async () => {
+    active++; maximum = Math.max(maximum, active);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    active--; finished++;
+    return { fiveHour: { used: 10 } };
+  };
+  const router = new AccountRouter(fakeStore, () => ({ mode: "round-robin", accounts: [] }), Date.now, quotaFetcher);
+  assert.equal((await router.wrap(native).streamSimple(routedModel, context).result()).stopReason, "stop");
+  for (let wait = 0; wait < 200 && finished < 20; wait++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(finished, 20, "queued probes all run");
+  assert.ok(maximum <= 4 && maximum > 1, `concurrency stayed bounded (${maximum})`);
 });

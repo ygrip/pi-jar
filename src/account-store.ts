@@ -111,12 +111,26 @@ export class AccountStore {
     }
   }
 
-  /** Check credential presence without reading or exposing secret values. */
+  /**
+   * Check that a usable credential exists without exposing secret values. An OAuth account counts only
+   * if its private auth file holds an OAuth entry for this account's provider: Pi creates an empty
+   * `{}` file on first use, and a file for another provider proves nothing.
+   */
   hasCredentials(account: AccountDefinition): boolean {
     if (account.auth === "env") return Boolean(account.env && process.env[account.env]);
     const path = this.credentialPath(account.name);
-    try { privatePath(path, false); return true; }
+    let raw: string;
+    try { privatePath(path, false); raw = readFileSync(path, "utf8"); }
     catch (error) { if (missing(error)) return false; throw error; }
+    return this.holdsOAuthEntry(raw, account);
+  }
+  private holdsOAuthEntry(raw: string, account: AccountDefinition): boolean {
+    let stored: unknown;
+    try { stored = JSON.parse(raw); }
+    catch { throw new Error(`Account ${account.name} has an unreadable credential file`); }
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return false;
+    const entry = (stored as Record<string, unknown>)[account.provider];
+    return !!entry && typeof entry === "object" && (entry as { type?: unknown }).type === "oauth";
   }
 
   /** Sign out one OAuth account while keeping its label for reconnect. */
