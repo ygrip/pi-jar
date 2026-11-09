@@ -5,6 +5,7 @@ import { AccountRouter } from "./account-router.ts";
 import { QUOTA_PREFIX, QUOTA_TTL_MS } from "./quota.ts";
 import { promptText } from "./dialogs.ts";
 import { cleanText } from "./status.ts";
+import { openLoginBrowser } from "./login-browser.ts";
 import { ACCOUNT_ROUTING_ENV, ACCOUNT_ROUTING_MODES, isUnsafeRouting, parseAccountRouting, unsafeAccountRouting, withRoutingMode, type AccountRoutingSettings } from "./account-settings.ts";
 
 /** Parent settings are captured at each child launch; no secrets travel in the environment. */
@@ -22,12 +23,15 @@ export class Accounts {
   private pi: ExtensionAPI;
   private settings: () => AccountRoutingSettings;
   private update: (settings: AccountRoutingSettings, ctx: ExtensionContext) => void;
+  private openBrowser: (url: string) => void;
   onQuotaChange?: () => void;
   constructor(pi: ExtensionAPI, settings: () => AccountRoutingSettings,
-    update: (settings: AccountRoutingSettings, ctx: ExtensionContext) => void, directory = getAgentDir()) {
+    update: (settings: AccountRoutingSettings, ctx: ExtensionContext) => void, directory = getAgentDir(),
+    openBrowser: (url: string) => void = openLoginBrowser) {
     this.pi = pi;
     this.settings = settings;
     this.update = update;
+    this.openBrowser = openBrowser;
     this.store = new AccountStore(directory);
     this.router = new AccountRouter(this.store, settings);
   }
@@ -153,6 +157,9 @@ export class Accounts {
     }
   }
   async ready(ctx: ExtensionContext): Promise<void> {
+    // Discover native Pi OAuth before provider routing is installed, including while routing is off.
+    // Recheck on account manager open so a recent native /login is detected without a restart.
+    await this.store.discoverNativeAccounts(id => Boolean(ctx.modelRegistry.getProvider(id)?.auth.oauth));
     this.sync(ctx);
     if (this.settings().mode === "off" || !this.originals.size) return;
     // Publish account-backed availability before default/profile role activation; no catalog IO.
@@ -186,8 +193,10 @@ export class Accounts {
         return value;
       },
       notify: event => {
-        if (event.type === "auth_url") ctx.ui.notify(
-          `Open this login URL in your browser: ${event.url}\nIf the localhost callback is not reachable (SSH/container), paste the full redirected URL in the next prompt, or retry using device-code login.`, "info");
+        if (event.type === "auth_url") {
+          ctx.ui.notify(`Open this login URL in your browser: ${event.url}\nIf the localhost callback is not reachable (SSH/container), paste the full redirected URL in the next prompt, or retry using device-code login.`, "info");
+          this.openBrowser(event.url);
+        }
         else if (event.type === "device_code") ctx.ui.notify(
           `Open ${event.verificationUri} and enter code ${event.userCode}. Pi is waiting for confirmation.`, "info");
         else if (event.type === "info" || event.type === "progress") ctx.ui.notify(event.message, "info");
@@ -276,6 +285,7 @@ export class Accounts {
   async command(args: string, ctx: ExtensionContext): Promise<void> {
     const [action, providerId, name, env, ...extra] = args.trim().split(/\s+/);
     if (!action || action === "list") {
+      await this.ready(ctx);
       const rows = this.router.status().map(account => {
         let quota = "quota unknown";
         if (account.remaining !== undefined) quota = `${account.remaining}% remaining`;
@@ -355,7 +365,7 @@ export class Accounts {
     if (!existing) this.store.reserve(name);
     if (action !== "add") {
       try {
-        const models = await this.store.models(account, provider);
+        const models = await this.store.models(existing ?? account, provider);
         // Use Pi's native OAuth flow, not a second credential implementation.
         await models.login(providerId, "oauth", this.interaction(ctx, action === "login-device"),
           { getDeviceId: () => this.store.deviceId() });
