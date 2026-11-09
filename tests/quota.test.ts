@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { QuotaCache, fetchQuota, publishedQuota, QUOTA_MAX_BACKOFF_MS, QUOTA_TTL_MS, type Quota } from "../src/quota.ts";
+import { QuotaCache, fetchQuota, publishedQuota, publishedQuotaExpiry, QUOTA_MAX_BACKOFF_MS, QUOTA_TTL_MS, type Quota } from "../src/quota.ts";
 import { collectStatuses } from "../src/status.ts";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -9,6 +9,8 @@ test("quota publisher wins, stale and malformed payloads are hidden, no JSON lea
   const now = Date.now();
   const statuses = new Map([["pi-jar.quota.openai-codex", JSON.stringify({ fiveHour: { used: 47 }, week: { used: 12 }, expiresAt: now + 1000 })]]);
   assert.deepEqual(publishedQuota(statuses, "openai-codex", now), { fiveHour: { used: 47 }, week: { used: 12 } });
+  assert.equal(publishedQuotaExpiry(statuses, "openai-codex", now), now + 1000);
+  assert.equal(publishedQuotaExpiry(statuses, "openai-codex", now + 1001), undefined);
   assert.deepEqual(collectStatuses(statuses, now).extras, []);
   assert.equal(publishedQuota(statuses, "openai-codex", now + 1001), undefined);
   statuses.set("pi-jar.quota.openai-codex", JSON.stringify({ fiveHour: { used: -12 }, expiresAt: now + 1000 }));

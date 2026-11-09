@@ -19,12 +19,13 @@ import { GoalLoop } from "../src/goal-loop.ts";
 import { registerTodoGate } from "../src/todo-gate.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
-import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY, conversationStarted, pinnedProfileId } from "../src/profiles.ts";
+import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY, conversationStarted, pinnedProfileId, settingsAfterProfileFailure } from "../src/profiles.ts";
 import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { openProfiles, type ProfileAction } from "../src/profile-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
-import { fetchQuota, QuotaCache, type QuotaProvider } from "../src/quota.ts";
+import { fetchQuota, publishedQuota, publishedQuotaExpiry, QuotaCache, QUOTA_TTL_MS, type QuotaProvider } from "../src/quota.ts";
 import { Accounts, inheritedAccountRouting } from "../src/accounts.ts";
+import { openAccountManager } from "../src/account-ui.ts";
 import { ModelRoleManager } from "../src/model-roles.ts";
 import { jarCommit } from "../src/commit.ts";
 import { registerAdvisor } from "../src/advisor.ts";
@@ -130,13 +131,59 @@ export default function piJar(pi: ExtensionAPI): void {
     repaint("session", "transition");
   };
   let quotaCache: QuotaCache | undefined;
+  const quotaFor = (ctx: ExtensionContext, statuses: ReadonlyMap<string, string>, now: number) => {
+    if (accounts.routesProvider(ctx.model?.provider)) return publishedQuota(statuses, ctx.model?.provider ?? "", now);
+    return quotaCache?.get(ctx.model?.provider, statuses, now);
+  };
   let enableQuota: NodeJS.Timeout | undefined;
-  /**
-   * Lookups start on session boundaries, never from a render, and only while an installed footer can
-   * show them (never in RPC children or with the UI off); the cache bounds them to one per TTL.
-   */
-  const refreshQuota = (ctx: ExtensionContext) => {
-    if (footerTui && footerSettings.quota) quotaCache?.refresh(ctx.model?.provider, welcomeStatuses(), Date.now());
+  let quotaRefreshTimer: NodeJS.Timeout | undefined;
+  let quotaRefreshAt: number | undefined;
+  let quotaContext: ExtensionContext | undefined;
+  const stopQuotaRefreshTimer = () => {
+    if (quotaRefreshTimer) clearTimeout(quotaRefreshTimer);
+    quotaRefreshTimer = undefined;
+    quotaRefreshAt = undefined;
+  };
+  /** Schedule the earliest known expiry without postponing it at each session boundary. */
+  const scheduleQuotaRefresh = (ctx: ExtensionContext) => {
+    if (!footerTui || !footerSettings.quota || !quotaCache?.enabled) return;
+    const now = Date.now();
+    const provider = ctx.model?.provider;
+    const expiry = publishedQuotaExpiry(welcomeStatuses(), provider ?? "", now);
+    let delay = QUOTA_TTL_MS;
+    if (expiry !== undefined) delay = Math.max(1, expiry - now);
+    else {
+      const entry = quotaCache.stats(now).providers.find(item => item.provider === provider);
+      if (entry?.retryInMs !== undefined && entry.retryInMs > 0) delay = entry.retryInMs;
+    }
+    const due = now + delay;
+    if (quotaRefreshAt !== undefined && quotaRefreshAt <= due) return;
+    stopQuotaRefreshTimer();
+    quotaRefreshAt = due;
+    quotaRefreshTimer = setTimeout(() => {
+      quotaRefreshTimer = undefined;
+      quotaRefreshAt = undefined;
+      refreshQuota(ctx);
+    }, delay);
+    quotaRefreshTimer.unref?.();
+  };
+  /** Routed accounts publish their own quota; the provider-global fallback is only for native auth. */
+  const refreshQuota = (ctx: ExtensionContext, explicit = false) => {
+    if (!quotaCache?.enabled) return;
+    if (!explicit && (!footerTui || !footerSettings.quota)) return;
+    quotaContext = ctx;
+    if (accounts.routesProvider(ctx.model?.provider)) {
+      void accounts.refreshQuota(ctx.model?.provider).catch((error: unknown) => {
+        console.error("pi-jar: routed quota refresh failed", error);
+      });
+    } else {
+      quotaCache.refresh(ctx.model?.provider, welcomeStatuses(), Date.now());
+    }
+    scheduleQuotaRefresh(ctx);
+  };
+  accounts.onQuotaChange = () => {
+    repaint("quota", "transition");
+    if (quotaContext) scheduleQuotaRefresh(quotaContext);
   };
   let cost = 0;
   let welcomeInterval: ReturnType<typeof setInterval> | undefined;
@@ -193,13 +240,11 @@ export default function piJar(pi: ExtensionAPI): void {
     if (open.length) todosAcknowledged = false;
     const visible = enabled && items.length > 0 && (open.length > 0 || !todosAcknowledged);
     try {
+      // Tasks stay in their own widget; Ember must remain visible next to the editor even
+      // when a session grows or the task widget is clipped/removed by the TUI.
       ctx.ui.setWidget("pi-jar.todos", !visible ? undefined : (tui, theme) =>
-        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState, {
-          render: (width) => composer.enabled ? composer.renderMascot(width) : undefined,
-          poke: () => composer.pokeMascot()
-        }));
-      composer.setTasksVisible(visible);
-    } catch { composer.setTasksVisible(false); /* Optional widget; task data remains available via /jar tasks and jar_todo. */ }
+        taskWidget(tui, theme, () => todos?.all() ?? [], taskWidgetState));
+    } catch { /* Optional task widget failure must never hide the mascot. */ }
   };
   registerTaskTool(pi, () => todos, (ctx) => updateTaskWidget(ctx));
   let changes: ChangeTracker | undefined;
@@ -317,10 +362,13 @@ export default function piJar(pi: ExtensionAPI): void {
   const cacheBreaks = registerCacheBreaks(pi, { enabled: () => !delegatedChild && visualSettings.cacheDiagnostics !== false });
   const advisor = registerAdvisor(pi, modelRoles, { enabled: () => !delegatedChild && visualSettings.advisor, gates: () => !delegatedChild && visualSettings.advisorGates, usage: sideUsage });
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
-    quota: (ctx) => quotaCache?.get(ctx.model?.provider, welcomeStatuses(), Date.now()),
-    quotaFailure: (ctx) => quotaCache?.failure(ctx.model?.provider, Date.now()),
+    quota: (ctx) => quotaFor(ctx, welcomeStatuses(), Date.now()),
+    quotaFailure: (ctx) => {
+      if (accounts.routesProvider(ctx.model?.provider)) return undefined;
+      return quotaCache?.failure(ctx.model?.provider, Date.now());
+    },
     cacheBreaks: (ctx) => cacheBreaks.state(ctx),
-    refreshQuota: (ctx) => { quotaCache?.refresh(ctx.model?.provider, welcomeStatuses(), Date.now()); } });
+    refreshQuota: (ctx) => { refreshQuota(ctx, true); } });
   let followingTheme: string | undefined;
   const profileEntries = (ctx: ExtensionContext): readonly unknown[] => {
     try { return ctx.sessionManager.getEntries?.() ?? sessionBranch(ctx); } catch { return sessionBranch(ctx); }
@@ -357,7 +405,8 @@ export default function piJar(pi: ExtensionAPI): void {
       return { roles: profile.roles, profileId: profile.id };
     } catch (error) {
       if (previousTheme) { try { applyProfileTheme(previousTheme, ctx); } catch {} }
-      profileStore = undefined; visualSettings = loadVisualSettings(getAgentDir()); composer.setProfile("Default");
+      // An unreadable profiles file hides the account-routing policy: lock routing, never fall back to "off".
+      profileStore = undefined; visualSettings = settingsAfterProfileFailure(getAgentDir(), error); composer.setProfile("Default");
       ctx.ui.notify(`Could not load profiles: ${(error as Error).message}`, "warning");
       return undefined;
     }
@@ -548,7 +597,7 @@ export default function piJar(pi: ExtensionAPI): void {
         }, render(width: number) {
           const statuses = welcomeStatuses();
           const live = collectStatuses(statuses, Date.now());
-          const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, Date.now()) : undefined;
+          const quota = footerSettings.quota ? quotaFor(ctx, statuses, Date.now()) : undefined;
           const open = todos?.all().filter((item) => !item.done) ?? [];
           const lines = welcomeLines(width, welcomeFrame, (color, text) => (ctx.ui.theme ?? theme).fg(color, text), {
             ...info, model: ctx.model?.id, profile: profileStore?.activeName ?? "Default", settingsClickable: tui.mode !== "regular", roles: live.roles,
@@ -574,6 +623,7 @@ export default function piJar(pi: ExtensionAPI): void {
     if (!ctx.hasUI || ctx.mode !== "tui") return;
     if (!enabled) {
       stopWelcome(ctx);
+      stopQuotaRefreshTimer();
       quotaCache?.stop();
       composer.disable(ctx);
       updateTaskWidget(ctx);
@@ -608,6 +658,7 @@ export default function piJar(pi: ExtensionAPI): void {
           if (expiryTimer) clearTimeout(expiryTimer);
           expiryTimer = undefined;
           expiryAt = undefined;
+          stopQuotaRefreshTimer();
           if (footerTui === tui) { footerTui = undefined; welcomeStatuses = () => new Map<string, string>(); welcomeBranch = () => null; }
           unsubscribe();
         };
@@ -657,7 +708,7 @@ export default function piJar(pi: ExtensionAPI): void {
                 memory = `ram ${Math.round(process.memoryUsage.rss() / 1048576)} MiB`;
                 memorySampledAt = now;
               }
-              const quota = footerSettings.quota ? quotaCache?.get(ctx.model?.provider, statuses, now) : undefined;
+              const quota = footerSettings.quota ? quotaFor(ctx, statuses, now) : undefined;
               const layout = renderFooterLayout({
                 model: ctx.model?.id ?? "no-model", effort: ctx.model?.reasoning === false ? "off" : (pi.getThinkingLevel?.() ?? "off"),
                 sessionName: footerSessionName,
@@ -678,6 +729,7 @@ export default function piJar(pi: ExtensionAPI): void {
           }
         };
       });
+      refreshQuota(ctx);
     } catch {
       disposeFooter = undefined;
       ctx.ui.setFooter(undefined);
@@ -712,6 +764,7 @@ export default function piJar(pi: ExtensionAPI): void {
     visualSettings = next;
     // Same activation as /jar routing: install or restore providers, then refresh model availability.
     if (routingChanged) {
+      stopQuotaRefreshTimer();
       void accounts.ready(ctx).catch((error: unknown) => {
         ctx.ui.notify(`Account routing: ${error instanceof Error ? error.message : String(error)}`, "error");
       });
@@ -719,7 +772,7 @@ export default function piJar(pi: ExtensionAPI): void {
     setIconSet(next.icons);
     enabled = next.ui;
     animations = next.animations;
-    if (footerSettings.quota && !next.footer.quota) quotaCache?.stop();
+    if (footerSettings.quota && !next.footer.quota) { stopQuotaRefreshTimer(); quotaCache?.stop(); }
     footerSettings = next.footer;
     if (!animations && welcomeInterval) {
       clearInterval(welcomeInterval);
@@ -814,7 +867,7 @@ export default function piJar(pi: ExtensionAPI): void {
       (next) => applyVisualSettings(next, ctx), loadedAccents(ctx), piPreferences(ctx), profileStore ? {
         activeName: () => profileStore?.activeName ?? "Default",
         open: (action) => profileUi(ctx, action)
-      } : undefined); }
+      } : undefined, () => openAccountManager(ctx, accounts)); }
     finally { settingsOpen = false; }
   };
   pi.registerCommand("profiles", {
@@ -857,6 +910,7 @@ export default function piJar(pi: ExtensionAPI): void {
     composer.disable(ctx);
     workingIndicatorKey = "";
     working.end();
+    stopQuotaRefreshTimer();
     quotaCache?.stop();
     clearTimeout(enableQuota);
     // Render and sampling counters are session-scoped; nothing from a previous session may fire.
@@ -899,7 +953,11 @@ export default function piJar(pi: ExtensionAPI): void {
     // Quota is enabled per session; no credentials or consent are persisted.
     quotaCache = new QuotaCache(
       (provider: QuotaProvider, signal) => fetchQuota(provider, (id) => ctx.modelRegistry.getProviderAuth(id), signal),
-      () => repaint("quota", "transition")
+      () => {
+        if (quotaCache !== cache) return;
+        repaint("quota", "transition");
+        scheduleQuotaRefresh(ctx);
+      }
     );
     // Hold the network lookup until startup settles; the footer shows it once it arrives.
     quotaCache.enabled = false;
@@ -1033,7 +1091,11 @@ export default function piJar(pi: ExtensionAPI): void {
     updateCost(ctx);
     sampleFooter(ctx);
   });
-  pi.on("model_select", (_event, ctx) => { sampleFooter(ctx); refreshQuota(ctx); });
+  pi.on("model_select", (_event, ctx) => {
+    accounts.clearQuotaStatuses(ctx, ctx.model?.provider);
+    sampleFooter(ctx);
+    refreshQuota(ctx);
+  });
   pi.on("thinking_level_select", (_event, _ctx) => repaint("effort"));
   pi.on("session_info_changed", (_event, ctx) => { composer.refreshSession(ctx); sampleFooter(ctx); });
   pi.on("session_shutdown", (_event, ctx) => {
@@ -1045,6 +1107,7 @@ export default function piJar(pi: ExtensionAPI): void {
     workingIndicatorKey = "";
     working.end();
     try { if (ctx.hasUI && ctx.mode === "tui") { ctx.ui.setWorkingMessage?.(); ctx.ui.setWorkingIndicator(); ctx.ui.setWidget("pi-jar.todos", undefined); } } catch {}
+    stopQuotaRefreshTimer();
     quotaCache?.stop();
     quotaCache = undefined;
     clearTimeout(enableQuota);
@@ -1131,8 +1194,14 @@ export default function piJar(pi: ExtensionAPI): void {
         return;
       }
       if (command === "accounts" || command.startsWith("accounts ")) {
-        try { await accounts.command(args.trim().slice("accounts".length).trim(), ctx); }
-        catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+        try {
+          const subcommand = args.trim().slice("accounts".length).trim();
+          const opensManager = !subcommand || subcommand.toLowerCase() === "manage";
+          const interactive = ctx.hasUI && ctx.mode === "tui";
+          if (opensManager && interactive) await openAccountManager(ctx, accounts);
+          else if (opensManager) await accounts.command("list", ctx);
+          else await accounts.command(subcommand, ctx);
+        } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
         return;
       }
       if (!command || command === "status") {
@@ -1301,7 +1370,7 @@ export default function piJar(pi: ExtensionAPI): void {
       else if (command === "ui on") applyVisualSettings({ ...visualSettings, ui: true }, ctx);
       else if (command === "ui off") applyVisualSettings({ ...visualSettings, ui: false }, ctx);
       else if (command === "quota on" && quotaCache) { quotaCache.enabled = true; quotaDisabledByUser = false; refreshQuota(ctx); }
-      else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaDisabledByUser = true; quotaCache.stop(); }
+      else if (command === "quota off" && quotaCache) { quotaCache.enabled = false; quotaDisabledByUser = true; stopQuotaRefreshTimer(); quotaCache.stop(); }
       else {
         ctx.ui.notify("Usage: /jar [status|perf|settings|routing on/off|accounts|activity|shells|sessions [search]|icons [unicode|nerd|ascii]|commit [note]|name <title>|history|footer|tasks|ask|composer on/off|accent [preset]|hub|welcome|demo|reset|animations on/off|ui on/off|quota on/off]", "error");
         return;

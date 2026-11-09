@@ -148,3 +148,25 @@ test("retired context controls are absent and remaining Pi settings keep working
   } };
   await openJarSettings(ctx as never, () => state, (next) => { state = next; saves++; }, []);
 });
+
+test("Pi settings opens the interactive account manager and returns to settings", async () => {
+  let state = startState();
+  let openCount = 0;
+  let popups = 0;
+  const ctx = { hasUI: true, mode: "tui", ui: {
+    notify() {},
+    custom: async (factory: Function) => new Promise(resolve => {
+      const pane: Pane = factory({ requestRender() {}, terminal: { rows: 24 } }, { fg: (_color: string, text: string) => text }, {}, resolve);
+      if (popups++ === 0) {
+        pane.handleInput("\t"); pane.handleInput("\t");
+        for (let index = 0; index < 9; index++) pane.handleInput("\x1b[B");
+        assert.match(pane.render(80).join("\n"), /Manage accounts/);
+        pane.handleInput("\r");
+      } else pane.handleInput("\x1b");
+    })
+  } };
+  await openJarSettings(ctx as never, () => state, next => { state = next; }, [],
+    undefined, undefined, async () => { openCount++; });
+  assert.equal(openCount, 1);
+  assert.equal(popups, 2, "closing account manager restores settings");
+});

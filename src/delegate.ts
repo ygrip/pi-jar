@@ -1413,9 +1413,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     // Stable system text avoids accumulating another hidden transcript message on every prompt.
     const systemPrompt = _event.systemPrompt + "\n\n" + [
       "[PI-JAR DELEGATION]",
-      "For substantial work, identify independent, bounded tasks before starting tool-heavy implementation. Use jar_delegate when parallel ownership saves work; do small, tightly coupled tasks directly. Do not invent a tool-call count or delegate merely to fill the pool.",
-      "Use scout for fresh research, external documentation and cross-repository discovery; fork for read-only review with conversation context; worktree only for isolated implementation. Worktrees cannot use shells or arbitrary paths outside their workspace. Research inaccessible references with a scout or the main agent, then send relevant findings to the worker.",
-      "Grant needed active tools and skills per task, respecting user allowlists/disallows. Reuse retained agents, avoid duplicate work and polling, and stop worktree agents to reconcile changes before verifying them."
+      "For substantial work, identify independent, bounded tasks before starting tool-heavy implementation. Delegate when parallel ownership saves work; do small, tightly coupled tasks directly.",
+      "Use scout for fresh research, external documentation and cross-repository discovery; fork for read-only review with conversation context; worktree only for isolated implementation (no shells or external paths: research those yourself or with a scout first). Completions arrive as pi-jar.subagent events: never poll, reuse retained agents instead of spawning, and stop finished worktree workers to reconcile their changes into /diff."
     ].join("\n");
     if (!retained.length) return { systemPrompt };
     const fleet = retained.map((record) => {
@@ -1424,8 +1423,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     }).join("\n");
     return { systemPrompt, message: { customType: "pi-jar.moderator-context", display: false, content: [
       "[PI-JAR MODERATOR MODE]",
-      "Retained subagents own their delegated tasks: don't duplicate their work. Their turn ends and ask/pause/stop results arrive as pi-jar.subagent events; an accepted receipt is not completion, so keep working and never poll peek.",
-      "Hibernated agents are idle with the process closed; resume and ask relaunch them intact. Stop finished workers to reconcile worktree changes into /diff, then synthesize from their reports.",
+      "Retained subagents own their delegated tasks: don't duplicate their work. An accepted receipt is not completion; results arrive as pi-jar.subagent events. Hibernated agents relaunch intact on resume or ask.",
       "Retained fleet:",
       fleet
     ].join("\n") } };
@@ -1522,12 +1520,10 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   const delegateTool = {
     name: DELEGATE_TOOL,
     label: "delegate",
-    description: `Start retained subagents and return immediately; the pool limit counts idle, paused and hibernated agents. fork and worktree inherit this conversation; a worktree's isolated Git changes reach /diff only when you stop it, and at most ${RECOVERY_LIMIT} worktree workspaces may be active or awaiting recovery (resolve with jar_subagent stop or discard). Turn completions arrive as pi-jar.subagent events with a short summary and changed files; jar_subagent report returns a full report. Settled agents hibernate (process closed, context kept) until resumed.`,
+    description: `Start retained subagents and return immediately; the pool limit counts idle, paused and hibernated agents. fork and worktree inherit this conversation; a worktree's isolated Git changes reach /diff only when you stop it, and at most ${RECOVERY_LIMIT} worktree workspaces may be active or awaiting recovery (resolve with jar_subagent stop or discard). Settled agents hibernate (process closed, context kept) until resumed.`,
     promptSnippet: "Start retained parallel subagents: scout (cheap read-only discovery), fork (read-only review with your context), worktree (isolated implementation).",
-    promptGuidelines: [
-      "Delegate substantial independent tasks when parallel ownership saves work; handle small or tightly coupled tasks directly. Choose scout for external research, fork for contextual read-only review, and worktree for isolated edits; worktree agents cannot use shells or arbitrary external paths.",
-      "After delegating, moderate: completions arrive as pi-jar.subagent events, so keep working and never poll; don't redo delegated work; reuse retained agents (jar_subagent resume) instead of spawning; stop finished workers to apply worktree changes into /diff."
-    ],
+    // Routing and moderation rules live once, in the [PI-JAR DELEGATION] system block.
+    promptGuidelines: [],
     parameters: Parameters,
     // Internal council launches use session context, not tool-only nested execution APIs.
     async execute(_id, params, signal, onUpdate, ctx: ExtensionContext) {
@@ -2098,22 +2094,24 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       detail: { operationId: operation.id, action: operation.action, key: record.key, status, report: result.details } });
   };
 
-  pi.registerTool({
+  const SubagentParameters = Type.Object({
+    action: Type.Union([
+      Type.Literal("peek"), Type.Literal("steer"), Type.Literal("ask"),
+      Type.Literal("pause"), Type.Literal("resume"), Type.Literal("stop"), Type.Literal("discard"), Type.Literal("report")
+    ]),
+    agent: Type.Optional(Type.String({ description: "Subagent key or unique name. Omit only for peek to show all retained agents." })),
+    agents: Type.Optional(Type.Array(Type.String(), { maxItems: 16, description: "Bulk form of agent: apply the same action (and message) to several agents in one call." })),
+    message: Type.Optional(Type.String({ description: "Direction, BTW question, or resume instruction." }))
+  });
+  const subagentTool = {
     name: "jar_subagent",
     label: "subagent",
-    description: "Non-blocking control for retained subagents. peek: task progress only (plus workspace and changed files of an unresolved worktree recovery). report: an agent's latest full report, for retained and recently finished agents. steer: redirect a working agent. resume: continue an idle, paused or hibernated agent (hibernated ones relaunch transparently). ask, pause and stop return an accepted receipt; the answer or handoff arrives as a pi-jar.subagent event. stop aborts any active turn, retires the agent, reports changes and remaining work, and reconciles worktree changes into /diff (on a failed recovery record it retries). discard removes an unresolved recovery workspace without applying it.",
-    promptSnippet: "Moderator control for retained subagents: peek, report, steer, ask, pause, resume, stop, discard.",
+    description: "Non-blocking control for retained subagents. peek: task progress (plus workspace and changed files of an unresolved worktree recovery). report: an agent's latest full report. steer: redirect a working agent. resume: continue an idle, paused or hibernated agent (hibernated ones relaunch). ask, pause and stop return an accepted receipt; the result arrives as a pi-jar.subagent event. stop aborts any active turn, retires the agent, reports changes and reconciles worktree changes into /diff (retries a failed recovery). discard drops an unresolved recovery workspace unapplied. Pass agents (instead of agent) to apply one action to several agents in one call.",
+    promptSnippet: "Moderator control for retained subagents: peek, report, steer, ask, pause, resume, stop, discard; pass agents to act on several at once.",
     promptGuidelines: [
-      "Results arrive as pi-jar.subagent events; never poll. Reuse idle/paused/hibernated agents with resume instead of spawning; ask = one brief BTW question; pause keeps context without spending; read report only when an event summary is not enough."
+      "ask = one brief BTW question; pause keeps context without spending; read report only when an event summary is not enough."
     ],
-    parameters: Type.Object({
-      action: Type.Union([
-        Type.Literal("peek"), Type.Literal("steer"), Type.Literal("ask"),
-        Type.Literal("pause"), Type.Literal("resume"), Type.Literal("stop"), Type.Literal("discard"), Type.Literal("report")
-      ]),
-      agent: Type.Optional(Type.String({ description: "Subagent key or unique name. Omit only for peek to show all retained agents." })),
-      message: Type.Optional(Type.String({ description: "Direction, BTW question, or resume instruction." }))
-    }),
+    parameters: SubagentParameters,
     async execute(_id, params, signal) {
       if (signal?.aborted) return { content: [{ type: "text" as const, text: "Cancelled before accepting the operation." }], details: undefined, isError: true };
       const work = (async () => {
@@ -2200,6 +2198,19 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       const result = await untilAborted(work, signal)
         ?? { content: [{ type: "text", text: "Cancelled; the subagent keeps its state. Check it with peek." }], isError: true };
       return { ...result, content: result.content.map((part) => ({ ...part, type: "text" as const })), details: "details" in result ? result.details : undefined };
+    }
+  } satisfies ToolDefinition<typeof SubagentParameters>;
+  pi.registerTool({
+    ...subagentTool,
+    // One call can control many agents; each runs through the single-agent path unchanged.
+    async execute(id, params, signal) {
+      if (params.agents === undefined) return subagentTool.execute(id, params, signal);
+      if (params.agent !== undefined) return { content: [{ type: "text" as const, text: "Use agent for one subagent or agents for several, not both." }], details: undefined, isError: true };
+      if (!params.agents.length) return { content: [{ type: "text" as const, text: "agents needs at least one subagent." }], details: undefined, isError: true };
+      const { agents, ...rest } = params;
+      const results = await Promise.all([...new Set(agents)].map(async (agent) => ({ agent, result: await subagentTool.execute(id, { ...rest, agent }, signal) })));
+      const text = results.map(({ agent, result }) => `[${agent}] ${result.content.map((part) => part.text).join("\n")}`).join("\n\n");
+      return { content: [{ type: "text" as const, text }], details: undefined, ...(results.some(({ result }) => result.isError) ? { isError: true } : {}) };
     }
   });
 }

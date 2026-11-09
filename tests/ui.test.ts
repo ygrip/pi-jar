@@ -113,7 +113,8 @@ test("session cost counts only Pi-reported assistant messages on the active bran
     { type: "message", message: { role: "assistant", usage: { cost: { total: 0.375 } } } }
   ];
   assert.equal(sessionCost({ sessionManager: { getBranch: () => branch } } as never), 0.5);
-  assert.equal(formatCost(0.5), "cost $0.50");
+  assert.equal(formatCost(0.5), "chat cost $0.50");
+  assert.equal(formatCost(0.5, 0.1), "chat cost $0.50 · $0.10/call");
 });
 
 test("hub dispatches only installed native managers and never invents unavailable commands", async () => {

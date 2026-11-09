@@ -338,3 +338,38 @@ test("checklist rows indent subtasks and show parent progress", () => {
   assert.equal(todoRow({ id: "s", title: "Sub", status: "pending", done: false, parentId: "p" }, plain), "    ☐ Sub");
   assert.equal(todoRow({ id: "l", title: "Leaf", status: "pending", done: false }, plain, undefined, { done: 0, total: 0 }), "  ☐ Leaf");
 });
+
+test("bulk ids/all complete, reopen and remove many tasks atomically and replay", async () => {
+  const h = harness();
+  await h.run({ todos: plan });
+  const [parent, parser, wire, docs, release] = h.store.all();
+  const ids = (...items: (typeof parent)[]) => items.map((item) => item!.id);
+
+  const completed = await h.run({ action: "done", ids: ids(wire, docs, release) });
+  assert.match(completed.content[0]!.text, /^Completed 3 task\(s\) \(4\/4 done\)/);
+  assert.deepEqual(statuses(h.store), ["Build feature:completed", "  Write parser:completed", "  Wire command:completed", "  Add docs:completed", "Release:completed"]);
+  assert.deepEqual(h.replay().map((item) => item.status), h.store.all().map((item) => item.status), "bulk change survives replay");
+
+  const reopened = await h.run({ action: "open", ids: ids(parent) });
+  assert.match(reopened.content[0]!.text, /^Reopened 1 task\(s\) \(1\/4 done\)/);
+  assert.deepEqual(statuses(h.store).slice(0, 4), ["Build feature:pending", "  Write parser:pending", "  Wire command:pending", "  Add docs:pending"]);
+
+  const before = statuses(h.store);
+  const rejected = await h.run({ action: "done", ids: [parser!.id, "missing-id"] });
+  assert.match(rejected.content[0]!.text, /Unknown task ids \(nothing was changed\): missing-id/);
+  assert.deepEqual(statuses(h.store), before, "an unknown id leaves every task untouched");
+  for (const bad of [{ action: "done", id: parser!.id, ids: [docs!.id] }, { action: "done", ids: [], }, { action: "start", ids: [docs!.id] }, { action: "done", ids: [docs!.id], all: true }]) {
+    assert.match((await h.run(bad)).content[0]!.text, /^Could not/);
+  }
+  assert.deepEqual(statuses(h.store), before);
+
+  await h.run({ action: "remove", ids: ids(wire, release) });
+  assert.deepEqual(statuses(h.store), ["Build feature:pending", "  Write parser:pending", "  Add docs:pending"]);
+  await h.run({ action: "remove", ids: ids(parent) });
+  assert.deepEqual(h.store.all(), [], "removing a parent removes its subtasks");
+
+  await h.run({ todos: plan });
+  assert.match((await h.run({ action: "done", all: true })).content[0]!.text, /^Completed 5 task\(s\)/);
+  assert.match((await h.run({ action: "delete", all: true })).content[0]!.text, /^Removed 5 task\(s\)/);
+  assert.deepEqual(h.replay(), []);
+});

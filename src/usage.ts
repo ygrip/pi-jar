@@ -12,8 +12,8 @@ export function sessionCost(ctx: Pick<ExtensionContext, "sessionManager">): numb
   return total;
 }
 
-/** `cost $1.23`, plus the recent average per provider call when there is one: `cost $1.23 · $0.04/call`. */
+/** Active conversation-branch cost, excluding pi-jar side calls. */
 export function formatCost(value: number, perCall?: number): string {
   const money = (amount: number) => `$${amount < 0.01 && amount > 0 ? amount.toFixed(4) : amount.toFixed(2)}`;
-  return `cost ${money(value)}` + (perCall !== undefined && perCall > 0 ? ` · ${money(perCall)}/call` : "");
+  return `chat cost ${money(value)}` + (perCall !== undefined && perCall > 0 ? ` · ${money(perCall)}/call` : "");
 }

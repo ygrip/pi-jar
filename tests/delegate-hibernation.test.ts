@@ -239,6 +239,28 @@ test("a hibernated worktree worker keeps its private edits, resumes in the same 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("subagents do not launch when unreadable account metadata prevents credential filtering", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "jar-unreadable-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: "openai", auth: "env", env: "JAR_ALLOWED_KEY" });
+  store.reserve("personal");
+  const metadata = join(store.root, "personal", "account.json");
+  writeFileSync(metadata, "{invalid json", { mode: 0o600 });
+  const settings: AccountRoutingSettings = { mode: "sticky", accounts: ["work"] };
+  const accounts = new Accounts({} as never, () => settings, () => {}, directory);
+  const fake = fakeSpawn((child) => { say(child, "unexpected launch"); settle(child); });
+  const moderator = host(fake.spawn, { withheldEnv: () => accounts.withheldEnvironment() });
+
+  await moderator.delegate.execute("d", { tasks: [{ task: "inspect", name: "scout" }] }, undefined, undefined, quiet);
+  await tick();
+
+  assert.deepEqual(fake.calls, [], "the subagent process must not start with unfiltered credentials");
+  assert.equal(moderator.registry.records()[0]!.run.state, "failed", "the blocked launch is reported as failed");
+  assert.match(moderator.registry.records()[0]!.run.error!, /account storage is unreadable/);
+});
+
 test("subagents do not inherit credential variables of accounts excluded by the routing allowlist", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "jar-withheld-"));
   process.env.JAR_EXCLUDED_KEY = "secret-excluded";

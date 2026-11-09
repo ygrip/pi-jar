@@ -1,4 +1,5 @@
-import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Provider } from "@earendil-works/pi-ai";
@@ -12,7 +13,7 @@ export interface AccountDefinition {
   auth: "oauth" | "env";
   env?: string;
 }
-export interface AccountHealth { blockedUntil?: number; quota?: import("./quota.ts").Quota; checkedAt?: number }
+export interface AccountHealth { blockedUntil?: number; quota?: import("./quota.ts").Quota; checkedAt?: number; credentialGeneration?: string }
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
 /** Health updates hold the lock for one small read and write; anything older crashed mid-update. */
 const HEALTH_LOCK_STALE_MS = 10_000;
@@ -84,14 +85,141 @@ export class AccountStore {
     }
     return accounts;
   }
-  /** Reserve the name before login so two sessions cannot silently overwrite an account. */
+  /**
+   * Share Pi's installation identity when its global settings already have one.
+   * Otherwise persist a private stable ID for native provider login flows that need it.
+   * Never modify Pi's own settings or primary credentials.
+   */
+  deviceId(): string {
+    try {
+      const raw = JSON.parse(readFileSync(join(this.root, "..", "settings.json"), "utf8")) as { deviceId?: unknown };
+      if (typeof raw?.deviceId === "string" && /^[\da-f-]{36}$/i.test(raw.deviceId)) return raw.deviceId;
+    } catch { /* Pi has not assigned an installation ID yet. */ }
+    this.ensureRoot();
+    const path = join(this.root, ".device-id");
+    try {
+      privatePath(path, false);
+      const id = readFileSync(path, "utf8").trim();
+      if (!/^[\da-f-]{36}$/i.test(id)) throw new Error("Invalid private account device ID");
+      return id;
+    } catch (error) { if (!missing(error)) throw error; }
+    const id = randomUUID();
+    try { writeFileSync(path, id + "\n", { flag: "wx", mode: 0o600 }); return id; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return this.deviceId();
+      throw error;
+    }
+  }
+
+  /**
+   * Check that a usable credential exists without exposing secret values. An OAuth account counts only
+   * if its private auth file holds an OAuth entry for this account's provider: Pi creates an empty
+   * `{}` file on first use, and a file for another provider proves nothing.
+   */
+  hasCredentials(account: AccountDefinition): boolean {
+    if (account.auth === "env") return Boolean(account.env && process.env[account.env]);
+    const path = this.credentialPath(account.name);
+    let raw: string;
+    try { privatePath(path, false); raw = readFileSync(path, "utf8"); }
+    catch (error) { if (missing(error)) return false; throw error; }
+    return this.holdsOAuthEntry(raw, account);
+  }
+  private holdsOAuthEntry(raw: string, account: AccountDefinition): boolean {
+    let stored: unknown;
+    try { stored = JSON.parse(raw); }
+    catch { throw new Error(`Account ${account.name} has an unreadable credential file`); }
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return false;
+    const entry = (stored as Record<string, unknown>)[account.provider];
+    if (!entry || typeof entry !== "object") return false;
+    // The structure Pi's own credential loader requires; anything less cannot sign a request.
+    const { type, access, refresh, expires } = entry as Record<string, unknown>;
+    return type === "oauth" && typeof access === "string" && typeof refresh === "string"
+      && typeof expires === "number" && Number.isFinite(expires);
+  }
+
+  /**
+   * Sign out one OAuth account while keeping its label for reconnect. The credential is deleted
+   * through Pi's own credential store, under the same auth-file lock a native OAuth refresh holds:
+   * another Pi process that is mid-refresh finishes first, so its write can never bring the
+   * credential back after sign-out.
+   */
+  async logout(name: string): Promise<void> {
+    const account = this.list().find(item => item.name === name);
+    if (!account) throw new Error("Unknown account: " + name);
+    if (account.auth !== "oauth") throw new Error("API-key accounts must be removed or their environment changed");
+    const runtime = await ModelRuntime.create({ authPath: this.credentialPath(name), modelsPath: null, refreshOnCreate: false });
+    await runtime.logout(account.provider);
+    this.resetHealthForCredentialChange(name);
+  }
+
+  /** Remove one account's private credentials, never Pi's main login or arbitrary files. */
+  remove(name: string): void {
+    if (!this.list().some(account => account.name === name)) throw new Error("Unknown account: " + name);
+    const directory = this.directory(name);
+    privatePath(directory, true);
+    const files = readdirSync(directory);
+    const expected = new Set(["account.json", "auth.json", "health.json"]);
+    for (const file of files) {
+      if (!expected.has(file)) throw new Error(`Account ${name} has unexpected files or active locks; close other Pi sessions before removing it`);
+      privatePath(join(directory, file), false);
+    }
+    for (const file of files) unlinkSync(join(directory, file));
+    rmdirSync(directory);
+  }
+
+  /**
+   * Reserve the name before login so another session cannot silently reuse it.
+   * Incomplete older reservations must be explicitly recovered, never overwritten.
+   */
   reserve(name: string): void {
     this.ensureRoot();
     mkdirSync(this.directory(name), { mode: 0o700 });
   }
+  /**
+   * Remove only an empty, private, incomplete reservation. Never delete a
+   * credential, account metadata, lock or other file left by a partial login.
+   * This is safe for automatic cleanup after an unsuccessful first login and
+   * explicit /jar accounts recover NAME for older interrupted attempts.
+   */
+  discardEmptyReservation(name: string): void {
+    this.ensureRoot();
+    const directory = this.directory(name);
+    privatePath(directory, true);
+    const files = readdirSync(directory);
+    // Pi ModelRuntime creates an empty auth.json as part of initialization,
+    // even when browser authorization fails before any credential is issued.
+    // Only an empty JSON object is provably credential-free. Never remove
+    // populated/malformed auth files, metadata, locks or unknown files.
+    if (files.length === 1 && files[0] === "auth.json") {
+      const path = join(directory, "auth.json");
+      privatePath(path, false);
+      const raw = readFileSync(path, "utf8");
+      let auth: unknown;
+      try { auth = JSON.parse(raw); }
+      catch { throw new Error(`Reservation ${name} contains an unreadable auth file; no credentials were removed`); }
+      if (!auth || typeof auth !== "object" || Array.isArray(auth) || Object.keys(auth).length > 0) {
+        throw new Error(`Reservation ${name} contains credential data; inspect it manually before reuse (nothing deleted)`);
+      }
+      unlinkSync(path);
+    } else if (files.length > 0) {
+      throw new Error(`Reservation ${name} contains files; inspect it manually before reuse (no credentials were removed)`);
+    }
+    rmdirSync(directory);
+  }
+  /** Advance an identity epoch when OAuth changes, invalidating old quota probes across processes. */
+  resetHealthForCredentialChange(name: string): void {
+    this.saveHealth(name, { credentialGeneration: randomUUID() });
+  }
   save(account: AccountDefinition): void {
     privatePath(this.directory(account.name), true);
     writeFileSync(join(this.directory(account.name), "account.json"), JSON.stringify(account) + "\n", { flag: "wx", mode: 0o600 });
+    // Every new account gets its own identity epoch. Without one, a label removed and re-created
+    // (even for the same provider) would look identical to a stale in-flight quota probe or 429.
+    this.resetHealthForCredentialChange(account.name);
+  }
+  /** Give an account created before identity epochs existed one, without touching its other health data. */
+  ensureCredentialGeneration(name: string): void {
+    this.updateHealth(name, current => current.credentialGeneration ? current : { ...current, credentialGeneration: randomUUID() });
   }
   private credentialPath(name: string): string {
     privatePath(this.root, true);

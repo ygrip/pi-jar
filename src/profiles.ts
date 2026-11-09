@@ -5,7 +5,7 @@ import { isMaxSubagents, defaultVisualSettings, loadVisualSettings, type JarVisu
 import { ACCENT_NAMES } from "./accent.ts";
 import { FOOTER_FIELDS } from "./footer-settings.ts";
 import { ICON_SETS } from "./icons.ts";
-import { parseAccountRouting } from "./account-settings.ts";
+import { parseAccountRouting, unsafeAccountRouting } from "./account-settings.ts";
 
 export interface JarProfile { id: string; name: string; theme: string; settings: JarVisualSettings; roles: RoleConfig }
 interface ProfileDocument { version: 1; active: string; profiles: JarProfile[] }
@@ -67,6 +67,19 @@ function atomicSave(file: string, document: ProfileDocument): string {
   return text;
 }
 
+/** The profiles file exists but cannot be used, so the account-routing policy it held is unknown. */
+export class ProfileLoadError extends Error {}
+
+/**
+ * Settings to run with when profiles could not be loaded: the legacy file, with account routing locked
+ * because the profile that held the real policy is unreadable. Other failures keep the plain legacy file.
+ */
+export function settingsAfterProfileFailure(directory: string, error: unknown): JarVisualSettings {
+  const legacy = loadVisualSettings(directory);
+  if (!(error instanceof ProfileLoadError)) return legacy;
+  return { ...legacy, accountRouting: unsafeAccountRouting(`profiles could not be loaded: ${error.message}`) };
+}
+
 export class ProfileStore {
   private document: ProfileDocument;
   private savedContents: string | undefined;
@@ -95,7 +108,7 @@ export class ProfileStore {
       loaded = { version: 1, active, profiles };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") missing = true;
-      else throw new Error(`Cannot load ${PROFILE_FILE}: ${(error as Error).message}`);
+      else throw new ProfileLoadError(`Cannot load ${PROFILE_FILE}: ${(error as Error).message}`);
     }
     if (!loaded && missing) {
       let legacy = defaultVisualSettings();

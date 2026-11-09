@@ -45,12 +45,6 @@ export function composerIcon(phase: WorkingPhase, frame = 0): string {
   const moods = PHASE_MOODS[phase];
   return mascotFace(moods[frame % moods.length] ?? "idle");
 }
-export function shortSessionId(id?: string): string {
-  const clean = id?.trim();
-  if (!clean) return "";
-  const tail = clean.includes("-") ? clean.split("-").at(-1)! : clean;
-  return tail.slice(0, 8);
-}
 
 const SESSION_FIRST = ["ember", "quiet", "steady", "silver", "warm", "clear", "gentle", "lunar"] as const;
 const SESSION_LAST = ["trail", "lantern", "forge", "orbit", "harbor", "path", "spark", "grove"] as const;
@@ -338,7 +332,6 @@ export class ComposerStyle {
   private phase: WorkingPhase = "idle";
   private animations = true;
   private mascotOn = true;
-  private tasksVisible = false;
   private session = "";
   private profile = "Default";
   private cwd = process.cwd();
@@ -378,7 +371,8 @@ export class ComposerStyle {
       const mood = this.animations ? this.mascot.mood() : "idle";
       return paintFace(mascotFace(mood), mood, this.paintWith(), undefined, this.palette());
     },
-    perch: (width) => this.tasksVisible ? undefined : this.renderMascot(width),
+    // Always anchor Ember to the editor. A separate task widget may be clipped or hidden.
+    perch: (width) => this.renderMascot(width),
     session: () => this.session,
     profile: () => this.profile,
     ghost: () => this.suggestions?.text,
@@ -409,9 +403,6 @@ export class ComposerStyle {
     return `${editing} · /plan · /goal`;
   }
 
-  /** Tasks share the mascot's perch instead of reserving a separate vertical widget. */
-  setTasksVisible(visible: boolean): void { this.tasksVisible = visible; }
-  pokeMascot(): void { this.decor.poke(); }
   renderMascot(width: number): string[] | undefined {
     if (!this.mascotOn || width < 40) return undefined;
     let mood: MascotMood = "idle";

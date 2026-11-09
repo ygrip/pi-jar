@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, chmodSync, lstatSync, readFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, chmodSync, lstatSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssistantMessageEventStream, createModels, InMemoryCredentialStore, normalizeContext, type Provider, type Model, type Api, type AssistantMessage, type SimpleStreamOptions, type ImageModel, type ImageApi, type ClassifierModel, type ClassifierApi } from "@earendil-works/pi-ai";
@@ -10,9 +10,9 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { AccountRouter, remainingQuota, retryAfter } from "../src/account-router.ts";
-import { parseAccountRouting, type AccountRoutingSettings } from "../src/account-settings.ts";
-import { defaultVisualSettings, loadVisualSettings, saveVisualSettings } from "../src/settings.ts";
-import { ProfileStore } from "../src/profiles.ts";
+import { parseAccountRouting, isUnsafeRouting, unsafeAccountRouting, type AccountRoutingSettings } from "../src/account-settings.ts";
+import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, SETTINGS_FILE } from "../src/settings.ts";
+import { ProfileStore, ProfileLoadError, settingsAfterProfileFailure, PROFILE_FILE } from "../src/profiles.ts";
 import { Accounts, inheritedAccountRouting } from "../src/accounts.ts";
 import { ACCOUNT_ROUTING_ENV } from "../src/account-settings.ts";
 import { askRole, SideUsage } from "../src/side-model.ts";
@@ -93,11 +93,70 @@ test("routing policies preserve sticky affinity, rotate, and respect profile all
   f.setMode("round-robin"); await ask(); await ask();
   f.allow(["b"]); await ask();
   assert.deepEqual(f.calls, ["key-a", "key-a", "key-a", "key-b", "key-b"]);
+  assert.equal(f.router.status().find(item => item.name === "b")?.lastUsed, true, "menu identifies the account actually routed");
+  assert.equal(f.router.status().find(item => item.name === "a")?.lastUsed, false);
   f.allow(["not-configured"]);
   assert.match((await ask()).errorMessage!, /No eligible openai account/);
   assert.equal(f.calls.length, 5);
   f.setMode("off");
+  assert.equal(f.router.status().some(account => account.lastUsed), false, "disabled routing never claims an active pool account");
   await ask(); assert.equal(f.calls.at(-1), "missing"); // direct provider call, no runtime auth
+});
+
+test("per-provider account pin preserves independent provider pools and automatic retry", async t => {
+  const f = fixture(t);
+  const otherModel: Model<Api> = { ...model, provider: "other", id: "other-model" };
+  process.env.JAR_OTHER_ACCOUNT = "other-key";
+  t.after(() => { delete process.env.JAR_OTHER_ACCOUNT; });
+  f.store.reserve("third");
+  f.store.save({ version: 1, name: "third", provider: "other", auth: "env", env: "JAR_OTHER_ACCOUNT" });
+  const otherCalls: string[] = [];
+  const otherProvider: Provider = {
+    ...f.provider, id: "other", getModels: () => [otherModel],
+    streamSimple: (_model, _context, options) => {
+      otherCalls.push(options?.apiKey ?? "missing");
+      const output = createAssistantMessageEventStream();
+      output.push({ type: "done", reason: "stop", message: { ...message(options?.apiKey ?? "missing"), provider: "other", model: "other-model" } });
+      output.end();
+      return output;
+    }
+  };
+  let config: AccountRoutingSettings = { mode: "sticky", accounts: [], pinned: { openai: "b" } };
+  const router = new AccountRouter(f.store, () => config);
+  assert.equal((await router.wrap(f.provider).streamSimple(model, context).result()).stopReason, "stop");
+  assert.equal(f.calls.at(-1), "key-b", "pin applies to matching provider only");
+  assert.equal((await router.wrap(otherProvider).streamSimple(otherModel, context).result()).stopReason, "stop");
+  assert.deepEqual(otherCalls, ["other-key"], "another provider retains its own credentials");
+  f.fail(429);
+  const pinnedResult = await router.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(pinnedResult.stopReason, "error", "explicit pin does not route to another account");
+  assert.deepEqual(f.calls, ["key-b", "key-b"]);
+  config = { mode: "sticky", accounts: [] };
+  const resumed = await router.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(resumed.stopReason, "stop");
+  assert.equal(f.calls.at(-1), "key-a", "automatic routing can fall back after pinned account cooldown");
+});
+
+test("pin commands validate provider ownership, persist profile policy, and clean up on exclusion", async t => {
+  const f = fixture(t);
+  let config: AccountRoutingSettings = { mode: "sticky", accounts: [] };
+  const notices: string[] = [];
+  const accounts = new Accounts({} as never, () => config, next => { config = next; }, f.directory);
+  const ctx = { ui: { notify: (message: string) => notices.push(message) } };
+  accounts.pin("openai", "b", ctx as never);
+  assert.deepEqual(config.pinned, { openai: "b" });
+  assert.deepEqual(parseAccountRouting(JSON.parse(accounts.environment()[ACCOUNT_ROUTING_ENV]!)), config);
+  await accounts.command("use a", ctx as never);
+  assert.equal(config.pinned, undefined, "excluding a pin clears it rather than stranding it");
+  assert.throws(() => accounts.pin("openai", "b", ctx as never), /excluded/);
+  await accounts.command("use all", ctx as never);
+  assert.throws(() => accounts.pin("not-openai", "b", ctx as never), /not configured for provider/);
+  accounts.pin("openai", "a", ctx as never);
+  accounts.pin("openai", undefined, ctx as never);
+  assert.equal(config.pinned, undefined);
+  assert.ok(notices.some(text => text.includes("Automatic account selection restored")));
+  assert.equal(parseAccountRouting({ mode: "sticky", accounts: [], pinned: { openai: "../bad" } }).invalid !== undefined, true,
+    "invalid pinned identities lock routing instead of turning it off");
 });
 
 test("429 retries once per account before output, with shared cooldown", async t => {
@@ -158,7 +217,7 @@ test("account storage rejects traversal, symlinks and public permissions", t => 
 
 test("routing settings migrate safely and persist with profiles without secrets", t => {
   const f = fixture(t);
-  const settings = { ...defaultVisualSettings(), accountRouting: { mode: "quota-first" as const, accounts: ["b"] } };
+  const settings = { ...defaultVisualSettings(), accountRouting: { mode: "quota-first" as const, accounts: ["b"], pinned: { openai: "b" } } };
   saveVisualSettings(f.directory, settings);
   assert.deepEqual(loadVisualSettings(f.directory).accountRouting, settings.accountRouting);
   const profiles = new ProfileStore(f.directory);
@@ -166,8 +225,9 @@ test("routing settings migrate safely and persist with profiles without secrets"
   const reloaded = new ProfileStore(f.directory).list().find(item => item.id === profile.id)!;
   assert.deepEqual(reloaded.settings.accountRouting, settings.accountRouting);
   assert.equal(reloaded.roles.roles.worker, "openai/test-model");
-  assert.deepEqual(parseAccountRouting({ mode: "unknown", accounts: [] }), { mode: "off", accounts: [] });
-  assert.deepEqual(parseAccountRouting({ mode: "sticky", accounts: ["../escape"] }), { mode: "off", accounts: [] });
+  assert.equal(parseAccountRouting({ mode: "unknown", accounts: [] }).invalid !== undefined, true);
+  assert.equal(parseAccountRouting({ mode: "sticky", accounts: ["../escape"] }).invalid !== undefined, true);
+  assert.deepEqual(parseAccountRouting(undefined), { mode: "off", accounts: [] }, "only an absent policy means off");
 });
 
 for (const [header, expected] of [["120", 121000], ["Thu, 01 Jan 1970 00:02:00 GMT", 120000], ["invalid", 61000]] as const) {
@@ -179,12 +239,14 @@ test("request instrumentation and non-auth options survive; primary request secr
   const f = fixture(t);
   const hook = async () => {};
   await f.router.wrap(f.provider).streamSimple(model, context, {
-    apiKey: "unrelated-primary", env: { KEY: "unrelated-primary" }, headers: { Authorization: "Bearer primary", "X-Trace-Id": "trace" },
+    apiKey: "unrelated-primary", env: { KEY: "unrelated-primary" }, headers: { Authorization: "Bearer primary", "OpenAI-Organization": "primary-org", "ChatGPT-Account-ID": "primary-account", "X-Trace-Id": "trace" },
     reasoning: "high", temperature: 0.3, onProviderStreamEvent: hook
   }).result();
   const options = f.requests[0]!;
   assert.equal(options.apiKey, "key-a");
   assert.equal(options.headers?.Authorization, undefined);
+  assert.equal(options.headers?.["OpenAI-Organization"], undefined, "avoid forwarding stale provider organization identity");
+  assert.equal(options.headers?.["ChatGPT-Account-ID"], undefined, "avoid forwarding another account's ID");
   assert.equal(options.headers?.["X-Trace-Id"], "trace");
   assert.equal(options.env?.KEY, undefined);
   assert.deepEqual([options.reasoning, options.temperature, options.onProviderStreamEvent, options.maxRetries], ["high", 0.3, hook, 0]);
@@ -331,4 +393,709 @@ test("a routing policy change during a request does not alter its 429 retry", as
   assert.deepEqual(f.calls, ["key-a", "key-b"]);
   await provider.streamSimple(model, context).result();
   assert.equal(f.calls.at(-1), "missing", "the next request uses the new policy");
+});
+
+test("private account removal is explicit, scoped and fails closed on unknown files", t => {
+  const fixture = mkdtempSync(join(tmpdir(), "pi-jar-remove-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const store = new AccountStore(fixture);
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: "openai", auth: "env", env: "WORK_KEY" });
+  store.saveHealth("work", { blockedUntil: Date.now() + 1000 });
+  const path = join(store.root, "work");
+  writeFileSync(join(path, "unexpected.txt"), "do not delete");
+  assert.throws(() => store.remove("work"), /unexpected files or active locks/);
+  assert.ok(existsSync(join(path, "account.json")));
+  rmSync(join(path, "unexpected.txt"));
+  store.remove("work");
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(store.list(), []);
+  assert.throws(() => store.remove("work"), /Unknown account/);
+});
+
+test("sign-out preserves OAuth account label and leaves Pi primary credentials untouched", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-logout-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: "openai-codex", auth: "oauth" });
+  const authPath = join(store.root, "work", "auth.json");
+  writeFileSync(authPath, JSON.stringify({ "openai-codex": { type: "oauth", access: "a", refresh: "r", expires: 1 } }), { mode: 0o600 });
+  const primary = join(directory, "auth.json");
+  writeFileSync(primary, "primary login", { mode: 0o600 });
+  const definition = store.list()[0]!;
+  assert.equal(store.hasCredentials(definition), true);
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: [], pinned: { "openai-codex": "work" } };
+  const accounts = new Accounts({ registerProvider() {} } as never, () => policy, next => { policy = next; }, directory);
+  await accounts.logout("work", { isIdle: () => true, hasUI: false, ui: { notify() {} },
+    modelRegistry: { getProvider: () => undefined, refresh: async () => {} } } as never);
+  assert.equal(store.hasCredentials(definition), false);
+  assert.equal(store.list().length, 1);
+  assert.equal(policy.pinned, undefined);
+  assert.equal(readFileSync(primary, "utf8"), "primary login");
+  assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")), {}, "only this provider's entry was removed, through Pi's credential store");
+});
+
+test("native provider login identity follows Pi settings and stays stable otherwise", t => {
+  const fixture = mkdtempSync(join(tmpdir(), "pi-jar-device-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const store = new AccountStore(fixture);
+  const created = store.deviceId();
+  assert.match(created, /^[0-9a-f-]{36}$/i);
+  assert.equal(store.deviceId(), created);
+  assert.deepEqual(store.list(), [], "identity marker must never look like an account directory");
+  const piDeviceId = "12345678-1234-4234-8234-123456789abc";
+  writeFileSync(join(fixture, "settings.json"), JSON.stringify({ deviceId: piDeviceId }));
+  assert.equal(store.deviceId(), piDeviceId, "reuse Pi's native installation ID when present");
+});
+
+test("pinning from disabled routing activates same-provider sticky routing and preserves model selection", async t => {
+  const f = fixture(t);
+  let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
+  const wrapper = new AccountRouter(f.store, () => policy);
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, f.directory);
+  const ctx = { ui: { notify() {} } };
+  accounts.pin("openai", "b", ctx as never);
+  assert.equal(policy.mode, "sticky", "a switch is actionable even when routing was off");
+  assert.deepEqual(policy.pinned, { openai: "b" });
+  const reply = await wrapper.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(reply.stopReason, "stop");
+  assert.equal(f.calls.at(-1), "key-b");
+  assert.equal(reply.provider, model.provider);
+  assert.equal(reply.model, model.id);
+  accounts.pin("openai", undefined, ctx as never);
+  assert.equal(policy.mode, "sticky");
+  assert.equal(policy.pinned, undefined);
+});
+
+test("separate providers maintain independent same-provider routing and never borrow credentials", async t => {
+  const f = fixture(t);
+  const secondary: Model<Api> = { ...model, provider: "second", id: "second-model" };
+  process.env.JAR_SECONDARY_KEY = "second-secret";
+  t.after(() => { delete process.env.JAR_SECONDARY_KEY; });
+  f.store.reserve("second-work");
+  f.store.save({ version: 1, name: "second-work", provider: "second", auth: "env", env: "JAR_SECONDARY_KEY" });
+  const secondKeys: string[] = [];
+  const secondProvider: Provider = {
+    ...f.provider, id: "second", getModels: () => [secondary],
+    streamSimple: (m, c, options) => {
+      secondKeys.push(options?.apiKey ?? "missing");
+      const result = { ...message(options?.apiKey ?? "missing"), provider: secondary.provider, model: secondary.id };
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: "done", reason: "stop", message: result });
+      stream.end();
+      return stream;
+    }
+  };
+  const settings: AccountRoutingSettings = { mode: "round-robin", accounts: [] };
+  const router = new AccountRouter(f.store, () => settings);
+  const first = router.wrap(f.provider), second = router.wrap(secondProvider);
+  await first.streamSimple(model, context).result();
+  await second.streamSimple(secondary, context).result();
+  await first.streamSimple(model, context).result();
+  await second.streamSimple(secondary, context).result();
+  assert.deepEqual(f.calls, ["key-a", "key-b"], "rotation uses only the first provider's pool");
+  assert.deepEqual(secondKeys, ["second-secret", "second-secret"], "second provider never borrows first-provider credentials");
+  // Providers may expose identical model IDs. Routing must compare provider
+  // identity first, not merely the model ID, or cross-provider auth can leak.
+  const collidingModel: Model<Api> = { ...model, id: "second-model", provider: "openai" };
+  const collision = await second.streamSimple(collidingModel, context).result();
+  assert.equal(collision.stopReason, "error");
+  assert.match(collision.errorMessage ?? "", /does not belong to routed provider second/);
+  assert.deepEqual(secondKeys, ["second-secret", "second-secret"], "no secondary credentials used for a foreign-provider model");
+});
+
+test("cached account runtimes never reuse credentials after sign-out or missing environment", async t => {
+  const f = fixture(t);
+  const routed = f.router.wrap(f.provider);
+  const first = await routed.streamSimple(model, context).result();
+  assert.equal(first.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-a"]);
+
+  // Simulate credentials being removed while this Pi process keeps its cached runtime.
+  delete process.env.JAR_TEST_A;
+  const second = await routed.streamSimple(model, context).result();
+  assert.equal(second.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-a", "key-b"], "sticky selection skips credentials that no longer exist");
+
+  delete process.env.JAR_TEST_B;
+  const unavailable = await routed.streamSimple(model, context).result();
+  assert.equal(unavailable.stopReason, "error");
+  assert.match(unavailable.errorMessage ?? "", /No eligible openai account/);
+  assert.deepEqual(f.calls, ["key-a", "key-b"], "no stale runtime or primary login fallback");
+
+  const pinned = new AccountRouter(f.store, () => ({ mode: "sticky", accounts: [], pinned: { openai: "a" } }));
+  const pinnedFailure = await pinned.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(pinnedFailure.stopReason, "error", "a missing pinned account never borrows another identity");
+  assert.deepEqual(f.calls, ["key-a", "key-b"]);
+});
+
+test("removing the sole allowed identity fails closed instead of broadening the provider pool", async t => {
+  const f = fixture(t);
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: ["a"], pinned: { openai: "a" } };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, f.directory);
+  await assert.rejects(() => accounts.remove("a", { isIdle: () => true } as never), /last allowed account would enable other accounts/);
+  assert.deepEqual(f.store.list().map(account => account.name), ["a", "b"]);
+  assert.deepEqual(policy.accounts, ["a"]);
+});
+
+test("same-named model with a different provider API is never routed through another account", async t => {
+  const f = fixture(t);
+  const request: Model<Api> = { ...model, api: "anthropic-messages" };
+  const response = await f.router.wrap(f.provider).streamSimple(request, context).result();
+  assert.equal(response.stopReason, "error");
+  assert.match(response.errorMessage ?? "", /No eligible openai account/);
+  assert.deepEqual(f.calls, [], "no account key or model API mismatch reaches the provider");
+});
+
+test("provider-specific cooldown never blocks healthy accounts belonging to another provider", async t => {
+  const f = fixture(t);
+  f.store.saveHealth("a", { blockedUntil: Date.now() + 60_000 });
+  const response = await f.router.wrap(f.provider).streamSimple(model, context).result();
+  assert.equal(response.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-b"]);
+  assert.equal(f.router.status().find(account => account.name === "b")?.lastUsed, true);
+});
+
+
+test("removing the only configured allowlisted identity is rejected even before a later account is added", { timeout: 10000 }, async t => {
+  const f = fixture(t);
+  f.store.remove("b"); // The account directory now contains only the explicitly allowed identity.
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: ["a"] };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, f.directory);
+  await assert.rejects(() => accounts.remove("a", { isIdle: () => true } as never), /last allowed account/);
+  assert.deepEqual(policy.accounts, ["a"]);
+  assert.deepEqual(f.store.list().map(account => account.name), ["a"]);
+  f.store.reserve("later");
+  f.store.save({ version: 1, name: "later", provider: "openai", auth: "env", env: "JAR_TEST_B" });
+  const routed = new AccountRouter(f.store, () => policy).wrap(f.provider);
+  const result = await routed.streamSimple(model, context).result();
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-a"], "adding a new account cannot inherit access after rejected removal");
+});
+
+test("CLI remove works for orphaned providers and refuses invalid or unknown names", { timeout: 10000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-orphan-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, directory);
+  accounts.store.reserve("orphan");
+  accounts.store.save({ version: 1, name: "orphan", provider: "deleted-plugin", auth: "oauth" });
+  const ctx = { isIdle: () => true, ui: { notify() {} },
+    modelRegistry: { getAll: () => [], getProvider: () => undefined } };
+  await accounts.command("remove orphan", ctx as never);
+  assert.deepEqual(accounts.store.list(), []);
+  await assert.rejects(() => accounts.command("remove orphan", ctx as never), /Unknown account/);
+  await assert.rejects(() => accounts.command("remove ..\/private", ctx as never), /Unknown account|names must/);
+});
+
+test("routing does not await delayed quota endpoints and validates only the preferred catalog", { timeout: 10000 }, async () => {
+  const providerId = "openai-codex";
+  const routedModel: Model<Api> = { ...model, provider: providerId };
+  const definitions = Array.from({ length: 12 }, (_, index) => ({
+    version: 1 as const, name: `pool-${index}`, provider: providerId, auth: "oauth" as const
+  }));
+  let active = 0, maximum = 0, checked = 0, probes = 0;
+  const outstanding: Array<() => void> = [];
+  const health = new Map<string, object>();
+  const fakeStore = {
+    list: () => definitions,
+    hasCredentials: () => true,
+    health: (name: string) => health.get(name) ?? {},
+    updateHealth: (name: string, change: (health: object) => object) => {
+      const updated = change(health.get(name) ?? {});
+      health.set(name, updated);
+      return updated;
+    },
+    ensureCredentialGeneration: () => {},
+    models: () => Promise.resolve({
+      getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
+      getAllAvailable: async () => {
+        active++;
+        maximum = Math.max(maximum, active);
+        try { await new Promise(resolve => setTimeout(resolve, 30)); checked++; return [routedModel]; }
+        finally { active--; }
+      },
+      streamSimple: () => {
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: "done", reason: "stop",
+          message: { ...message("routed"), provider: providerId, model: routedModel.id } });
+        stream.end();
+        return stream;
+      }
+    })
+  } as unknown as AccountStore;
+  const native: Provider = {
+    id: providerId, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] },
+    getModels: () => [routedModel],
+    stream: () => { throw new Error("not called"); },
+    streamSimple: () => { throw new Error("not called"); }
+  };
+  const quotaFetcher = async () => {
+    probes++;
+    await new Promise<void>(resolve => { outstanding.push(resolve); });
+    return { fiveHour: { used: 25 } };
+  };
+  let policy: AccountRoutingSettings = { mode: "round-robin", accounts: [] };
+  const router = new AccountRouter(fakeStore, () => policy, Date.now, quotaFetcher);
+  const published: Array<{ account: string; provider: string; used?: number }> = [];
+  router.onRoute = (account, provider, health) => published.push({ account, provider, used: health.quota?.fiveHour?.used });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let afterSwitch = 0;
+  try {
+    const result = await Promise.race([
+      router.wrap(native).streamSimple(routedModel, context).result(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("quota probe blocked account routing")), 1000);
+      })
+    ]);
+    assert.equal(result.stopReason, "stop");
+    assert.equal(checked, 1, "only the winning account's catalog is validated");
+    assert.equal(maximum, 1, "catalogs are validated one at a time in preference order");
+    assert.ok(probes > 0, "quota probes still run without gating the model request");
+    assert.equal((await router.wrap(native).streamSimple(routedModel, context).result()).stopReason, "stop");
+    afterSwitch = published.length;
+    assert.equal(published.at(-1)?.account, "pool-1", "round-robin switches the displayed account");
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    for (const release of outstanding) release();
+  }
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.ok(published.slice(afterSwitch).some(status => status.account === "pool-1" && status.provider === providerId && status.used === 25),
+    "the selected account publishes its async quota when the probe completes");
+  assert.equal(published.slice(afterSwitch).some(status => status.account === "pool-0"), false,
+    "the previous account's late quota cannot overwrite the selected account");
+  const beforeRefresh = published.length;
+  await router.refreshActiveQuota(providerId);
+  assert.equal(published.length, beforeRefresh + 1, "a fresh shared snapshot is republished after statuses are cleared");
+  const publicationCount = published.length;
+  policy = { mode: "sticky", accounts: ["pool-0"], pinned: { [providerId]: "pool-0" } };
+  const probeCount = probes;
+  await router.refreshActiveQuota(providerId);
+  assert.equal(probes, probeCount, "idle refresh skips an account excluded by the changed policy");
+  assert.equal(published.length, publicationCount, "a stale selected account is not republished after policy changes");
+});
+
+
+test("automatic selection respects routing off; explicit pin is the opt-in", async t => {
+  const f = fixture(t);
+  let policy: AccountRoutingSettings = { mode: "off", accounts: [] };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, f.directory);
+  const ctx = { ui: { notify() {} },
+    modelRegistry: { getAll: () => [], getProvider: () => undefined, refresh: async () => {} } };
+  accounts.pin("openai", undefined, ctx as never);
+  assert.deepEqual(policy, { mode: "off", accounts: [] }, "hub Automatic row is a no-op while routing is off");
+  await accounts.command("auto openai", ctx as never);
+  assert.equal(policy.mode, "off", "CLI automatic also preserves off");
+  accounts.pin("openai", "a", ctx as never);
+  assert.equal(policy.mode, "sticky", "explicit account pin enables routing");
+  assert.deepEqual(policy.pinned, { openai: "a" });
+  await accounts.command("mode off", ctx as never);
+  accounts.pin("openai", undefined, ctx as never);
+  assert.equal(policy.mode, "off");
+  assert.equal(policy.pinned, undefined);
+});
+
+test("stale quota from old OAuth credentials cannot return after logout or reconnect", { timeout: 10000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-quota-race-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  const providerId = "openai-codex";
+  const codexModel: Model<Api> = { ...model, provider: providerId };
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: providerId, auth: "oauth" });
+  const authPath = join(store.root, "work", "auth.json");
+  const signedIn = (token: string) => JSON.stringify({ [providerId]: { type: "oauth", access: token, refresh: token, expires: 1 } });
+  writeFileSync(authPath, signedIn("old-token"), { mode: 0o600 });
+  store.models = async () => ({
+    getAuth: async () => ({ auth: { apiKey: "fake-token" }, source: "oauth" }),
+    getAllAvailable: async () => [codexModel],
+    streamSimple: () => {
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: "done", reason: "stop", message: { ...message("ok"), provider: providerId, model: codexModel.id } });
+      stream.end();
+      return stream;
+    }
+  }) as never;
+  const provider: Provider = {
+    id: providerId, name: "Test Codex", auth: { oauth: {} as Provider["auth"]["oauth"] },
+    getModels: () => [codexModel],
+    stream: () => { throw new Error("unused"); },
+    streamSimple: () => { throw new Error("unused"); }
+  };
+  const policy: AccountRoutingSettings = { mode: "quota-first", accounts: [] };
+  let startFirst!: () => void, releaseFirst!: (quota: { fiveHour: { used: number } }) => void;
+  const firstStarted = new Promise<void>(resolve => { startFirst = resolve; });
+  const router = new AccountRouter(store, () => policy, Date.now, async () => {
+    startFirst();
+    return new Promise(resolve => { releaseFirst = resolve; });
+  });
+  assert.equal((await router.wrap(provider).streamSimple(codexModel, context).result()).stopReason, "stop");
+  await firstStarted;
+  router.invalidate("work");
+  await store.logout("work");
+  assert.equal(store.hasCredentials(store.list()[0]!), false);
+  releaseFirst({ fiveHour: { used: 100 } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.health("work").quota, undefined, "invalidated runtime cannot resurrect exhausted limits");
+
+  // Reconnect with a different identity; the provider ID and account name
+  // stay the same, but a new credential generation is persisted.
+  writeFileSync(authPath, signedIn("new-token"), { mode: 0o600 });
+  store.resetHealthForCredentialChange("work");
+  let startOther!: () => void, releaseOther!: (quota: { fiveHour: { used: number } }) => void;
+  const otherStarted = new Promise<void>(resolve => { startOther = resolve; });
+  const otherProcess = new AccountRouter(store, () => policy, Date.now, async () => {
+    startOther();
+    return new Promise(resolve => { releaseOther = resolve; });
+  });
+  assert.equal((await otherProcess.wrap(provider).streamSimple(codexModel, context).result()).stopReason, "stop");
+  await otherStarted;
+  store.resetHealthForCredentialChange("work"); // another process changes credentials, without invalidating router
+  releaseOther({ fiveHour: { used: 100 } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.health("work").quota, undefined, "persistent epoch prevents cross-process stale writes");
+  assert.ok(store.health("work").credentialGeneration);
+  const publications: Array<number | undefined> = [];
+  otherProcess.onRoute = (_name, _provider, health) => publications.push(health.quota?.fiveHour?.used);
+  await otherProcess.refreshActiveQuota(providerId);
+  assert.deepEqual(publications, [undefined], "idle refresh clears the old route after a cross-process credential change");
+});
+
+test("an account whose credential check throws is skipped and reported, not fatal", async t => {
+  const f = fixture(t);
+  const original = f.store.hasCredentials.bind(f.store);
+  f.store.hasCredentials = account => {
+    if (account.name === "a") throw new Error("unsafe permissions");
+    return original(account);
+  };
+  const routed = f.router.wrap(f.provider);
+  const result = await routed.streamSimple(model, context).result();
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(f.calls, ["key-b"]);
+
+  f.store.hasCredentials = () => { throw new Error("unsafe permissions"); };
+  const failed = await routed.streamSimple(model, context).result();
+  assert.equal(failed.stopReason, "error");
+  assert.match(failed.errorMessage ?? "", /unreadable credentials: a, b/);
+});
+
+test("a late 429 cannot cool down an identity reconnected under the same label", async t => {
+  const f = fixture(t);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let dispatched!: () => void;
+  const sent = new Promise<void>(resolve => { dispatched = resolve; });
+  const slow: Provider = { ...f.provider,
+    streamSimple: (m, c, options) => f.provider.streamSimple(m, c, { ...options,
+      onResponse: async (response, selected) => { dispatched(); await gate; await options?.onResponse?.(response, selected); } }) };
+  f.fail(429);
+  const pending = f.router.wrap(slow).streamSimple(model, context).result();
+  await sent;
+  // Another Pi process signs "a" out and reconnects a different identity: a new generation, clean health.
+  f.store.resetHealthForCredentialChange("a");
+  release();
+  await pending;
+  assert.equal(f.store.health("a").blockedUntil, undefined, "the old identity's 429 was not applied to the new one");
+  assert.ok(f.store.health("a").credentialGeneration);
+});
+
+test("a hung catalog check is skipped after its time limit instead of blocking later accounts", { timeout: 10000 }, async () => {
+  const providerId = "openai-codex";
+  const routedModel: Model<Api> = { ...model, provider: providerId };
+  const definitions = ["slow", "fast"].map(name => ({ version: 1 as const, name, provider: providerId, auth: "oauth" as const }));
+  const used: string[] = [];
+  let slowChecks = 0;
+  const fakeStore = {
+    list: () => definitions,
+    hasCredentials: () => true,
+    health: () => ({}),
+    updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    ensureCredentialGeneration: () => {},
+    models: (account: { name: string }) => Promise.resolve({
+      getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
+      // The hung account never answers and ignores its abort signal.
+      getAllAvailable: account.name === "slow" ? () => { slowChecks++; return new Promise<never>(() => {}); } : async () => [routedModel],
+      streamSimple: () => {
+        used.push(account.name);
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: "done", reason: "stop", message: { ...message("routed"), provider: providerId, model: routedModel.id } });
+        stream.end();
+        return stream;
+      }
+    })
+  } as unknown as AccountStore;
+  const native: Provider = {
+    id: providerId, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] },
+    getModels: () => [routedModel],
+    stream: () => { throw new Error("not called"); },
+    streamSimple: () => { throw new Error("not called"); }
+  };
+  const router = new AccountRouter(fakeStore, () => ({ mode: "sticky", accounts: [] }), Date.now, async () => ({ fiveHour: { used: 0 } }), 50);
+  const routed = router.wrap(native);
+  const started = Date.now();
+  assert.equal((await routed.streamSimple(routedModel, context).result()).stopReason, "stop");
+  assert.ok(Date.now() - started < 2000, "first preferred account did not block the request");
+  assert.equal((await routed.streamSimple(routedModel, context).result()).stopReason, "stop");
+  assert.deepEqual(used, ["fast", "fast"]);
+  assert.equal(slowChecks, 1, "the hung account is cooled down, not re-probed on every request");
+});
+
+test("hasCredentials requires an OAuth entry for the account's provider", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-creds-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  store.reserve("work");
+  store.save({ version: 1, name: "work", provider: "openai-codex", auth: "oauth" });
+  const account = store.list()[0]!;
+  const authPath = join(store.root, "work", "auth.json");
+  const states: Array<[string, boolean]> = [
+    ["{}", false],
+    [JSON.stringify({ anthropic: { type: "oauth", access: "x" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "api_key", key: "x" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: "y" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: 1, expires: 1 } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: "y", expires: "soon" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: "y", expires: 1 } }), true]
+  ];
+  for (const [content, expected] of states) {
+    writeFileSync(authPath, content, { mode: 0o600 });
+    assert.equal(store.hasCredentials(account), expected, content);
+  }
+  writeFileSync(authPath, "not json", { mode: 0o600 });
+  assert.throws(() => store.hasCredentials(account), /unreadable credential file/);
+
+  // Pinning refuses an account whose auth file holds no credential for its provider.
+  writeFileSync(authPath, "{}", { mode: 0o600 });
+  let policy: AccountRoutingSettings = { mode: "sticky", accounts: [] };
+  const accounts = new Accounts({} as never, () => policy, next => { policy = next; }, directory);
+  assert.throws(() => accounts.pin("openai-codex", "work", { ui: { notify() {} } } as never), /no available credentials/);
+});
+
+test("a label re-created under another provider in another process gets a fresh runtime", async t => {
+  const f = fixture(t);
+  const other: Model<Api> = { ...model, provider: "other", id: "other-model" };
+  const built: string[] = [];
+  const realModels = f.store.models.bind(f.store);
+  f.store.models = ((account: { name: string; provider: string }, provider: Provider) => {
+    built.push(`${account.name}:${account.provider}`);
+    return realModels(account as never, provider);
+  }) as never;
+  const router = new AccountRouter(f.store, () => ({ mode: "sticky", accounts: [] }));
+  await router.wrap(f.provider).streamSimple(model, context).result();
+  assert.ok(built.includes("a:openai"));
+  built.length = 0;
+
+  // Another process removes "a" and re-creates it for a different provider.
+  process.env.JAR_OTHER_A = "other-a";
+  t.after(() => { delete process.env.JAR_OTHER_A; });
+  f.store.remove("a");
+  f.store.reserve("a");
+  f.store.save({ version: 1, name: "a", provider: "other", auth: "env", env: "JAR_OTHER_A" });
+  const calls: string[] = [];
+  const otherProvider: Provider = { ...f.provider, id: "other", getModels: () => [other],
+    streamSimple: (_m, _c, options) => {
+      calls.push(options?.apiKey ?? "missing");
+      const output = createAssistantMessageEventStream();
+      output.push({ type: "done", reason: "stop", message: { ...message("ok"), provider: "other", model: "other-model" } });
+      output.end();
+      return output;
+    } };
+  assert.equal((await router.wrap(otherProvider).streamSimple(other, context).result()).stopReason, "stop");
+  assert.deepEqual(calls, ["other-a"]);
+  assert.ok(built.includes("a:other"), "the stale runtime was rebuilt, not reused");
+  assert.equal(f.store.health("a").blockedUntil, undefined, "the new identity was not cooled down");
+});
+
+test("quota probes for a large pool run at most four at a time per provider and all complete", { timeout: 10000 }, async () => {
+  const providerId = "openai-codex";
+  const routedModel: Model<Api> = { ...model, provider: providerId };
+  const definitions = Array.from({ length: 20 }, (_, index) => ({ version: 1 as const, name: `pool-${index}`, provider: providerId, auth: "oauth" as const }));
+  const fakeStore = {
+    list: () => definitions,
+    hasCredentials: () => true,
+    health: () => ({}),
+    updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    ensureCredentialGeneration: () => {},
+    models: () => Promise.resolve({
+      getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
+      getAllAvailable: async () => [routedModel],
+      streamSimple: () => {
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: "done", reason: "stop", message: { ...message("ok"), provider: providerId, model: routedModel.id } });
+        stream.end();
+        return stream;
+      }
+    })
+  } as unknown as AccountStore;
+  const native: Provider = { id: providerId, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] }, getModels: () => [routedModel],
+    stream: () => { throw new Error("unused"); }, streamSimple: () => { throw new Error("unused"); } };
+  let active = 0, maximum = 0, finished = 0;
+  const quotaFetcher = async () => {
+    active++; maximum = Math.max(maximum, active);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    active--; finished++;
+    return { fiveHour: { used: 10 } };
+  };
+  const router = new AccountRouter(fakeStore, () => ({ mode: "round-robin", accounts: [] }), Date.now, quotaFetcher);
+  assert.equal((await router.wrap(native).streamSimple(routedModel, context).result()).stopReason, "stop");
+  for (let wait = 0; wait < 200 && finished < 20; wait++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(finished, 20, "queued probes all run");
+  assert.ok(maximum <= 4 && maximum > 1, `concurrency stayed bounded (${maximum})`);
+});
+
+test("a label re-created for the same provider gets a new identity epoch, so old in-flight results are discarded", async t => {
+  const f = fixture(t);
+  const first = f.store.health("a").credentialGeneration;
+  assert.ok(first, "creating an account allocates a credential generation");
+
+  let release!: () => void, dispatched!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const sent = new Promise<void>(resolve => { dispatched = resolve; });
+  const slow: Provider = { ...f.provider,
+    streamSimple: (m, c, options) => f.provider.streamSimple(m, c, { ...options,
+      onResponse: async (response, selected) => { dispatched(); await gate; await options?.onResponse?.(response, selected); } }) };
+  f.fail(429);
+  const pending = f.router.wrap(slow).streamSimple(model, context).result(); // process A, request in flight on "a"
+  await sent;
+  // Process B removes "a" and creates a different subscription under the same label and provider.
+  const other = new AccountStore(f.directory);
+  other.remove("a");
+  other.reserve("a");
+  other.save({ version: 1, name: "a", provider: "openai", auth: "env", env: "JAR_TEST_A" });
+  assert.notEqual(other.health("a").credentialGeneration, first);
+  release();
+  await pending;
+  assert.equal(other.health("a").blockedUntil, undefined, "the old identity's late 429 did not cool down the replacement");
+});
+
+test("an account created before identity epochs existed is given one on first use", async t => {
+  const f = fixture(t);
+  f.store.saveHealth("b", {}); // legacy: no credentialGeneration
+  assert.equal(f.store.health("b").credentialGeneration, undefined);
+  await f.router.wrap(f.provider).streamSimple(model, context).result();
+  assert.ok(f.store.health("b").credentialGeneration);
+});
+
+/** Installs `policy` over a configured account while Pi's own login ("missing" key) is available, then sends one request. */
+async function requestUnderPolicy(t: TestContext, policy: AccountRoutingSettings, withAccounts = true) {
+  const f = fixture(t);
+  const directory = withAccounts ? f.directory : mkdtempSync(join(tmpdir(), "pi-jar-no-accounts-"));
+  t.after(() => { if (!withAccounts) rmSync(directory, { recursive: true, force: true }); });
+  const registered = new Map<string, Provider>();
+  const accounts = new Accounts({ registerProvider: (provider: Provider) => registered.set(provider.id, provider) } as never,
+    () => policy, () => {}, directory);
+  const ctx = { hasUI: false, modelRegistry: { getAll: () => [model], getProvider: () => f.provider, refresh: async () => {} }, ui: { notify() {} } };
+  await accounts.ready(ctx as never);
+  const provider = registered.get("openai") ?? f.provider;
+  const result = await provider.streamSimple(model, context).result();
+  return { result, primaryCalls: f.calls, accounts };
+}
+
+test("account routing only replaces quota lookup for wrapped providers", async t => {
+  const { accounts } = await requestUnderPolicy(t, { mode: "sticky", accounts: [] });
+  assert.equal(accounts.routesProvider("openai"), true);
+  assert.equal(accounts.routesProvider("anthropic"), false, "native providers retain their own quota lookup");
+});
+
+for (const [label, value] of [
+  ["a malformed pin", { mode: "sticky", accounts: ["a"], pinned: { openai: "../bad" } }],
+  ["a malformed allowlist", { mode: "sticky", accounts: ["Not A Name"] }],
+  ["an unknown mode", { mode: "bogus", accounts: [] }],
+  ["a non-object policy", "sticky"],
+  ["an empty stored lock reason", { mode: "sticky", accounts: ["a"], invalid: "" }],
+  ["a whitespace-only lock reason", { mode: "sticky", accounts: ["a"], invalid: "   " }],
+  ["a null lock marker", { mode: "sticky", accounts: ["a"], invalid: null }],
+  ["a non-string lock marker", { mode: "sticky", accounts: ["a"], invalid: 0 }]
+] as const) {
+  test(`${label} in a present routing policy blocks requests instead of using Pi's primary login`, async t => {
+    const policy = parseAccountRouting(value);
+    assert.ok(policy.invalid, "the malformed policy is flagged, not reset to off");
+    assert.deepEqual(parseAccountRouting(JSON.parse(JSON.stringify(policy))).invalid, policy.invalid, "the lock survives save and reload");
+    const { result, primaryCalls } = await requestUnderPolicy(t, policy);
+    assert.equal(result.stopReason, "error");
+    assert.match(result.errorMessage ?? "", /unsafe/);
+    assert.deepEqual(primaryCalls, [], "no request reached the provider with Pi's primary credential");
+  });
+}
+
+test("a stored lock marker with an empty reason cannot widen a restricted allowlist to every account", async t => {
+  // Two accounts and a primary login are available; the restricted policy named only "a".
+  const policy = parseAccountRouting({ mode: "sticky", accounts: ["a"], invalid: "" });
+  assert.equal(isUnsafeRouting(policy), true);
+  assert.deepEqual(policy.accounts, [], "the empty reason did not leave an unrestricted sticky policy");
+  assert.ok(policy.invalid && policy.invalid.length > 0, "the marker is always a non-empty tag");
+  assert.equal(unsafeAccountRouting("").invalid, "unspecified reason");
+  const { result, primaryCalls } = await requestUnderPolicy(t, policy);
+  assert.equal(result.stopReason, "error");
+  assert.deepEqual(primaryCalls, [], "neither unrestricted account routing nor the primary login served the request");
+});
+
+test("an absent routing policy stays off and uses Pi's own login", async t => {
+  const { result, primaryCalls } = await requestUnderPolicy(t, parseAccountRouting(undefined));
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(primaryCalls, ["missing"]);
+});
+
+test("a corrupt profiles file with no legacy settings locks routing", async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.directory, PROFILE_FILE), "{ not json");
+  let failure: unknown;
+  try { new ProfileStore(f.directory); } catch (error) { failure = error; }
+  assert.ok(failure instanceof ProfileLoadError);
+  assert.equal(existsSync(join(f.directory, SETTINGS_FILE)), false);
+  const settings = settingsAfterProfileFailure(f.directory, failure);
+  assert.ok(settings.accountRouting.invalid);
+  const { result, primaryCalls } = await requestUnderPolicy(t, settings.accountRouting);
+  assert.equal(result.stopReason, "error");
+  assert.deepEqual(primaryCalls, []);
+  // Failures that are not about the profiles file keep the plain legacy settings.
+  assert.deepEqual(settingsAfterProfileFailure(f.directory, new Error("theme unavailable")).accountRouting, { mode: "off", accounts: [] });
+});
+
+for (const [label, content] of [["malformed JSON", "{ not json"], ["an unknown version", JSON.stringify({ version: 2 })], ["a non-object", "[]"]] as const) {
+  test(`corrupt legacy settings (${label}) lock routing`, async t => {
+    const f = fixture(t);
+    writeFileSync(join(f.directory, SETTINGS_FILE), content);
+    const settings = loadVisualSettings(f.directory);
+    assert.ok(settings.accountRouting.invalid);
+    const { result, primaryCalls } = await requestUnderPolicy(t, settings.accountRouting);
+    assert.equal(result.stopReason, "error");
+    assert.deepEqual(primaryCalls, []);
+  });
+}
+
+test("a fresh install without settings files is unaffected", t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-fresh-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  assert.deepEqual(loadVisualSettings(directory).accountRouting, { mode: "off", accounts: [] });
+});
+
+test("an unsafe policy with no accounts configured does not lock Pi out of its only login", async t => {
+  const { result, primaryCalls } = await requestUnderPolicy(t, parseAccountRouting("sticky"), false);
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(primaryCalls, ["missing"]);
+});
+
+test("an unsafe policy is reset only by an explicit mode choice; pin and use refuse until then", async t => {
+  const f = fixture(t);
+  let policy = parseAccountRouting({ mode: "sticky", accounts: ["a"], pinned: { openai: "../bad" } });
+  const notices: string[] = [];
+  const accounts = new Accounts({ registerProvider() {} } as never, () => policy, next => { policy = next; }, f.directory);
+  const ctx = { hasUI: false, ui: { notify: (text: string) => notices.push(text) },
+    modelRegistry: { getAll: () => [], getProvider: () => undefined, refresh: async () => {} } };
+  assert.throws(() => accounts.pin("openai", "a", ctx as never), /unsafe/);
+  await assert.rejects(() => accounts.command("use all", ctx as never), /unsafe/);
+  await accounts.command("list", ctx as never);
+  assert.match(notices.at(-1) ?? "", /BLOCKED, unsafe policy/);
+  await accounts.command("mode off", ctx as never);
+  assert.deepEqual(policy, { mode: "off", accounts: [] }, "the bad fields were dropped, not inherited");
+});
+
+test("an unreadable inherited policy locks the child instead of failing the extension load", () => {
+  const previous = process.env[ACCOUNT_ROUTING_ENV];
+  process.env[ACCOUNT_ROUTING_ENV] = "{ not json";
+  try { assert.ok(inheritedAccountRouting()?.invalid); }
+  finally { if (previous === undefined) delete process.env[ACCOUNT_ROUTING_ENV]; else process.env[ACCOUNT_ROUTING_ENV] = previous; }
 });

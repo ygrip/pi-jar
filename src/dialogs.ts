@@ -7,21 +7,31 @@ import { popup } from "./popup.ts";
 const fit = (line: string, width: number) => truncateToWidth(line, Math.max(0, width));
 
 /** Pi-jar owns these dialogs; Pi's normal and other extensions' questions are untouched. */
-export async function promptText(ctx: ExtensionContext, title: string, question: string, initial = ""): Promise<string | undefined> {
+export async function promptText(ctx: ExtensionContext, title: string, question: string, initial = "", signal?: AbortSignal): Promise<string | undefined> {
   if (!ctx.hasUI || ctx.mode !== "tui") return undefined;
   return popup<string | undefined>(ctx, (tui, theme, _keys, done) => {
     const input = new Input({ prompt: "❯ ", placeholder: "Type your answer" });
     input.focused = true;
     input.setValue(initial);
-    input.onSubmit = (value) => done(value.trim() || undefined);
-    input.onEscape = () => done(undefined);
+    let finished = false;
+    const finish = (value: string | undefined) => {
+      if (finished) return;
+      finished = true;
+      signal?.removeEventListener("abort", cancel);
+      done(value);
+    };
+    const cancel = () => finish(undefined);
+    input.onSubmit = (value) => finish(value.trim() || undefined);
+    input.onEscape = cancel;
+    if (signal?.aborted) queueMicrotask(cancel);
+    else signal?.addEventListener("abort", cancel, { once: true });
     let footerRow = 0;
     return {
       invalidate() { input.invalidate(); },
       handleInput(data: string) { input.handleInput(data); tui.requestRender(); },
       handleMouse(event: TuiMouseEvent) {
         if (event.type !== "click" || event.button !== "left") return;
-        if (event.y === footerRow) { done(input.getValue().trim() || undefined); return { handled: true }; }
+        if (event.y === footerRow) { finish(input.getValue().trim() || undefined); return { handled: true }; }
       },
       render(width: number): string[] {
         const lines = [

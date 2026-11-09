@@ -1264,6 +1264,28 @@ test("a synchronous result shares one report budget; jar_subagent report returns
   assert.match(full.content[0]!.text, /beta:x{6000}:end/);
 });
 
+test("jar_subagent agents applies one action to several agents in a single call", async () => {
+  const registry = new DelegateRegistry();
+  const tools = new Map<string, Tool>();
+  const fake = fakeSpawn((child, prompt) => { say(child, prompt.includes("alpha") ? "alpha report" : "beta report"); settle(child); });
+  registerDelegate({ registerTool(definition: Tool) { tools.set(definition.name, definition); } } as never,
+    roles({ scout: { provider: "p", model: "cheap" } }), registry, { spawnProcess: fake.spawn as never, getMaxSubagents: () => 4 });
+  await tools.get("jar_delegate")!.execute("d", { tasks: ["alpha", "beta"].map(task => ({ task, name: task })) },
+    undefined, undefined, { ...quiet, model: { provider: "p", id: "current" }, modelRegistry: { getAvailable: () => [{ provider: "p", id: "cheap" }] } });
+  const control = tools.get("jar_subagent")!;
+  const both = await control.execute("r", { action: "report", agents: ["alpha", "beta", "alpha"] }, undefined, undefined, quiet);
+  assert.match(both.content[0]!.text, /\[alpha\] [\s\S]*alpha report[\s\S]*\[beta\] [\s\S]*beta report/);
+  assert.equal((both.content[0]!.text.match(/\[alpha\]/g) ?? []).length, 1, "duplicate names are applied once");
+  assert.notEqual(both.isError, true);
+
+  const mixed = await control.execute("r", { action: "report", agents: ["alpha", "missing"] }, undefined, undefined, quiet);
+  assert.equal(mixed.isError, true);
+  assert.match(mixed.content[0]!.text, /\[missing\] Subagent not found/);
+  for (const bad of [{ action: "report", agent: "alpha", agents: ["beta"] }, { action: "report", agents: [] }]) {
+    assert.equal((await control.execute("r", bad, undefined, undefined, quiet)).isError, true);
+  }
+});
+
 test("the default pool is two retained subagents", async () => {
   assert.equal(MAX_DELEGATES, 2);
   const registry = new DelegateRegistry();
