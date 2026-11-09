@@ -597,11 +597,16 @@ test("routing does not await delayed quota endpoints and validates only the pref
   }));
   let active = 0, maximum = 0, checked = 0, probes = 0;
   const outstanding: Array<() => void> = [];
+  const health = new Map<string, object>();
   const fakeStore = {
     list: () => definitions,
     hasCredentials: () => true,
-    health: () => ({}),
-    updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    health: (name: string) => health.get(name) ?? {},
+    updateHealth: (name: string, change: (health: object) => object) => {
+      const updated = change(health.get(name) ?? {});
+      health.set(name, updated);
+      return updated;
+    },
     ensureCredentialGeneration: () => {},
     models: () => Promise.resolve({
       getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
@@ -631,8 +636,12 @@ test("routing does not await delayed quota endpoints and validates only the pref
     await new Promise<void>(resolve => { outstanding.push(resolve); });
     return { fiveHour: { used: 25 } };
   };
-  const router = new AccountRouter(fakeStore, () => ({ mode: "round-robin", accounts: [] }), Date.now, quotaFetcher);
+  let policy: AccountRoutingSettings = { mode: "round-robin", accounts: [] };
+  const router = new AccountRouter(fakeStore, () => policy, Date.now, quotaFetcher);
+  const published: Array<{ account: string; provider: string; used?: number }> = [];
+  router.onRoute = (account, provider, health) => published.push({ account, provider, used: health.quota?.fiveHour?.used });
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let afterSwitch = 0;
   try {
     const result = await Promise.race([
       router.wrap(native).streamSimple(routedModel, context).result(),
@@ -644,10 +653,27 @@ test("routing does not await delayed quota endpoints and validates only the pref
     assert.equal(checked, 1, "only the winning account's catalog is validated");
     assert.equal(maximum, 1, "catalogs are validated one at a time in preference order");
     assert.ok(probes > 0, "quota probes still run without gating the model request");
+    assert.equal((await router.wrap(native).streamSimple(routedModel, context).result()).stopReason, "stop");
+    afterSwitch = published.length;
+    assert.equal(published.at(-1)?.account, "pool-1", "round-robin switches the displayed account");
   } finally {
     if (timeout) clearTimeout(timeout);
     for (const release of outstanding) release();
   }
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.ok(published.slice(afterSwitch).some(status => status.account === "pool-1" && status.provider === providerId && status.used === 25),
+    "the selected account publishes its async quota when the probe completes");
+  assert.equal(published.slice(afterSwitch).some(status => status.account === "pool-0"), false,
+    "the previous account's late quota cannot overwrite the selected account");
+  const beforeRefresh = published.length;
+  await router.refreshActiveQuota(providerId);
+  assert.equal(published.length, beforeRefresh + 1, "a fresh shared snapshot is republished after statuses are cleared");
+  const publicationCount = published.length;
+  policy = { mode: "sticky", accounts: ["pool-0"], pinned: { [providerId]: "pool-0" } };
+  const probeCount = probes;
+  await router.refreshActiveQuota(providerId);
+  assert.equal(probes, probeCount, "idle refresh skips an account excluded by the changed policy");
+  assert.equal(published.length, publicationCount, "a stale selected account is not republished after policy changes");
 });
 
 
@@ -730,6 +756,10 @@ test("stale quota from old OAuth credentials cannot return after logout or recon
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(store.health("work").quota, undefined, "persistent epoch prevents cross-process stale writes");
   assert.ok(store.health("work").credentialGeneration);
+  const publications: Array<number | undefined> = [];
+  otherProcess.onRoute = (_name, _provider, health) => publications.push(health.quota?.fiveHour?.used);
+  await otherProcess.refreshActiveQuota(providerId);
+  assert.deepEqual(publications, [undefined], "idle refresh clears the old route after a cross-process credential change");
 });
 
 test("an account whose credential check throws is skipped and reported, not fatal", async t => {
@@ -962,6 +992,12 @@ async function requestUnderPolicy(t: TestContext, policy: AccountRoutingSettings
   const result = await provider.streamSimple(model, context).result();
   return { result, primaryCalls: f.calls, accounts };
 }
+
+test("account routing only replaces quota lookup for wrapped providers", async t => {
+  const { accounts } = await requestUnderPolicy(t, { mode: "sticky", accounts: [] });
+  assert.equal(accounts.routesProvider("openai"), true);
+  assert.equal(accounts.routesProvider("anthropic"), false, "native providers retain their own quota lookup");
+});
 
 for (const [label, value] of [
   ["a malformed pin", { mode: "sticky", accounts: ["a"], pinned: { openai: "../bad" } }],

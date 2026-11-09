@@ -143,11 +143,18 @@ export class AccountRouter {
     if (state.definition.auth !== "oauth" || !["anthropic", "openai-codex"].includes(provider)) return;
     const now = this.now();
     if (state.pending) return waitForQuota(state.pending, signal);
-    if (state.nextCheck > now) return;
     if (state.invalidated || this.states.get(state.definition.name) !== state) return;
     const shared = this.store.health(state.definition.name);
+    if (shared.credentialGeneration !== state.generation) {
+      this.invalidate(state.definition.name);
+      return;
+    }
     state.health = shared;
-    if (typeof shared.checkedAt === "number" && shared.checkedAt <= now && shared.checkedAt + QUOTA_TTL_MS > now) return;
+    if (typeof shared.checkedAt === "number" && shared.checkedAt <= now && shared.checkedAt + QUOTA_TTL_MS > now) {
+      if (this.isCurrentRoute(state)) this.onRoute?.(state.definition.name, provider, shared);
+      return;
+    }
+    if (state.nextCheck > now) return;
     const generation = shared.credentialGeneration;
     state.pending = (async () => {
       let quota: Quota | undefined;
@@ -166,14 +173,20 @@ export class AccountRouter {
       // still running. Guard both this process's runtime and the persisted
       // identity epoch, so another Pi process cannot resurrect old credentials' quota.
       if (state.invalidated || this.states.get(state.definition.name) !== state) return;
+      let nextCheck = this.now() + QUOTA_TTL_MS;
       if (quota) {
         const checkedAt = this.now();
+        nextCheck = checkedAt + QUOTA_TTL_MS;
         state.health = this.store.updateHealth(state.definition.name, current =>
           state.invalidated || this.states.get(state.definition.name) !== state
             || current.credentialGeneration !== generation
             ? current : { ...current, quota, checkedAt });
+        if (!state.invalidated && this.states.get(state.definition.name) === state
+          && state.health.credentialGeneration === generation && this.isCurrentRoute(state)) {
+          this.onRoute?.(state.definition.name, provider, state.health);
+        }
       }
-      if (!state.invalidated) state.nextCheck = this.now() + QUOTA_TTL_MS;
+      if (!state.invalidated) state.nextCheck = nextCheck;
     })().finally(() => { state.pending = undefined; });
     return waitForQuota(state.pending, signal);
   }
@@ -222,7 +235,8 @@ export class AccountRouter {
       throw new RoutingError(`No eligible ${provider.id} account for ${model.id}; check /jar accounts, profile allowlist, login and quota resets${skipped}`);
     }
     this.sticky.set(provider.id, selected.definition.name);
-    this.onRoute?.(selected.definition.name, provider.id, selected.health);
+    selected.health = this.store.health(selected.definition.name);
+    if (this.isCurrentRoute(selected)) this.onRoute?.(selected.definition.name, provider.id, selected.health);
     selected.inFlight++;
     return selected;
   }
@@ -290,9 +304,29 @@ export class AccountRouter {
     })();
     return Promise.race([check, timedOut]);
   }
+  private isCurrentRoute(state: AccountState): boolean {
+    const policy = this.settings();
+    const provider = state.definition.provider;
+    return !isUnsafeRouting(policy) && policy.mode !== "off"
+      && this.sticky.get(provider) === state.definition.name
+      && (!policy.accounts.length || policy.accounts.includes(state.definition.name))
+      && (!policy.pinned?.[provider] || policy.pinned[provider] === state.definition.name);
+  }
+  async refreshActiveQuota(provider?: string): Promise<void> {
+    const active = [...this.sticky.entries()].filter(([id]) => provider === undefined || id === provider);
+    await Promise.all(active.map(([id, name]) => {
+      const state = this.states.get(name);
+      if (state && !state.invalidated && state.definition.provider === id && this.isCurrentRoute(state)) return this.refreshQuota(state);
+    }));
+  }
   invalidate(name: string): void {
     const state = this.states.get(name);
-    if (state) state.invalidated = true;
+    if (state) {
+      state.invalidated = true;
+      if (this.sticky.get(state.definition.provider) === name) {
+        this.onRoute?.(name, state.definition.provider, {});
+      }
+    }
     this.states.delete(name);
     // Re-login, sign-out, or deletion invalidates the account's last-used marker.
     this.dropLastUsed(name);

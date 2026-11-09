@@ -57,6 +57,12 @@ export function publishedQuota(statuses: ReadonlyMap<string, string>, provider: 
   } catch { publishedCache.set(provider, { raw }); return undefined; }
 }
 
+/** The expiry of a validated published value, for scheduling the next lookup. */
+export function publishedQuotaExpiry(statuses: ReadonlyMap<string, string>, provider: string, now: number): number | undefined {
+  if (!publishedQuota(statuses, provider, now)) return undefined;
+  return publishedCache.get(provider)?.expiresAt;
+}
+
 function codexAccountId(token: string): string | undefined {
   try {
     const payload = token.split(".")[1];

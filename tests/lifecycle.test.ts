@@ -118,6 +118,42 @@ test("quota waits for startup to settle, skips unsupported providers and can be 
   events.get("session_shutdown")?.({}, ctx);
 });
 
+test("idle quota refresh is not postponed by session events and stops when disabled", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  const events = new Map<string, Function>();
+  let authCalls = 0;
+  let command: Function | undefined;
+  const ctx = {
+    hasUI: true, mode: "tui", cwd: "/tmp/pi-jar", isIdle: () => true,
+    model: { provider: "openai-codex", id: "test-model" },
+    modelRegistry: { async getProviderAuth() { authCalls++; return undefined; } },
+    getContextUsage: () => ({ percent: 25 }),
+    sessionManager: { getBranch: () => [] },
+    ui: { setWorkingIndicator() {}, setWidget() {}, notify() {},
+      setFooter(factory?: Function) { factory?.({ requestRender() {} }, theme, {
+        getExtensionStatuses: () => new Map(), getGitBranch: () => null, onBranchChange: () => () => {}
+      }); }
+    }
+  };
+  piJar({ on(name: string, fn: Function) { events.set(name, fn); }, getCommands: () => [],
+    registerCommand(_name: string, options: { handler: Function }) { command = options.handler; }
+  } as never);
+  events.get("session_start")?.({}, ctx);
+  await command?.("quota on", ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(authCalls, 1);
+  t.mock.timers.tick(4 * 60_000);
+  events.get("turn_end")?.({}, ctx);
+  t.mock.timers.tick(60_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(authCalls, 2, "a later session event does not postpone the expiry refresh");
+  await command?.("quota off", ctx);
+  t.mock.timers.tick(30 * 60_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(authCalls, 2, "disabling quota stops idle refreshes");
+  events.get("session_shutdown")?.({}, ctx);
+});
+
 test("footer shows a hibernated subagent as resumable idle, not as a failure", () => {
   const events = new Map<string, Function>();
   let footer: { render(width: number): string[] } | undefined;

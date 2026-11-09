@@ -22,6 +22,7 @@ export class Accounts {
   private pi: ExtensionAPI;
   private settings: () => AccountRoutingSettings;
   private update: (settings: AccountRoutingSettings, ctx: ExtensionContext) => void;
+  onQuotaChange?: () => void;
   constructor(pi: ExtensionAPI, settings: () => AccountRoutingSettings,
     update: (settings: AccountRoutingSettings, ctx: ExtensionContext) => void, directory = getAgentDir()) {
     this.pi = pi;
@@ -32,6 +33,22 @@ export class Accounts {
   }
   environment(): Record<string, string> { return { [ACCOUNT_ROUTING_ENV]: JSON.stringify(this.settings()) }; }
   policy(): AccountRoutingSettings { return this.settings(); }
+  routesProvider(provider: string | undefined): boolean {
+    return provider !== undefined && this.settings().mode !== "off" && this.originals.has(provider);
+  }
+  clearQuotaStatuses(ctx: ExtensionContext, keepProvider?: string): void {
+    if (!ctx.hasUI || typeof ctx.ui.setStatus !== "function") return;
+    let providers: string[] = [];
+    try { providers = [...new Set(this.store.list().map(account => account.provider))]; }
+    catch { providers = [...new Set(ctx.modelRegistry.getAll().map(model => model.provider))]; }
+    for (const provider of providers) {
+      if (provider !== keepProvider) ctx.ui.setStatus(QUOTA_PREFIX + provider, undefined);
+    }
+  }
+  async refreshQuota(provider?: string): Promise<void> {
+    if (this.settings().mode === "off" || isUnsafeRouting(this.settings())) return;
+    await this.router.refreshActiveQuota(provider);
+  }
   /**
    * Credential variables a subagent must not inherit: keys of environment-backed accounts the
    * routing allowlist excludes. Variables also used by an allowed account stay. With routing off
@@ -43,9 +60,9 @@ export class Accounts {
     let definitions: AccountDefinition[];
     try { definitions = this.store.list(); }
     catch (error) {
-      // The child reads the same storage and fails closed on it; it cannot route with these keys.
+      // Launching without knowing which credentials are excluded would expose every key to the child.
       console.error("pi-jar: cannot read account storage to scope subagent credentials", error);
-      return [];
+      throw new Error("Cannot safely launch subagent: account storage is unreadable");
     }
     const allowed = new Set(settings.accounts);
     const kept = new Set(definitions.filter(account => allowed.has(account.name)).map(account => account.env));
@@ -55,6 +72,7 @@ export class Accounts {
     return [...new Set(withheld)];
   }
   sync(ctx: ExtensionContext): void {
+    this.clearQuotaStatuses(ctx);
     this.router.onRoute = (name, provider, health) => {
       if (!ctx.hasUI || typeof ctx.ui.setStatus !== "function") return;
       ctx.ui.setStatus("pi-jar.account", `account:${name}`);
@@ -63,6 +81,7 @@ export class Accounts {
         status = JSON.stringify({ ...health.quota, expiresAt: health.checkedAt + QUOTA_TTL_MS });
       }
       ctx.ui.setStatus(QUOTA_PREFIX + provider, status);
+      this.onQuotaChange?.();
     };
     const policy = this.settings();
     if (isUnsafeRouting(policy)) {
