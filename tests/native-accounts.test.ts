@@ -8,7 +8,8 @@ import { createAssistantMessageEventStream, normalizeContext,
 import { AccountStore } from "../src/account-store.ts";
 import { AccountRouter } from "../src/account-router.ts";
 import { Accounts } from "../src/accounts.ts";
-import { loginBrowserCommand } from "../src/login-browser.ts";
+import { formatLoginLink, loginBrowserCommand } from "../src/login-browser.ts";
+import { hyperlink, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import type { AccountRoutingSettings } from "../src/account-settings.ts";
 
 const oauth = (value: string): OAuthCredential => ({
@@ -109,7 +110,11 @@ test("native linked Codex and Anthropic routes use their own provider OAuth cred
   assert.equal((await router.wrap(codex.provider).streamSimple(codex.model, context).result()).stopReason, "stop");
   assert.equal((await router.wrap(anthropic.provider).streamSimple(anthropic.model, context).result()).stopReason, "stop");
   assert.deepEqual(keys, ["openai-codex:native-codex", "anthropic:native-anthropic"]);
-  // A stream result can resolve on its terminal event before the router\'s async finally has drained.\n  for (let attempt = 0; attempt < 20 && router.status().some(item => item.inFlight !== 0); attempt++) {\n    await new Promise(resolve => setTimeout(resolve, 5));\n  }\n  assert.ok(router.status().every(item => item.inFlight === 0));
+  // A stream result can resolve on its terminal event before the router's async finally has drained.
+  for (let attempt = 0; attempt < 20 && router.status().some(item => item.inFlight !== 0); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.ok(router.status().every(item => item.inFlight === 0));
 });
 
 test("native login opens the browser for Codex and Anthropic while keeping provider method selection", async t => {
@@ -135,7 +140,9 @@ test("native login opens the browser for Codex and Anthropic while keeping provi
   await accounts.command("login openai-codex personal", ctx as never);
   await accounts.command("login anthropic work", ctx as never);
   assert.deepEqual(opened, ["https://auth.example.test/login?state=a&scope=b", "https://auth.example.test/login?state=a&scope=b"]);
-  assert.ok(seen.some(text => text.includes("Open this login URL")));
+  assert.ok(seen.some(text => text.includes("Sign in:")));
+  assert.ok(seen.some(text => text.includes("Open provider login") || text.includes("https://auth.example.test")),
+    "login notification renders a concise link on supported terminals and a copyable URL otherwise");
   assert.deepEqual(accounts.store.list().map(a => a.name), ["personal", "work"]);
   assert.equal(existsSync(join(dir, "auth.json")), false, "separate accounts do not overwrite native auth");
 });
@@ -148,4 +155,18 @@ test("browser opener is shell-free, cross-platform and rejects unsafe URL scheme
   for (const bad of ["javascript:alert(1)", "file:///etc/passwd", "ftp://example.com", "https://test.com\ncommand", "not a URL"]) {
     assert.equal(loginBrowserCommand(bad), undefined);
   }
+});
+
+test("OAuth login links render as short clickable OSC 8 labels with safe plaintext fallback", () => {
+  const url = "https://accounts.example.test/oauth?state=abcdef&scope=read%20profile";
+  const label = "Open provider login";
+  const linked = formatLoginLink(url, label, true);
+  assert.equal(linked, hyperlink(label, url), "uses native pi-tui OSC 8 hyperlink encoding");
+  assert.equal(stripTerminalSequences(linked), label, "the session never displays the full URL");
+  assert.equal(visibleWidth(linked), label.length, "the invisible URL does not consume terminal columns");
+  assert.equal(formatLoginLink(url, label, false), url, "non-OSC-8 terminals get a copyable URL");
+  assert.equal(formatLoginLink("file:///etc/passwd", label, true), "Invalid provider authorization URL",
+    "unsafe schemes are never embedded in terminal control sequences");
+  assert.equal(formatLoginLink("https://example.test/\u001b]8;;attacker", label, true), "Invalid provider authorization URL",
+    "injected control characters never reach the OSC 8 renderer");
 });
