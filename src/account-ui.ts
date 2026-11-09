@@ -68,18 +68,9 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
   };
 
   const signIn = async (providerId: string, name: string): Promise<void> => {
-    // Only Pi's provider chooses/implements login methods. Prefer device code
-    // on remote terminals where localhost browser callbacks cannot reach Pi.
-    let action = "login";
-    if (providerId === "openai-codex") {
-      const choice = await promptChoice(ctx, "Native Pi OAuth", "Choose the Codex provider's own OAuth method. Device code works over SSH and in containers.", [
-        "Device code (recommended for remote terminals)",
-        "Browser callback / paste redirect URL"
-      ]);
-      if (choice === undefined) return;
-      if (choice === 0) action = "login-device";
-    }
-    await accounts.command(`${action} ${providerId} ${name}`, ctx);
+    // Match Pi's /login: let the registered provider choose its own browser,
+    // device-code and fallback methods, without a duplicate Codex-specific picker.
+    await accounts.command(`login ${providerId} ${name}`, ctx);
   };
 
   const switchAccount = async (providerId?: string): Promise<void> => {
@@ -156,10 +147,23 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
 
   const manageAccount = async (account: AccountDefinition): Promise<void> => {
     if (!ctx.modelRegistry.getProvider(account.provider)) {
+      if (account.source === "native") {
+        ctx.ui.notify("Pi's native account is linked but the provider is unavailable. The primary credential is never removed by Pi Jar.", "warning");
+        return;
+      }
       const confirmation = await promptChoice(ctx, `${account.provider} / ${account.name} · unavailable provider`,
         "The provider plugin is not registered. Authentication and pinning are disabled, but local credentials can be removed.",
         ["Keep account", "Remove local account & credentials…"]);
       if (confirmation === 1) await accounts.remove(account.name, ctx);
+      return;
+    }
+    if (account.source === "native") {
+      const choices = ["Make active for this provider (pin)", "Reconnect / renew native Pi login", "View quota & cooldown", "Back"];
+      const choice = await promptChoice(ctx, `${account.provider} / ${account.name} · linked Pi login`,
+        "Uses Pi's primary OAuth credentials and refresh lock. Sign out with native Pi /logout; Pi Jar cannot delete this credential.", choices);
+      if (choice === 0) accounts.pin(account.provider, account.name, ctx);
+      else if (choice === 1) await signIn(account.provider, account.name);
+      else if (choice === 2) await showLimits(account.provider);
       return;
     }
     const choices = [
