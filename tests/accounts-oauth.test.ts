@@ -132,3 +132,45 @@ test("native OAuth refresh is locked per account, quota probes coalesce, main lo
   assert.deepEqual(calls.slice(beforeAllowlist), ["b-fresh", "b-fresh"],
     "a profile allowlist cannot silently borrow another same-provider OAuth token");
 });
+
+test("sign-out waits for an in-flight native refresh in another process and the account stays disconnected", { timeout: 20000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), "jar-oauth-logout-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const storeA = new AccountStore(directory);
+  let releaseRefresh!: () => void, refreshStarted!: () => void;
+  const gate = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  const started = new Promise<void>(resolve => { refreshStarted = resolve; });
+  const provider: Provider = {
+    id: "anthropic", name: "OAuth Test", getModels: () => [model],
+    auth: { oauth: { name: "OAuth", login: async interaction => credential(await interaction.prompt({ type: "text", message: "token" })),
+      refresh: async current => {
+        refreshStarted();
+        await gate; // the provider call is slow; Pi holds the auth-file lock meanwhile
+        return { ...current, access: "resurrected", expires: Date.now() + 3600_000 };
+      },
+      toAuth: async current => ({ apiKey: current.access }) } },
+    stream: () => { throw new Error("unused"); },
+    streamSimple: () => { throw new Error("unused"); }
+  };
+  storeA.reserve("work");
+  const account = { version: 1 as const, name: "work", provider: "anthropic", auth: "oauth" as const };
+  const runtimeA = await storeA.models(account, provider);
+  await runtimeA.login("anthropic", "oauth", { prompt: async () => "old", notify() {} }); // expires: 0, so the next use refreshes
+  storeA.save(account);
+
+  const refreshing = runtimeA.getAuth("anthropic").catch(() => undefined); // process A: refresh in flight, lock held
+  await started;
+  const storeB = new AccountStore(directory); // process B signs out meanwhile
+  let loggedOut = false;
+  const signingOut = storeB.logout("work").then(() => { loggedOut = true; });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(loggedOut, false, "sign-out waits for the refresh's lock instead of deleting under it");
+  releaseRefresh();
+  await Promise.all([refreshing, signingOut]);
+
+  assert.equal(storeB.hasCredentials(storeB.list()[0]!), false, "the refresh could not resurrect the signed-out identity");
+  assert.equal(storeA.hasCredentials(storeA.list()[0]!), false);
+  const router = new AccountRouter(storeB, () => ({ mode: "sticky", accounts: [] }));
+  const result = await router.wrap(provider).streamSimple(model, context).result();
+  assert.equal(result.stopReason, "error", "routing fails closed");
+});

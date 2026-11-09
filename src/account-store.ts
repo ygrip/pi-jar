@@ -130,17 +130,25 @@ export class AccountStore {
     catch { throw new Error(`Account ${account.name} has an unreadable credential file`); }
     if (!stored || typeof stored !== "object" || Array.isArray(stored)) return false;
     const entry = (stored as Record<string, unknown>)[account.provider];
-    return !!entry && typeof entry === "object" && (entry as { type?: unknown }).type === "oauth";
+    if (!entry || typeof entry !== "object") return false;
+    // The structure Pi's own credential loader requires; anything less cannot sign a request.
+    const { type, access, refresh, expires } = entry as Record<string, unknown>;
+    return type === "oauth" && typeof access === "string" && typeof refresh === "string"
+      && typeof expires === "number" && Number.isFinite(expires);
   }
 
-  /** Sign out one OAuth account while keeping its label for reconnect. */
-  logout(name: string): void {
+  /**
+   * Sign out one OAuth account while keeping its label for reconnect. The credential is deleted
+   * through Pi's own credential store, under the same auth-file lock a native OAuth refresh holds:
+   * another Pi process that is mid-refresh finishes first, so its write can never bring the
+   * credential back after sign-out.
+   */
+  async logout(name: string): Promise<void> {
     const account = this.list().find(item => item.name === name);
     if (!account) throw new Error("Unknown account: " + name);
     if (account.auth !== "oauth") throw new Error("API-key accounts must be removed or their environment changed");
-    const path = this.credentialPath(name);
-    try { privatePath(path, false); unlinkSync(path); }
-    catch (error) { if (!missing(error)) throw error; }
+    const runtime = await ModelRuntime.create({ authPath: this.credentialPath(name), modelsPath: null, refreshOnCreate: false });
+    await runtime.logout(account.provider);
     this.resetHealthForCredentialChange(name);
   }
 

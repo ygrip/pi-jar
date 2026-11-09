@@ -432,7 +432,7 @@ test("sign-out preserves OAuth account label and leaves Pi primary credentials u
   assert.equal(store.list().length, 1);
   assert.equal(policy.pinned, undefined);
   assert.equal(readFileSync(primary, "utf8"), "primary login");
-  assert.equal(existsSync(authPath), false);
+  assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")), {}, "only this provider's entry was removed, through Pi's credential store");
 });
 
 test("native provider login identity follows Pi settings and stays stable otherwise", t => {
@@ -705,8 +705,8 @@ test("stale quota from old OAuth credentials cannot return after logout or recon
   assert.equal((await router.wrap(provider).streamSimple(codexModel, context).result()).stopReason, "stop");
   await firstStarted;
   router.invalidate("work");
-  store.logout("work");
-  assert.equal(existsSync(authPath), false);
+  await store.logout("work");
+  assert.equal(store.hasCredentials(store.list()[0]!), false);
   releaseFirst({ fiveHour: { used: 100 } });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(store.health("work").quota, undefined, "invalidated runtime cannot resurrect exhausted limits");
@@ -820,6 +820,10 @@ test("hasCredentials requires an OAuth entry for the account's provider", async 
     ["{}", false],
     [JSON.stringify({ anthropic: { type: "oauth", access: "x" } }), false],
     [JSON.stringify({ "openai-codex": { type: "api_key", key: "x" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: "y" } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: 1, expires: 1 } }), false],
+    [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: "y", expires: "soon" } }), false],
     [JSON.stringify({ "openai-codex": { type: "oauth", access: "x", refresh: "y", expires: 1 } }), true]
   ];
   for (const [content, expected] of states) {

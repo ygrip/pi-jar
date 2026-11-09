@@ -175,7 +175,7 @@ export class Accounts {
     if (!ctx.isIdle()) throw new Error("Finish the current model request before signing out");
     // Stop old background quota probes before touching credential/health files.
     this.router.invalidate(name);
-    this.store.logout(name);
+    await this.store.logout(name);
     const current = this.settings();
     const pins = Object.fromEntries(Object.entries(current.pinned ?? {})
       .filter(([, account]) => account !== name));
