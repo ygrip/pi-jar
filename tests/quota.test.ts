@@ -70,6 +70,21 @@ test("provider lookups deduplicate while one is pending; stats report pending an
   cache.stop();
 });
 
+test("quota listeners joining a pending lookup observe the completed failure", async () => {
+  let reject: (error: Error) => void = () => {};
+  const cache = new QuotaCache(() => new Promise((_resolve, fail) => { reject = fail; }), () => {});
+  cache.enabled = true;
+  const now = Date.now();
+  let observed: ReturnType<QuotaCache["failure"]>;
+  assert.equal(cache.refresh("anthropic", new Map(), now), true);
+  assert.equal(cache.refresh("anthropic", new Map(), now, () => { observed = cache.failure("anthropic", now); }), false);
+  await tick();
+  reject(new Error("network down"));
+  await tick();
+  assert.deepEqual(observed, { error: "network down", retryInMs: QUOTA_TTL_MS });
+  cache.stop();
+});
+
 test("failed lookups keep their reason and back off exponentially instead of hot-looping", async () => {
   let calls = 0;
   let failing = true;

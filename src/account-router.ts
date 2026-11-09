@@ -74,6 +74,7 @@ function waitForQuota(pending: Promise<void>, signal?: AbortSignal): Promise<voi
 /** Keeps canonical provider/model IDs. Account authentication never mutates Pi's main auth.json. */
 export class AccountRouter {
   onRoute?: (account: string, provider: string, health: AccountHealth) => void;
+  onQuotaChange?: () => void;
   configurationError?: string;
   private states = new Map<string, AccountState>();
   private sticky = new Map<string, string>();
@@ -186,7 +187,10 @@ export class AccountRouter {
           this.onRoute?.(state.definition.name, provider, state.health);
         }
       }
-      if (!state.invalidated) state.nextCheck = nextCheck;
+      if (!state.invalidated) {
+        state.nextCheck = nextCheck;
+        this.onQuotaChange?.();
+      }
     })().finally(() => { state.pending = undefined; });
     return waitForQuota(state.pending, signal);
   }
@@ -317,6 +321,14 @@ export class AccountRouter {
     await Promise.all(active.map(([id, name]) => {
       const state = this.states.get(name);
       if (state && !state.invalidated && state.definition.provider === id && this.isCurrentRoute(state)) return this.refreshQuota(state);
+    }));
+  }
+  async refreshConfiguredQuota(providerId: string, provider: Provider, skipNative = false): Promise<void> {
+    const definitions = this.store.list().filter(account => account.provider === providerId && account.auth === "oauth"
+      && !(skipNative && account.source === "native"));
+    await Promise.all(definitions.map(account => {
+      if (account.provider !== provider.id || !["anthropic", "openai-codex"].includes(provider.id)) return;
+      return this.refreshQuota(this.state(account, provider));
     }));
   }
   invalidate(name: string): void {

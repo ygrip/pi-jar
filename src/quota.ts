@@ -149,6 +149,7 @@ export async function fetchQuota(provider: QuotaProvider, resolveAuth: (provider
 export class QuotaCache {
   private entries = new Map<QuotaProvider, { value?: Quota; error?: string; requestedAt: number; expiresAt: number; failures: number }>();
   private pending = new Map<QuotaProvider, AbortController>();
+  private listeners = new Map<QuotaProvider, Set<() => void>>();
   private requests = 0;
   private failures = 0;
   enabled = false;
@@ -173,16 +174,23 @@ export class QuotaCache {
     return cached?.error !== undefined && cached.expiresAt > now ? { error: cached.error, retryInMs: cached.expiresAt - now } : undefined;
   }
   /** Start one background lookup when nothing fresh is cached and no retry delay is pending; true if it started. */
-  refresh(provider: string | undefined, statuses: ReadonlyMap<string, string>, now: number): boolean {
+  refresh(provider: string | undefined, statuses: ReadonlyMap<string, string>, now: number, onChange?: () => void): boolean {
     if (provider !== "openai-codex" && provider !== "anthropic" || !this.enabled) return false;
     if (publishedQuota(statuses, provider, now)) {
       // A publisher is authoritative; an authenticated fallback would only duplicate it.
       this.pending.get(provider)?.abort();
       this.pending.delete(provider);
+      this.listeners.delete(provider);
       return false;
     }
     const cached = this.entries.get(provider);
-    if (cached && cached.expiresAt > now || this.pending.has(provider)) return false;
+    if (cached && cached.expiresAt > now) return false;
+    if (onChange) {
+      const listeners = this.listeners.get(provider) ?? new Set<() => void>();
+      listeners.add(onChange);
+      this.listeners.set(provider, listeners);
+    }
+    if (this.pending.has(provider)) return false;
     const controller = new AbortController();
     this.pending.set(provider, controller);
     this.requests++;
@@ -202,8 +210,12 @@ export class QuotaCache {
         if (!value) this.failures++;
         const ttl = value ? QUOTA_TTL_MS : Math.min(QUOTA_MAX_BACKOFF_MS, QUOTA_TTL_MS * 2 ** (failures - 1));
         this.entries.set(provider, { ...(value ? { value } : { error: error ?? "no usage returned" }), requestedAt: now, expiresAt: now + ttl, failures });
-        // Either outcome replaces the "loading" state renders show.
+        // Clear pending first so observers can read a failed lookup immediately.
+        if (this.pending.get(provider) === controller) this.pending.delete(provider);
+        const listeners = this.listeners.get(provider);
+        this.listeners.delete(provider);
         this.changed();
+        for (const listener of listeners ?? []) listener();
       }).finally(() => {
         if (this.pending.get(provider) === controller) this.pending.delete(provider);
       });
@@ -219,5 +231,5 @@ export class QuotaCache {
         ...(entry ? { ok: entry.value !== undefined, ageMs: now - entry.requestedAt, retryInMs: Math.max(0, entry.expiresAt - now) } : {}) };
     }) };
   }
-  stop(): void { for (const controller of this.pending.values()) controller.abort(); this.pending.clear(); this.entries.clear(); }
+  stop(): void { for (const controller of this.pending.values()) controller.abort(); this.pending.clear(); this.listeners.clear(); this.entries.clear(); }
 }

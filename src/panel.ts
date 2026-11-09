@@ -7,7 +7,8 @@ export type Paint = (color: string, text: string) => string;
 export interface PanelTab { name: string; render(width: number, fg: Paint): string[] }
 
 /** Tabbed, scrollable info panel (Usage / Context / Cache). Tab or click switches tabs; Esc closes. */
-export async function openPanel(ctx: ExtensionContext, tabs: readonly PanelTab[], initial = 0): Promise<void> {
+export async function openPanel(ctx: ExtensionContext, tabs: readonly PanelTab[], initial = 0,
+  onOpen?: (onChange: () => void) => void): Promise<void> {
   if (!ctx.hasUI || ctx.mode !== "tui") return;
   await popup<void>(ctx, (tui, theme, _keys, done) => {
     let tab = Math.max(0, Math.min(tabs.length - 1, initial));
@@ -18,6 +19,7 @@ export async function openPanel(ctx: ExtensionContext, tabs: readonly PanelTab[]
     // The panel repaints on every Pi render while open; its body rows rarely change between frames.
     const framed = new RowCache();
     const fg: Paint = (color, text) => theme.fg(color as never, text);
+    onOpen?.(() => tui.requestRender());
     const move = (delta: number) => { scroll = Math.max(0, Math.min(Math.max(0, body.length - rows), scroll + delta)); };
     const select = (index: number) => { tab = (index + tabs.length) % tabs.length; scroll = 0; };
     return {
