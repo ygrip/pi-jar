@@ -221,6 +221,23 @@ test("jar_shell start with waitMs returns a quick job's exit code in one call an
   } finally { manager.dispose(); }
 });
 
+test("jar_shell start waits briefly by default; services and watch jobs return at once", async () => {
+  const { children, manager } = fakeShells();
+  try {
+    const run = shellTool(manager);
+    const quick = run({ action: "start", command: "echo hi" });
+    children[0].stdout.emit("data", "hi\n");
+    children[0].emit("close", 0, null);
+    assert.match(await quick, /^s1 · .* · exited 0 · .*\nhi$/, "a quick job returns its exit code without a follow-up call");
+
+    const service = await run({ action: "start", command: "npm run dev", purpose: "service" });
+    assert.match(service, /^Started s2 .*Completion reaches the model/s);
+    assert.doesNotMatch(service, /Still running after/);
+    const watched = await run({ action: "start", command: "npm run dev", watch: "ready" });
+    assert.doesNotMatch(watched, /Still running after/);
+  } finally { manager.dispose(); }
+});
+
 test("start with waitMs reports partial output while running; output returns only new lines unless all", async () => {
   const { children, manager } = fakeShells();
   try {

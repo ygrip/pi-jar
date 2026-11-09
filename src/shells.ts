@@ -24,6 +24,8 @@ const MAX_TOOL_OUTPUT_CHARS = 32 * 1024;
 const COMPACT_TAIL_CHARS = MAX_TOOL_OUTPUT_CHARS;
 const MAX_OUTPUT_LINES = 400;
 const KILL_GRACE_MS = 3000;
+/** start waits this long by default, so a quick job returns its result in one call instead of start → wait → output. */
+const QUICK_START_WAIT_MS = 1500;
 /** Trim 1/16 below a cap so a chatty job does not re-trim on every following line. */
 const slack = (chars: number) => chars - (chars >> 4);
 
@@ -467,7 +469,7 @@ const Parameters = Type.Object({
   purpose: Type.Optional(Type.Union([Type.Literal("task"), Type.Literal("service")], { description: "task is finite and must be checked before claiming completion; service is intentionally long-lived (default with watch)." })),
   id: Type.Optional(Type.String({ description: "Shell id for output/kill/wait/peek, e.g. s1." })),
   ids: Type.Optional(Type.Array(Type.String(), { maxItems: 20, description: "Selected ids for wait/peek. Omit to inspect all jobs or wait for finite tasks only." })),
-  waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 30000, description: "start: wait up to this long (0–30000ms) for the job to exit; returns its exit code and output in one call, or the output so far if still running. wait: bounded event-driven wait (default 1000ms). Esc cancels the wait, not the shell." })),
+  waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 30000, description: "start: wait up to this long (0–30000ms; default 1500 unless watch or purpose service is set) for the job to exit; returns its exit code and output in one call, or the output so far if still running. wait: bounded event-driven wait (default 1000ms). Esc cancels the wait, not the shell." })),
   lines: Type.Optional(Type.Number({ description: "Line limit for output and start with waitMs (default 40, max 400): the newest unread lines, or the trailing window with all." })),
   all: Type.Optional(Type.Boolean({ description: "output: return the trailing window again instead of only lines new since your last read." }))
 });
@@ -477,7 +479,7 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
   pi.registerTool({
     name: SHELL_TOOL,
     label: "shell",
-    description: "Background jobs: services, watchers and long commands (finite commands under ~2 min belong in bash). start returns at once, or with waitMs (≤30s) waits for exit and returns exit code and output together. output returns only new lines (all: true for the trailing window). peek/list show status, wait blocks boundedly on chosen jobs, kill stops the process tree. Completion notices arrive at the next safe turn boundary and cannot interrupt a response; with no other work, call wait. Results already read are not replayed. Set watch to a regex for the line you wait for (e.g. \"listening|ready|error\"); mark never-ending jobs purpose: service and never wait on them; kill shells you no longer need.",
+    description: "Background jobs: services, watchers and long commands (finite commands under ~2 min belong in bash). start waits up to 1.5 s by default (set waitMs, ≤30s, for longer) and returns exit code and output together when the job ends; with watch or purpose: service it returns at once. output returns only new lines (all: true for the trailing window). peek/list show status, wait blocks boundedly on chosen jobs, kill stops the process tree. Completion notices arrive at the next safe turn boundary and cannot interrupt a response; with no other work, call wait. Results already read are not replayed. Set watch to a regex for the line you wait for (e.g. \"listening|ready|error\"); mark never-ending jobs purpose: service and never wait on them; kill shells you no longer need.",
     promptSnippet: "Services, watchers and long jobs in the background.",
     promptGuidelines: [
       "Use bash for finite commands under ~2 min; jar_shell for services, watchers or long jobs (short but uncertain: start with waitMs). Don't poll; wait on explicit ids before the final summary. Never claim a check passed without its exit code."
@@ -494,7 +496,10 @@ export function registerShells(pi: ExtensionAPI, shells: () => ShellManager | un
         switch (params.action) {
           case "start": {
             // Validate before spawning: failing after the spawn would hide the running job's id.
-            const waitMs = params.waitMs === undefined ? undefined : Math.max(0, Math.min(30_000, params.waitMs));
+            // Services and watch-pattern jobs are expected to keep running, so they return at once unless asked to wait.
+            const waitsByDefault = !params.watch && params.purpose !== "service";
+            const requestedWait = params.waitMs ?? (waitsByDefault ? QUICK_START_WAIT_MS : undefined);
+            const waitMs = requestedWait === undefined ? undefined : Math.max(0, Math.min(30_000, requestedWait));
             if (waitMs !== undefined && !Number.isFinite(waitMs)) return reply("start failed: waitMs must be a number of milliseconds.");
             const job = manager.start({ command: params.command ?? "", cwd: ctx.cwd, ...(params.name ? { name: params.name } : {}), ...(params.watch ? { watch: params.watch } : {}),
               ...(params.notify !== undefined ? { notify: params.notify } : {}), ...(params.purpose ? { purpose: params.purpose } : {}) });

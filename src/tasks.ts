@@ -324,6 +324,38 @@ export class TodoStore {
     Object.assign(target, replacement, { id });
     return this.write(next);
   }
+  /**
+   * Complete or reopen many tasks at once, all or none, as one checkpoint write. A parent id
+   * applies to all its subtasks; unknown ids are rejected before anything changes.
+   */
+  setStatusMany(ids: readonly string[], status: "completed" | "pending"): string | undefined {
+    const unknown = this.unknownIds(ids);
+    if (unknown) return unknown;
+    const targets = new Set(ids);
+    const next = this.snapshot();
+    for (const item of next) {
+      const subtasks = item.subtasks ?? [];
+      if (item.id !== undefined && targets.has(item.id)) {
+        if (subtasks.length) for (const sub of subtasks) sub.status = status;
+        else item.status = status;
+      }
+      for (const sub of subtasks) if (sub.id !== undefined && targets.has(sub.id)) sub.status = status;
+    }
+    return this.write(next);
+  }
+  /** Delete many tasks at once, all or none. A parent id also deletes its subtasks. */
+  deleteMany(ids: readonly string[]): string | undefined {
+    const unknown = this.unknownIds(ids);
+    if (unknown) return unknown;
+    const targets = new Set(ids);
+    const kept = (item: TodoInput) => item.id === undefined || !targets.has(item.id);
+    const next = this.snapshot().filter(kept).map((item) => ({ ...item, subtasks: (item.subtasks ?? []).filter(kept) }));
+    return this.write(next);
+  }
+  private unknownIds(ids: readonly string[]): string | undefined {
+    const unknown = ids.filter((id) => !this.items.has(id));
+    return unknown.length ? `Unknown task ids (nothing was changed): ${unknown.join(", ")}.` : undefined;
+  }
   edit(id: string, title: string): boolean { return this.commit({ v: 1, op: "edit", id, title }); }
   /** On a parent, start runs its first open subtask; done/open complete or reopen all subtasks. */
   setStatus(id: string, status: TodoStatus): boolean {

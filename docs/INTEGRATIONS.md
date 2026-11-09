@@ -56,14 +56,14 @@ Hidden context messages (`pi-jar.plan-context`, `pi-jar.plan-reminder`, `pi-jar.
 
 | Tool | Purpose |
 | --- | --- |
-| `jar_todo` | branch-aware checklist: `todos` full-list writes (`content`, `status` pending/in_progress/completed, `activeForm`), plus `list`, `add`, `start`, `done`, `open`, `edit`, `delete` |
+| `jar_todo` | branch-aware checklist: `todos` full-list writes (`content`, `status` pending/in_progress/completed, `activeForm`), plus `list`, `add`, `start`, `done`, `open`, `edit`, `delete`; `done`/`open`/`remove`/`delete` take `ids` (or `all: true`) to change many tasks atomically |
 | `jar_ask` | structured questions answered in the TUI |
 | `jar_plan_submit` | submit a plan file for review; active only in plan mode |
 | `jar_goal` | `get`, `complete` (with evidence, audit phase only), `block`; active only while a goal runs |
 | `jar_suggest` | one next-prompt suggestion shown as composer ghost text; active only when suggestions are enabled |
-| `jar_shell` | background shells: `start` (`command`, `name`, `watch`, `notify`, `purpose`, `waitMs`), `list`, `peek`, `wait`, `output` (new lines; `all`), `kill` |
+| `jar_shell` | background shells: `start` (`command`, `name`, `watch`, `notify`, `purpose`, `waitMs`; waits 1.5 s by default unless `watch` or `purpose: service`), `list`, `peek`, `wait`, `output` (new lines; `all`), `kill` |
 | `jar_delegate` | retained subagents within the configured pool (`tasks: [{task, name?, role?, mode?, tools?, inheritTools?, skills?}]`) |
-| `jar_subagent` | moderator control: `peek`, `report`, `steer`, `ask`, `pause`, `resume`, `stop`, `discard` |
+| `jar_subagent` | moderator control: `peek`, `report`, `steer`, `ask`, `pause`, `resume`, `stop`, `discard`; `agents` applies one action to several agents in one call |
 | `jar_council` | exceptional scout vote with strict majority; never implements |
 | `jar_discuss` | parent-brokered Q/A between moderator and subagents |
 | `jar_advisor` | second opinion from the `advisor` role (`question?`, `draft?`) |

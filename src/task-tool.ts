@@ -22,6 +22,8 @@ const Parameters = Type.Object({
   }), { description: "For append: new tasks only. For update: exactly one updated task. With write (or no action): the complete list, replacing it." })),
   action: Type.Optional(Action),
   id: Type.Optional(Type.String({ description: "Stable task id for update/remove/start/done/open/edit/delete. On a parent, start runs its first open subtask; done/open apply to all its subtasks." })),
+  ids: Type.Optional(Type.Array(Type.String(), { maxItems: 50, description: "Bulk form of id for done/open/remove/delete: many tasks in one call, all or none." })),
+  all: Type.Optional(Type.Boolean({ description: "Bulk: apply done/open/remove/delete to every task." })),
   title: Type.Optional(Type.String({ description: "Task title for append/add/edit/update." })),
   status: Type.Optional(Status),
   activeForm: ActiveForm,
@@ -76,6 +78,26 @@ const line = (items: readonly Todo[], item: Todo) => {
 };
 const lines = (items: readonly Todo[]) => items.length ? items.map((item) => line(items, item)).join("\n") : "No tracked tasks.";
 
+const BULK_ACTIONS = ["done", "open", "remove", "delete"];
+const BULK_PAST: Record<string, string> = { done: "Completed", open: "Reopened", remove: "Removed", delete: "Removed" };
+
+/** Resolve `ids` / `all` into task ids, or explain why the bulk request is invalid. */
+function bulkIds(action: string, params: { id?: string; ids?: string[]; all?: boolean }, current: TodoStore): { ids: string[] } | { error: string } {
+  if (!BULK_ACTIONS.includes(action)) return { error: "ids and all only work with done, open, remove or delete." };
+  if (params.id !== undefined) return { error: "use id for one task, or ids/all for many, not both." };
+  if (params.all && params.ids !== undefined) return { error: "use ids or all, not both." };
+  if (params.ids !== undefined && !Array.isArray(params.ids)) return { error: "ids must be an array of task ids." };
+  const ids = params.all ? current.all().map((item) => item.id) : [...new Set(params.ids ?? [])];
+  if (!ids.length) return { error: params.all ? "there are no tracked tasks." : "ids needs at least one task id." };
+  return { ids };
+}
+
+function applyBulk(action: string, ids: string[], current: TodoStore): string | undefined {
+  if (action === "done") return current.setStatusMany(ids, "completed");
+  if (action === "open") return current.setStatusMany(ids, "pending");
+  return current.deleteMany(ids);
+}
+
 const REMINDER = "Keep using jar_todo to track progress: mark the next task in_progress before starting it and completed as soon as it is verified.";
 
 export function registerTaskTool(
@@ -87,7 +109,7 @@ export function registerTaskTool(
   pi.registerTool({
     name: "jar_todo",
     label: "tasks",
-    description: "Maintain session tasks. write sets the complete plan (omitted tasks are removed; items have content, status, optional activeForm and one level of `subtasks`, whose completion completes the parent). update changes one task by id, append adds new work mid-run, remove deletes a task tree; start/done/open/edit are short status operations. IDs are returned for every task.",
+    description: "Maintain session tasks. write sets the complete plan (omitted tasks are removed; items have content, status, optional activeForm and one level of `subtasks`, whose completion completes the parent). update changes one task by id, append adds new work mid-run, remove deletes a task tree; start/done/open/edit are short status operations; done/open/remove/delete also take `ids` (or all: true) to change many tasks atomically. IDs are returned for every task.",
     promptSnippet: "Track work with 3+ steps or several requests in jar_todo (skip trivial requests and questions): write the complete plan for a new request, start fresh once the old list is completed.",
     promptGuidelines: [
       "Keep exactly one leaf in_progress; mark it completed right after verifying it. Never batch completions or complete partial, failing or blocked work: keep it open and add a task for the blocker.",
@@ -103,6 +125,8 @@ export function registerTaskTool(
       let changedId: string | undefined;
       let error: string | undefined;
       let inputs: TodoInput[] | undefined;
+      let bulkCount = 0;
+      const bulk = params.ids !== undefined || params.all === true;
       if (params.todos !== undefined) {
         try {
           if (!Array.isArray(params.todos)) throw new Error();
@@ -110,7 +134,15 @@ export function registerTaskTool(
         } catch { error = "todos must be an array of task objects with array subtasks."; }
         if (!["write", "append", "update"].includes(action)) error = "todos may only be used with write, append, or update; no tasks were changed.";
       }
-      if (!error) switch (action) {
+      if (bulk && !error) {
+        const plan = bulkIds(action, params, current);
+        if ("error" in plan) error = plan.error;
+        else {
+          error = applyBulk(action, plan.ids, current);
+          if (!error) bulkCount = plan.ids.length;
+        }
+      }
+      if (!error && !bulk) switch (action) {
         case "list":
           break;
         case "write":
@@ -186,6 +218,8 @@ export function registerTaskTool(
         ? `Could not ${action} tasks: ${error} (${summary(items)}).`
         : action === "list"
           ? `Tasks (${summary(items)}):\n${lines(items)}`
+          : bulkCount
+            ? `${BULK_PAST[action]} ${bulkCount} task(s) (${summary(items)}).`
           : action === "start" && terseItem
             ? `Started task:\n${line(items, terseItem)}`
             : action === "done" && terseItem
@@ -213,7 +247,8 @@ export function registerTaskTool(
     },
     renderCall(args, theme) {
       let text = theme.fg("toolTitle", theme.bold("tasks"));
-      if (args.todos) text += " " + theme.fg("accent", `${args.action ?? "write"} · ${args.todos.length} item${args.todos.length === 1 ? "" : "s"}`);
+      if (args.ids || args.all) text += " " + theme.fg("accent", `${args.action ?? "list"} · ${args.all ? "all" : args.ids!.length} task(s)`);
+      else if (args.todos) text += " " + theme.fg("accent", `${args.action ?? "write"} · ${args.todos.length} item${args.todos.length === 1 ? "" : "s"}`);
       else {
         text += " " + theme.fg("accent", args.action ?? "list");
         if (args.title) text += " " + theme.fg("muted", args.title);
