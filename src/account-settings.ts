@@ -25,12 +25,18 @@ const MAX_REASON_CHARS = 200;
  * "use Pi's own login", which a restricted-but-corrupt policy must never fall back to.
  */
 export function unsafeAccountRouting(reason: string): AccountRoutingSettings {
-  return { mode: "sticky", accounts: [], invalid: reason.slice(0, MAX_REASON_CHARS) };
+  // The reason is a tag, not just text: it is always non-empty, so "present" and "truthy" can never differ.
+  return { mode: "sticky", accounts: [], invalid: reason.trim().slice(0, MAX_REASON_CHARS) || "unspecified reason" };
+}
+
+/** Test for the tag with `!== undefined`, never truthiness: an empty or non-string marker is still a lock. */
+export function isUnsafeRouting(policy: AccountRoutingSettings): boolean {
+  return policy.invalid !== undefined;
 }
 
 /** An explicit user choice of mode. It replaces an unsafe policy outright instead of inheriting its bad fields. */
 export function withRoutingMode(policy: AccountRoutingSettings, mode: AccountRoutingMode): AccountRoutingSettings {
-  if (policy.invalid) return { mode, accounts: [] };
+  if (isUnsafeRouting(policy)) return { mode, accounts: [] };
   return { ...policy, mode };
 }
 
@@ -42,7 +48,11 @@ export function parseAccountRouting(value: unknown): AccountRoutingSettings {
   if (value === undefined) return { mode: "off", accounts: [] };
   if (!value || typeof value !== "object" || Array.isArray(value)) return unsafeAccountRouting("account routing settings are not an object");
   const raw = value as Record<string, unknown>;
-  if (typeof raw.invalid === "string") return unsafeAccountRouting(raw.invalid);
+  if (raw.invalid !== undefined) {
+    // A stored marker stays a lock. A malformed one (empty, null, wrong type) is itself a reason to lock.
+    if (typeof raw.invalid === "string" && raw.invalid.trim()) return unsafeAccountRouting(raw.invalid);
+    return unsafeAccountRouting("stored routing lock is malformed");
+  }
   if (!ACCOUNT_ROUTING_MODES.includes(raw.mode as AccountRoutingMode)) return unsafeAccountRouting("account routing mode is not recognised");
   if (!Array.isArray(raw.accounts) || raw.accounts.length > 128 || !raw.accounts.every(validAccountName)) {
     return unsafeAccountRouting("account routing allowlist is malformed");

@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { AccountRouter, remainingQuota, retryAfter } from "../src/account-router.ts";
-import { parseAccountRouting, type AccountRoutingSettings } from "../src/account-settings.ts";
+import { parseAccountRouting, isUnsafeRouting, unsafeAccountRouting, type AccountRoutingSettings } from "../src/account-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, SETTINGS_FILE } from "../src/settings.ts";
 import { ProfileStore, ProfileLoadError, settingsAfterProfileFailure, PROFILE_FILE } from "../src/profiles.ts";
 import { Accounts, inheritedAccountRouting } from "../src/accounts.ts";
@@ -967,7 +967,11 @@ for (const [label, value] of [
   ["a malformed pin", { mode: "sticky", accounts: ["a"], pinned: { openai: "../bad" } }],
   ["a malformed allowlist", { mode: "sticky", accounts: ["Not A Name"] }],
   ["an unknown mode", { mode: "bogus", accounts: [] }],
-  ["a non-object policy", "sticky"]
+  ["a non-object policy", "sticky"],
+  ["an empty stored lock reason", { mode: "sticky", accounts: ["a"], invalid: "" }],
+  ["a whitespace-only lock reason", { mode: "sticky", accounts: ["a"], invalid: "   " }],
+  ["a null lock marker", { mode: "sticky", accounts: ["a"], invalid: null }],
+  ["a non-string lock marker", { mode: "sticky", accounts: ["a"], invalid: 0 }]
 ] as const) {
   test(`${label} in a present routing policy blocks requests instead of using Pi's primary login`, async t => {
     const policy = parseAccountRouting(value);
@@ -979,6 +983,18 @@ for (const [label, value] of [
     assert.deepEqual(primaryCalls, [], "no request reached the provider with Pi's primary credential");
   });
 }
+
+test("a stored lock marker with an empty reason cannot widen a restricted allowlist to every account", async t => {
+  // Two accounts and a primary login are available; the restricted policy named only "a".
+  const policy = parseAccountRouting({ mode: "sticky", accounts: ["a"], invalid: "" });
+  assert.equal(isUnsafeRouting(policy), true);
+  assert.deepEqual(policy.accounts, [], "the empty reason did not leave an unrestricted sticky policy");
+  assert.ok(policy.invalid && policy.invalid.length > 0, "the marker is always a non-empty tag");
+  assert.equal(unsafeAccountRouting("").invalid, "unspecified reason");
+  const { result, primaryCalls } = await requestUnderPolicy(t, policy);
+  assert.equal(result.stopReason, "error");
+  assert.deepEqual(primaryCalls, [], "neither unrestricted account routing nor the primary login served the request");
+});
 
 test("an absent routing policy stays off and uses Pi's own login", async t => {
   const { result, primaryCalls } = await requestUnderPolicy(t, parseAccountRouting(undefined));

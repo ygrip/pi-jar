@@ -4,7 +4,7 @@ import {
   type SimpleStreamOptions, type TranscriptContext, type AnyModel, type ProviderHeaders
 } from "@earendil-works/pi-ai";
 import type { AccountDefinition, AccountHealth, AccountStore } from "./account-store.ts";
-import type { AccountRoutingSettings } from "./account-settings.ts";
+import { isUnsafeRouting, type AccountRoutingSettings } from "./account-settings.ts";
 import { fetchQuota, QUOTA_TTL_MS, type Quota, type QuotaProvider } from "./quota.ts";
 
 /** Longest a quota-first request waits for first-ever quota probes. */
@@ -180,7 +180,7 @@ export class AccountRouter {
   /** `settings` is the policy captured when the request was dispatched; retries reuse it. */
   private async select(provider: Provider, model: AnyModel, tried: Set<string>, settings: AccountRoutingSettings, signal?: AbortSignal): Promise<AccountState> {
     if (this.configurationError) throw new RoutingError(this.configurationError);
-    if (settings.invalid) throw new RoutingError(`Account routing policy is unsafe (${settings.invalid}); reset it with /jar accounts mode`);
+    if (isUnsafeRouting(settings)) throw new RoutingError(`Account routing policy is unsafe (${settings.invalid}); reset it with /jar accounts mode`);
     // Provider IDs are the credential boundary. Model IDs are not globally unique,
     // so a same-named model from another provider must never select these credentials.
     if (model.provider !== provider.id) {

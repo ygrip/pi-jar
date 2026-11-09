@@ -4,7 +4,7 @@ import { popup } from "./popup.ts";
 import type { Accounts } from "./accounts.ts";
 import type { AccountDefinition } from "./account-store.ts";
 import type { AccountRouteStatus } from "./account-router.ts";
-import type { AccountRoutingSettings } from "./account-settings.ts";
+import { isUnsafeRouting, type AccountRoutingSettings } from "./account-settings.ts";
 
 export type AccountHubAction =
   | { kind: "close" | "add" | "routing" | "allowlist" | "switch" | "limits"; provider?: string }
@@ -211,7 +211,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         accountIndex = Math.max(0, Math.min(accountIndex, rows.length - 1));
         providerHits = []; accountHits = []; columnSplit = -1;
         const headerLine = header(" pi-jar  /  Accounts", available);
-        const summary = normal(` Pi native providers · ${allAccounts.length} accounts · ${policy().invalid ? "BLOCKED (unsafe policy)" : policy().mode.toUpperCase()} · selected: ${provider ?? "none"}`, available);
+        const summary = normal(` Pi native providers · ${allAccounts.length} accounts · ${isUnsafeRouting(policy()) ? "BLOCKED (unsafe policy)" : policy().mode.toUpperCase()} · selected: ${provider ?? "none"}`, available);
         const searchLine = searching ? search.render(Math.max(1, available))[0]! : theme.fg("dim", " / search · Tab switch pane · Enter open · Esc close");
         const out = [headerLine, summary, normal(searchLine, available), theme.fg("dim", "─".repeat(available))];
         const detail = (item: (typeof rows)[number], index: number, max: number): string => {

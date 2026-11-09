@@ -5,7 +5,7 @@ import { AccountRouter } from "./account-router.ts";
 import { QUOTA_PREFIX, QUOTA_TTL_MS } from "./quota.ts";
 import { promptText } from "./dialogs.ts";
 import { cleanText } from "./status.ts";
-import { ACCOUNT_ROUTING_ENV, ACCOUNT_ROUTING_MODES, parseAccountRouting, unsafeAccountRouting, withRoutingMode, type AccountRoutingSettings } from "./account-settings.ts";
+import { ACCOUNT_ROUTING_ENV, ACCOUNT_ROUTING_MODES, isUnsafeRouting, parseAccountRouting, unsafeAccountRouting, withRoutingMode, type AccountRoutingSettings } from "./account-settings.ts";
 
 /** Parent settings are captured at each child launch; no secrets travel in the environment. */
 export function inheritedAccountRouting(): AccountRoutingSettings | undefined {
@@ -65,8 +65,8 @@ export class Accounts {
       ctx.ui.setStatus(QUOTA_PREFIX + provider, status);
     };
     const policy = this.settings();
-    if (policy.invalid) {
-      this.blockUnsafePolicy(ctx, policy.invalid);
+    if (isUnsafeRouting(policy)) {
+      this.blockUnsafePolicy(ctx, policy.invalid!);
       return;
     }
     if (policy.mode === "off") {
@@ -119,7 +119,7 @@ export class Accounts {
   }
   private requireTrustedPolicy(): AccountRoutingSettings {
     const policy = this.settings();
-    if (policy.invalid) {
+    if (isUnsafeRouting(policy)) {
       throw new Error(`Account routing policy is unsafe (${policy.invalid}). Reset it first with /jar accounts mode off|sticky|round-robin|quota-first`);
     }
     return policy;
@@ -246,7 +246,7 @@ export class Accounts {
     let mode = choice;
     if (choice === "on") {
       mode = this.settings().mode;
-      if (mode === "off" || this.settings().invalid) mode = "sticky";
+      if (mode === "off" || isUnsafeRouting(this.settings())) mode = "sticky";
     }
     if (!ACCOUNT_ROUTING_MODES.includes(mode as never)) {
       throw new Error("Usage: /jar routing [on|off|status|sticky|round-robin|quota-first]");
@@ -266,7 +266,7 @@ export class Accounts {
         return `${account.name}: ${account.provider} · ${quota}${account.lastUsed ? " · last used" : ""}${warning}`;
       });
       const policy = this.settings();
-      const state = policy.invalid ? `BLOCKED, unsafe policy (${policy.invalid}); reset with /jar accounts mode off|sticky|round-robin|quota-first` : policy.mode;
+      const state = isUnsafeRouting(policy) ? `BLOCKED, unsafe policy (${policy.invalid}); reset with /jar accounts mode off|sticky|round-robin|quota-first` : policy.mode;
       ctx.ui.notify(`Account routing: ${state}\n${rows.join("\n") || "No accounts configured"}`, "info");
       return;
     }
