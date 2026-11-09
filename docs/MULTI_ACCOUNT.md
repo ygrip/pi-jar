@@ -114,7 +114,9 @@ Pi 1.5's public `ModelRuntime` owns credential persistence, cross-process refres
 
 Provider endpoints and non-auth request options still follow your trusted Pi provider configuration. Account routing replaces request credentials; do not put additional credential headers in model configuration. Account files remain sensitive even if their labels and quota values are not secrets. Back them up only to a protected location, and never commit them. Removing local credentials does not revoke a provider's session; revoke access through the provider when retiring an account.
 
-**Anthropic compatibility:** Both Codex and Anthropic use the registered Pi provider's OAuth implementation for browser authorization, token refresh, and model discovery. They use separate provider-scoped routing pools. Linked native Anthropic sessions are detected through Pi's OAuth credential metadata; an Anthropic API key or environment variable is not misclassified as an OAuth subscription.\n\nThe design is informed by [pi-multi-pass](https://github.com/hjanuschka/pi-multi-pass), but deliberately omits provider aliases, cross-provider chains, routing scripts and scheduled pools.
+**Anthropic compatibility:** Both Codex and Anthropic use the registered Pi provider's OAuth implementation for browser authorization, token refresh, and model discovery. They use separate provider-scoped routing pools. Linked native Anthropic sessions are detected through Pi's OAuth credential metadata; an Anthropic API key or environment variable is not misclassified as an OAuth subscription.
+
+The design is informed by [pi-multi-pass](https://github.com/hjanuschka/pi-multi-pass), but deliberately omits provider aliases, cross-provider chains, routing scripts and scheduled pools.
 
 ## Unsafe or unreadable routing policy
 
