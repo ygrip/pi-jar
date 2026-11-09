@@ -194,7 +194,7 @@ export class Accounts {
       },
       notify: event => {
         if (event.type === "auth_url") {
-          ctx.ui.notify(`Open this login URL in your browser: ${event.url}\nIf the localhost callback is not reachable (SSH/container), paste the full redirected URL in the next prompt, or retry using device-code login.`, "info");
+          ctx.ui.notify(`Open this login URL in your browser: ${event.url}\n${event.instructions ?? "If the callback is unreachable (SSH/container), paste the redirected URL when prompted."}`, "info");
           this.openBrowser(event.url);
         }
         else if (event.type === "device_code") ctx.ui.notify(
