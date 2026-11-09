@@ -19,7 +19,7 @@ import { GoalLoop } from "../src/goal-loop.ts";
 import { registerTodoGate } from "../src/todo-gate.ts";
 import { FOOTER_FIELDS } from "../src/footer-settings.ts";
 import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, type JarVisualSettings } from "../src/settings.ts";
-import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY, conversationStarted, pinnedProfileId } from "../src/profiles.ts";
+import { ProfileStore, PROFILE_FILE, PROFILE_ENTRY, conversationStarted, pinnedProfileId, settingsAfterProfileFailure } from "../src/profiles.ts";
 import { openJarSettings, type PiPreferences } from "../src/settings-ui.ts";
 import { openProfiles, type ProfileAction } from "../src/profile-ui.ts";
 import { pickSession } from "../src/session-ui.ts";
@@ -356,7 +356,8 @@ export default function piJar(pi: ExtensionAPI): void {
       return { roles: profile.roles, profileId: profile.id };
     } catch (error) {
       if (previousTheme) { try { applyProfileTheme(previousTheme, ctx); } catch {} }
-      profileStore = undefined; visualSettings = loadVisualSettings(getAgentDir()); composer.setProfile("Default");
+      // An unreadable profiles file hides the account-routing policy: lock routing, never fall back to "off".
+      profileStore = undefined; visualSettings = settingsAfterProfileFailure(getAgentDir(), error); composer.setProfile("Default");
       ctx.ui.notify(`Could not load profiles: ${(error as Error).message}`, "warning");
       return undefined;
     }

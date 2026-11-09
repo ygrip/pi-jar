@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { ACCENT_NAMES } from "./accent.ts";
 import { DEFAULT_FOOTER_SETTINGS, FOOTER_FIELDS, type FooterSettings } from "./footer-settings.ts";
 import { ICON_SETS, type IconSet } from "./icons.ts";
-import { parseAccountRouting, type AccountRoutingSettings } from "./account-settings.ts";
+import { parseAccountRouting, unsafeAccountRouting, type AccountRoutingSettings } from "./account-settings.ts";
 
 export type JarAccent = "follow" | "default" | (typeof ACCENT_NAMES)[number];
 export interface JarVisualSettings {
@@ -46,19 +46,28 @@ export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SE
   return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 2, advisor: true, advisorGates: false, cacheDiagnostics: true, readCache: false, icons: "unicode", accountRouting: { mode: "off", accounts: [] }, footer: { ...footer } };
 }
 
+/**
+ * Defaults for a settings file that exists but cannot be used. Its account-routing policy is unknown,
+ * so it is locked rather than reset to "off" (which would silently use Pi's own login).
+ */
+function unreadableSettings(reason: string): JarVisualSettings {
+  return { ...defaultVisualSettings(), accountRouting: unsafeAccountRouting(`pi-jar settings ${reason}`) };
+}
+
 /** Legacy footer choices are imported only while the new file is absent. Never modify the old file. */
 export function loadVisualSettings(directory: string): JarVisualSettings {
   let text: string;
   try { text = readFileSync(join(directory, SETTINGS_FILE), "utf8"); }
   catch (error) {
+    // A missing file is a fresh install; any other read failure hides a policy that may exist.
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaultVisualSettings();
-    return defaultVisualSettings();
+    return unreadableSettings("file cannot be read");
   }
   let raw: unknown;
-  try { raw = JSON.parse(text); } catch { return defaultVisualSettings(); }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return defaultVisualSettings();
+  try { raw = JSON.parse(text); } catch { return unreadableSettings("file is not valid JSON"); }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return unreadableSettings("file is malformed");
   const value = raw as Record<string, unknown>;
-  if (value.version !== 1) return defaultVisualSettings();
+  if (value.version !== 1) return unreadableSettings("file has an unknown version");
   const fallback = defaultVisualSettings();
   const footer = value.footer && typeof value.footer === "object" && !Array.isArray(value.footer)
     ? value.footer as Record<string, unknown> : {};

@@ -211,7 +211,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         accountIndex = Math.max(0, Math.min(accountIndex, rows.length - 1));
         providerHits = []; accountHits = []; columnSplit = -1;
         const headerLine = header(" pi-jar  /  Accounts", available);
-        const summary = normal(` Pi native providers · ${allAccounts.length} accounts · ${policy().mode.toUpperCase()} · selected: ${provider ?? "none"}`, available);
+        const summary = normal(` Pi native providers · ${allAccounts.length} accounts · ${policy().invalid ? "BLOCKED (unsafe policy)" : policy().mode.toUpperCase()} · selected: ${provider ?? "none"}`, available);
         const searchLine = searching ? search.render(Math.max(1, available))[0]! : theme.fg("dim", " / search · Tab switch pane · Enter open · Esc close");
         const out = [headerLine, summary, normal(searchLine, available), theme.fg("dim", "─".repeat(available))];
         const detail = (item: (typeof rows)[number], index: number, max: number): string => {

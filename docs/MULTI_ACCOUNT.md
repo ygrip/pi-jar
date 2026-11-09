@@ -113,3 +113,9 @@ Pi 1.5's public `ModelRuntime` owns credential persistence, cross-process refres
 Provider endpoints and non-auth request options still follow your trusted Pi provider configuration. Account routing replaces request credentials; do not put additional credential headers in model configuration. Account files remain sensitive even if their labels and quota values are not secrets. Back them up only to a protected location, and never commit them. Removing local credentials does not revoke a provider's session; revoke access through the provider when retiring an account.
 
 The design is informed by [pi-multi-pass](https://github.com/hjanuschka/pi-multi-pass), but deliberately omits provider aliases, cross-provider chains, routing scripts and scheduled pools.
+
+## Unsafe or unreadable routing policy
+
+`off` means "use Pi's own login", so it is only the result of a genuinely **absent** policy (a profile or settings file from before account routing, or a fresh install). A policy that is present but cannot be trusted **locks routing** instead: every request is refused with an `unsafe` error and never reaches a provider with Pi's primary credential. This covers a malformed mode, allowlist or pin, a profiles file that cannot be loaded, a legacy settings file that is unreadable, malformed JSON or an unknown version, and an inherited subagent policy that cannot be parsed. The lock is saved with the profile, shown as `BLOCKED` in the hub, settings and `/jar accounts list`, and passed to subagents.
+
+If no accounts are configured there is nothing a policy could restrict, so Pi is left on its own login rather than locked out. `pin` and `use` refuse while the policy is locked. Choosing a mode (`/jar accounts mode off|sticky|round-robin|quota-first`, or the settings row) resets the policy to a clean one, dropping the bad fields.

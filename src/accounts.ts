@@ -5,14 +5,15 @@ import { AccountRouter } from "./account-router.ts";
 import { QUOTA_PREFIX, QUOTA_TTL_MS } from "./quota.ts";
 import { promptText } from "./dialogs.ts";
 import { cleanText } from "./status.ts";
-import { ACCOUNT_ROUTING_ENV, ACCOUNT_ROUTING_MODES, parseAccountRouting, type AccountRoutingSettings } from "./account-settings.ts";
+import { ACCOUNT_ROUTING_ENV, ACCOUNT_ROUTING_MODES, parseAccountRouting, unsafeAccountRouting, withRoutingMode, type AccountRoutingSettings } from "./account-settings.ts";
 
 /** Parent settings are captured at each child launch; no secrets travel in the environment. */
 export function inheritedAccountRouting(): AccountRoutingSettings | undefined {
   const value = process.env[ACCOUNT_ROUTING_ENV];
   if (!value) return undefined;
+  // A child that cannot read its parent's policy must refuse requests, not start unrouted on Pi's own login.
   try { return parseAccountRouting(JSON.parse(value)); }
-  catch { throw new Error("Invalid inherited account-routing settings"); }
+  catch { return unsafeAccountRouting("inherited account-routing settings are not valid JSON"); }
 }
 export class Accounts {
   readonly store: AccountStore;
@@ -63,14 +64,13 @@ export class Accounts {
       }
       ctx.ui.setStatus(QUOTA_PREFIX + provider, status);
     };
-    if (this.settings().mode === "off") {
-      if (ctx.hasUI && this.originals.size && typeof ctx.ui.setStatus === "function") {
-        ctx.ui.setStatus("pi-jar.account", undefined);
-        for (const id of this.originals.keys()) ctx.ui.setStatus(QUOTA_PREFIX + id, undefined);
-      }
-      for (const provider of this.originals.values()) this.pi.registerProvider(provider);
-      this.originals.clear();
-      this.router.configurationError = undefined;
+    const policy = this.settings();
+    if (policy.invalid) {
+      this.blockUnsafePolicy(ctx, policy.invalid);
+      return;
+    }
+    if (policy.mode === "off") {
+      this.restoreNativeProviders(ctx);
       return;
     }
     let definitions: AccountDefinition[];
@@ -89,6 +89,40 @@ export class Accounts {
       this.originals.delete(id);
     }
     this.installProviders(ctx, providers);
+  }
+  private restoreNativeProviders(ctx: ExtensionContext): void {
+    if (ctx.hasUI && this.originals.size && typeof ctx.ui.setStatus === "function") {
+      ctx.ui.setStatus("pi-jar.account", undefined);
+      for (const id of this.originals.keys()) ctx.ui.setStatus(QUOTA_PREFIX + id, undefined);
+    }
+    for (const provider of this.originals.values()) this.pi.registerProvider(provider);
+    this.originals.clear();
+    this.router.configurationError = undefined;
+  }
+  /**
+   * The configured policy is present but unreadable or malformed. Block every provider so no request
+   * silently falls back to Pi's own login. With no accounts configured there is nothing a policy could
+   * restrict, so Pi is left alone rather than locked out of its only credentials.
+   */
+  private blockUnsafePolicy(ctx: ExtensionContext, reason: string): void {
+    let hasAccounts = true;
+    try { hasAccounts = this.store.list().length > 0; }
+    catch { /* unreadable account storage counts as "has accounts": fail closed */ }
+    if (!hasAccounts) {
+      this.restoreNativeProviders(ctx);
+      return;
+    }
+    this.router.configurationError = `Account routing policy is unsafe (${reason}); requests are blocked so Pi's main login is not used. ` +
+      "Reset it with /jar accounts mode off|sticky|round-robin|quota-first";
+    this.installProviders(ctx, new Set(ctx.modelRegistry.getAll().map(model => model.provider)));
+    if (ctx.hasUI) ctx.ui.notify(this.router.configurationError, "error");
+  }
+  private requireTrustedPolicy(): AccountRoutingSettings {
+    const policy = this.settings();
+    if (policy.invalid) {
+      throw new Error(`Account routing policy is unsafe (${policy.invalid}). Reset it first with /jar accounts mode off|sticky|round-robin|quota-first`);
+    }
+    return policy;
   }
   private installProviders(ctx: ExtensionContext, providers: ReadonlySet<string>): void {
     for (const id of providers) {
@@ -143,7 +177,7 @@ export class Accounts {
   }
   /** Pin a named account for one provider, or restore automatic routing for that provider. */
   pin(providerId: string, name: string | undefined, ctx: ExtensionContext): void {
-    const current = this.settings();
+    const current = this.requireTrustedPolicy();
     if (name) {
       const account = this.store.list().find(item => item.name === name);
       if (!account || account.provider !== providerId) {
@@ -212,7 +246,7 @@ export class Accounts {
     let mode = choice;
     if (choice === "on") {
       mode = this.settings().mode;
-      if (mode === "off") mode = "sticky";
+      if (mode === "off" || this.settings().invalid) mode = "sticky";
     }
     if (!ACCOUNT_ROUTING_MODES.includes(mode as never)) {
       throw new Error("Usage: /jar routing [on|off|status|sticky|round-robin|quota-first]");
@@ -231,7 +265,9 @@ export class Accounts {
         if (account.warning) warning = ` · ${account.warning}`;
         return `${account.name}: ${account.provider} · ${quota}${account.lastUsed ? " · last used" : ""}${warning}`;
       });
-      ctx.ui.notify(`Account routing: ${this.settings().mode}\n${rows.join("\n") || "No accounts configured"}`, "info");
+      const policy = this.settings();
+      const state = policy.invalid ? `BLOCKED, unsafe policy (${policy.invalid}); reset with /jar accounts mode off|sticky|round-robin|quota-first` : policy.mode;
+      ctx.ui.notify(`Account routing: ${state}\n${rows.join("\n") || "No accounts configured"}`, "info");
       return;
     }
     if (action === "logout" && providerId && !name) {
@@ -258,7 +294,7 @@ export class Accounts {
       return;
     }
     if (action === "mode" && ACCOUNT_ROUTING_MODES.includes(providerId as never) && !name) {
-      this.update({ ...this.settings(), mode: providerId as AccountRoutingSettings["mode"] }, ctx);
+      this.update(withRoutingMode(this.settings(), providerId as AccountRoutingSettings["mode"]), ctx);
       await this.ready(ctx);
       return;
     }
@@ -269,7 +305,7 @@ export class Accounts {
         const known = new Set(this.store.list().map(account => account.name));
         if (!accounts.every(account => known.has(account))) throw new Error("Unknown account in profile allowlist");
       }
-      const current = this.settings();
+      const current = this.requireTrustedPolicy();
       // An allowlist should not silently strand a pin on an excluded account.
       const pins = Object.fromEntries(Object.entries(current.pinned ?? {})
         .filter(([, account]) => !accounts.length || accounts.includes(account)));

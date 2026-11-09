@@ -11,8 +11,8 @@ import { fileURLToPath } from "node:url";
 import { ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { AccountRouter, remainingQuota, retryAfter } from "../src/account-router.ts";
 import { parseAccountRouting, type AccountRoutingSettings } from "../src/account-settings.ts";
-import { defaultVisualSettings, loadVisualSettings, saveVisualSettings } from "../src/settings.ts";
-import { ProfileStore } from "../src/profiles.ts";
+import { defaultVisualSettings, loadVisualSettings, saveVisualSettings, SETTINGS_FILE } from "../src/settings.ts";
+import { ProfileStore, ProfileLoadError, settingsAfterProfileFailure, PROFILE_FILE } from "../src/profiles.ts";
 import { Accounts, inheritedAccountRouting } from "../src/accounts.ts";
 import { ACCOUNT_ROUTING_ENV } from "../src/account-settings.ts";
 import { askRole, SideUsage } from "../src/side-model.ts";
@@ -155,8 +155,8 @@ test("pin commands validate provider ownership, persist profile policy, and clea
   accounts.pin("openai", undefined, ctx as never);
   assert.equal(config.pinned, undefined);
   assert.ok(notices.some(text => text.includes("Automatic account selection restored")));
-  assert.deepEqual(parseAccountRouting({ mode: "sticky", accounts: [], pinned: { openai: "../bad" } }),
-    { mode: "off", accounts: [] }, "invalid pinned identities fail closed");
+  assert.equal(parseAccountRouting({ mode: "sticky", accounts: [], pinned: { openai: "../bad" } }).invalid !== undefined, true,
+    "invalid pinned identities lock routing instead of turning it off");
 });
 
 test("429 retries once per account before output, with shared cooldown", async t => {
@@ -225,8 +225,9 @@ test("routing settings migrate safely and persist with profiles without secrets"
   const reloaded = new ProfileStore(f.directory).list().find(item => item.id === profile.id)!;
   assert.deepEqual(reloaded.settings.accountRouting, settings.accountRouting);
   assert.equal(reloaded.roles.roles.worker, "openai/test-model");
-  assert.deepEqual(parseAccountRouting({ mode: "unknown", accounts: [] }), { mode: "off", accounts: [] });
-  assert.deepEqual(parseAccountRouting({ mode: "sticky", accounts: ["../escape"] }), { mode: "off", accounts: [] });
+  assert.equal(parseAccountRouting({ mode: "unknown", accounts: [] }).invalid !== undefined, true);
+  assert.equal(parseAccountRouting({ mode: "sticky", accounts: ["../escape"] }).invalid !== undefined, true);
+  assert.deepEqual(parseAccountRouting(undefined), { mode: "off", accounts: [] }, "only an absent policy means off");
 });
 
 for (const [header, expected] of [["120", 121000], ["Thu, 01 Jan 1970 00:02:00 GMT", 120000], ["invalid", 61000]] as const) {
@@ -945,4 +946,104 @@ test("an account created before identity epochs existed is given one on first us
   assert.equal(f.store.health("b").credentialGeneration, undefined);
   await f.router.wrap(f.provider).streamSimple(model, context).result();
   assert.ok(f.store.health("b").credentialGeneration);
+});
+
+/** Installs `policy` over a configured account while Pi's own login ("missing" key) is available, then sends one request. */
+async function requestUnderPolicy(t: TestContext, policy: AccountRoutingSettings, withAccounts = true) {
+  const f = fixture(t);
+  const directory = withAccounts ? f.directory : mkdtempSync(join(tmpdir(), "pi-jar-no-accounts-"));
+  t.after(() => { if (!withAccounts) rmSync(directory, { recursive: true, force: true }); });
+  const registered = new Map<string, Provider>();
+  const accounts = new Accounts({ registerProvider: (provider: Provider) => registered.set(provider.id, provider) } as never,
+    () => policy, () => {}, directory);
+  const ctx = { hasUI: false, modelRegistry: { getAll: () => [model], getProvider: () => f.provider, refresh: async () => {} }, ui: { notify() {} } };
+  await accounts.ready(ctx as never);
+  const provider = registered.get("openai") ?? f.provider;
+  const result = await provider.streamSimple(model, context).result();
+  return { result, primaryCalls: f.calls, accounts };
+}
+
+for (const [label, value] of [
+  ["a malformed pin", { mode: "sticky", accounts: ["a"], pinned: { openai: "../bad" } }],
+  ["a malformed allowlist", { mode: "sticky", accounts: ["Not A Name"] }],
+  ["an unknown mode", { mode: "bogus", accounts: [] }],
+  ["a non-object policy", "sticky"]
+] as const) {
+  test(`${label} in a present routing policy blocks requests instead of using Pi's primary login`, async t => {
+    const policy = parseAccountRouting(value);
+    assert.ok(policy.invalid, "the malformed policy is flagged, not reset to off");
+    assert.deepEqual(parseAccountRouting(JSON.parse(JSON.stringify(policy))).invalid, policy.invalid, "the lock survives save and reload");
+    const { result, primaryCalls } = await requestUnderPolicy(t, policy);
+    assert.equal(result.stopReason, "error");
+    assert.match(result.errorMessage ?? "", /unsafe/);
+    assert.deepEqual(primaryCalls, [], "no request reached the provider with Pi's primary credential");
+  });
+}
+
+test("an absent routing policy stays off and uses Pi's own login", async t => {
+  const { result, primaryCalls } = await requestUnderPolicy(t, parseAccountRouting(undefined));
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(primaryCalls, ["missing"]);
+});
+
+test("a corrupt profiles file with no legacy settings locks routing", async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.directory, PROFILE_FILE), "{ not json");
+  let failure: unknown;
+  try { new ProfileStore(f.directory); } catch (error) { failure = error; }
+  assert.ok(failure instanceof ProfileLoadError);
+  assert.equal(existsSync(join(f.directory, SETTINGS_FILE)), false);
+  const settings = settingsAfterProfileFailure(f.directory, failure);
+  assert.ok(settings.accountRouting.invalid);
+  const { result, primaryCalls } = await requestUnderPolicy(t, settings.accountRouting);
+  assert.equal(result.stopReason, "error");
+  assert.deepEqual(primaryCalls, []);
+  // Failures that are not about the profiles file keep the plain legacy settings.
+  assert.deepEqual(settingsAfterProfileFailure(f.directory, new Error("theme unavailable")).accountRouting, { mode: "off", accounts: [] });
+});
+
+for (const [label, content] of [["malformed JSON", "{ not json"], ["an unknown version", JSON.stringify({ version: 2 })], ["a non-object", "[]"]] as const) {
+  test(`corrupt legacy settings (${label}) lock routing`, async t => {
+    const f = fixture(t);
+    writeFileSync(join(f.directory, SETTINGS_FILE), content);
+    const settings = loadVisualSettings(f.directory);
+    assert.ok(settings.accountRouting.invalid);
+    const { result, primaryCalls } = await requestUnderPolicy(t, settings.accountRouting);
+    assert.equal(result.stopReason, "error");
+    assert.deepEqual(primaryCalls, []);
+  });
+}
+
+test("a fresh install without settings files is unaffected", t => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-jar-fresh-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  assert.deepEqual(loadVisualSettings(directory).accountRouting, { mode: "off", accounts: [] });
+});
+
+test("an unsafe policy with no accounts configured does not lock Pi out of its only login", async t => {
+  const { result, primaryCalls } = await requestUnderPolicy(t, parseAccountRouting("sticky"), false);
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(primaryCalls, ["missing"]);
+});
+
+test("an unsafe policy is reset only by an explicit mode choice; pin and use refuse until then", async t => {
+  const f = fixture(t);
+  let policy = parseAccountRouting({ mode: "sticky", accounts: ["a"], pinned: { openai: "../bad" } });
+  const notices: string[] = [];
+  const accounts = new Accounts({ registerProvider() {} } as never, () => policy, next => { policy = next; }, f.directory);
+  const ctx = { hasUI: false, ui: { notify: (text: string) => notices.push(text) },
+    modelRegistry: { getAll: () => [], getProvider: () => undefined, refresh: async () => {} } };
+  assert.throws(() => accounts.pin("openai", "a", ctx as never), /unsafe/);
+  await assert.rejects(() => accounts.command("use all", ctx as never), /unsafe/);
+  await accounts.command("list", ctx as never);
+  assert.match(notices.at(-1) ?? "", /BLOCKED, unsafe policy/);
+  await accounts.command("mode off", ctx as never);
+  assert.deepEqual(policy, { mode: "off", accounts: [] }, "the bad fields were dropped, not inherited");
+});
+
+test("an unreadable inherited policy locks the child instead of failing the extension load", () => {
+  const previous = process.env[ACCOUNT_ROUTING_ENV];
+  process.env[ACCOUNT_ROUTING_ENV] = "{ not json";
+  try { assert.ok(inheritedAccountRouting()?.invalid); }
+  finally { if (previous === undefined) delete process.env[ACCOUNT_ROUTING_ENV]; else process.env[ACCOUNT_ROUTING_ENV] = previous; }
 });

@@ -180,6 +180,7 @@ export class AccountRouter {
   /** `settings` is the policy captured when the request was dispatched; retries reuse it. */
   private async select(provider: Provider, model: AnyModel, tried: Set<string>, settings: AccountRoutingSettings, signal?: AbortSignal): Promise<AccountState> {
     if (this.configurationError) throw new RoutingError(this.configurationError);
+    if (settings.invalid) throw new RoutingError(`Account routing policy is unsafe (${settings.invalid}); reset it with /jar accounts mode`);
     // Provider IDs are the credential boundary. Model IDs are not globally unique,
     // so a same-named model from another provider must never select these credentials.
     if (model.provider !== provider.id) {

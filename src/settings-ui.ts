@@ -5,7 +5,7 @@ import { FOOTER_FIELDS, type FooterField } from "./footer-settings.ts";
 import { ICON_SETS } from "./icons.ts";
 import { GOAL_ROUND_CHOICES, MAX_SUBAGENT_CHOICES, type JarAccent, type JarVisualSettings } from "./settings.ts";
 import type { ProfileAction } from "./profile-ui.ts";
-import { ACCOUNT_ROUTING_MODES } from "./account-settings.ts";
+import { ACCOUNT_ROUTING_MODES, withRoutingMode } from "./account-settings.ts";
 
 const LABELS: Record<FooterField, string> = {
   model: "Model", effort: "Model effort", sessionName: "Session name", cwd: "Working directory",
@@ -81,9 +81,10 @@ export async function openJarSettings(
         else if (index === 6) update({ ...state, cacheDiagnostics: !state.cacheDiagnostics });
         else if (index === 7) update({ ...state, readCache: !state.readCache });
         else if (index === 8) {
-          const currentIndex = ACCOUNT_ROUTING_MODES.indexOf(state.accountRouting.mode);
+          // An unsafe policy cycles to "off" first: the explicit reset to Pi's own login.
+          const currentIndex = ACCOUNT_ROUTING_MODES.indexOf(state.accountRouting.invalid ? "quota-first" : state.accountRouting.mode);
           const mode = ACCOUNT_ROUTING_MODES[(currentIndex + 1) % ACCOUNT_ROUTING_MODES.length]!;
-          update({ ...state, accountRouting: { ...state.accountRouting, mode } });
+          update({ ...state, accountRouting: withRoutingMode(state.accountRouting, mode) });
         }
         else if (index === 9 && manageAccounts) {
           lastPage = page;
@@ -179,7 +180,7 @@ export async function openJarSettings(
             row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates),
             row(6, "Cache diagnostics (explain cache breaks)", state.cacheDiagnostics ? "ON" : "OFF", state.cacheDiagnostics),
             row(7, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache),
-            row(8, "Account routing policy", state.accountRouting.mode.toUpperCase(), state.accountRouting.mode !== "off"),
+            row(8, "Account routing policy", state.accountRouting.invalid ? "BLOCKED (unsafe)" : state.accountRouting.mode.toUpperCase(), state.accountRouting.mode !== "off"),
             ...(manageAccounts ? [row(9, "Manage accounts…", "OPEN", true)] : [])
           ] : page === "profiles" ? [
             row(0, "Switch profile…", profiles!.activeName(), true),
