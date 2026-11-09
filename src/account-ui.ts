@@ -16,6 +16,7 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
     return;
   }
 
+  let loginCompleted = false;
   const definitions = (): AccountDefinition[] => accounts.store.list();
   const providers = (): string[] => [...new Set([
     ...ctx.modelRegistry.getAll().map(model => model.provider),
@@ -71,6 +72,7 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
     // Match Pi's /login: let the registered provider choose its own browser,
     // device-code and fallback methods, without a duplicate Codex-specific picker.
     await accounts.command(`login ${providerId} ${name}`, ctx);
+    loginCompleted = true;
   };
 
   const switchAccount = async (providerId?: string): Promise<void> => {
@@ -212,6 +214,7 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
         const account = definitions().find(item => item.provider === action.provider && item.name === action.name);
         if (account) await manageAccount(account);
       } else if (action.kind === "auto") accounts.pin(action.provider, undefined, ctx);
+      if (loginCompleted) return;
     } catch (error) { notifyError(error); }
   }
 }

@@ -8,6 +8,7 @@ import { createAssistantMessageEventStream, normalizeContext,
 import { AccountStore } from "../src/account-store.ts";
 import { AccountRouter } from "../src/account-router.ts";
 import { Accounts } from "../src/accounts.ts";
+import { showDeviceCodeDialog } from "../src/device-login.ts";
 import { formatLoginLink, loginBrowserCommand } from "../src/login-browser.ts";
 import { hyperlink, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import type { AccountRoutingSettings } from "../src/account-settings.ts";
@@ -155,6 +156,79 @@ test("browser opener is shell-free, cross-platform and rejects unsafe URL scheme
   for (const bad of ["javascript:alert(1)", "file:///etc/passwd", "ftp://example.com", "https://test.com\ncommand", "not a URL"]) {
     assert.equal(loginBrowserCommand(bad), undefined);
   }
+});
+
+for (const outcome of ["success", "error", "cancel"] as const) {
+  test(`device login closes its dialog on ${outcome}`, async t => {
+    const dir = fixture(t);
+    const native = provider("openai-codex", []).provider;
+    let started!: () => void;
+    let resolveLogin!: () => void;
+    let rejectLogin!: (error: Error) => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const pending = new Promise<void>((resolve, reject) => { resolveLogin = resolve; rejectLogin = reject; });
+    let aborted = false;
+    native.auth.oauth!.login = async interaction => {
+      interaction.notify({ type: "device_code", verificationUri: "https://example.test/device", userCode: "ABCD-EFGH" });
+      interaction.signal.addEventListener("abort", () => { aborted = true; rejectLogin(new Error("cancelled")); }, { once: true });
+      started();
+      await pending;
+      return oauth("device");
+    };
+    let component: any;
+    let closed = false;
+    const opened: string[] = [];
+    const ctx = {
+      hasUI: true, mode: "tui", isIdle: () => true,
+      ui: {
+        notify() {},
+        custom(factory: Function) {
+          return new Promise<void>(resolve => {
+            component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text }, {}, () => { closed = true; resolve(); });
+          });
+        }
+      },
+      modelRegistry: { getProvider: () => native, getAll: () => [], refresh: async () => {} }
+    };
+    const accounts = new Accounts({ registerProvider() {} } as never, () => ({ mode: "off", accounts: [] }), () => {}, dir,
+      url => opened.push(url));
+    const login = accounts.command("login-device openai-codex work", ctx as never);
+    await ready;
+    const rendered = component.render(80).join("\n");
+    assert.match(rendered, /ABCD-EFGH/);
+    component.handleInput("o");
+    assert.deepEqual(opened, ["https://example.test/device"]);
+    if (outcome === "success") resolveLogin();
+    else if (outcome === "error") rejectLogin(new Error("provider failed"));
+    else component.handleInput("q");
+    if (outcome === "success") await login;
+    else if (outcome === "cancel") await assert.rejects(login, /aborted|cancelled/i);
+    else await assert.rejects(login, /provider failed/);
+    assert.equal(closed, true);
+    assert.equal(aborted, outcome === "cancel");
+  });
+}
+
+test("device login respects provider-disabled browser and clipboard actions", () => {
+  let component: any;
+  let opened = false;
+  let cancelled = false;
+  const controller = new AbortController();
+  const ctx = { hasUI: true, mode: "tui", ui: {
+    notify() {}, custom: (factory: Function) => new Promise<void>(resolve => {
+      component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text }, {}, resolve);
+    })
+  } };
+  const close = showDeviceCodeDialog(ctx as never, "https://example.test/device", "ABCD", () => { opened = true; },
+    () => { cancelled = true; controller.abort(); }, controller.signal, { openBrowser: false, copyCode: false });
+  const lines = component.render(80).join("\n");
+  assert.doesNotMatch(lines, /\[o\]|\[c\]/);
+  component.handleInput("o");
+  component.handleInput("c");
+  assert.equal(opened, false);
+  component.handleInput("q");
+  assert.equal(cancelled, true);
+  close();
 });
 
 test("OAuth login links render as short clickable OSC 8 labels with safe plaintext fallback", () => {

@@ -4,6 +4,7 @@ import { AccountStore, type AccountDefinition } from "./account-store.ts";
 import { AccountRouter } from "./account-router.ts";
 import { QUOTA_PREFIX, QUOTA_TTL_MS } from "./quota.ts";
 import { promptText } from "./dialogs.ts";
+import { showDeviceCodeDialog } from "./device-login.ts";
 import { cleanText } from "./status.ts";
 import { formatLoginLink, openLoginBrowser } from "./login-browser.ts";
 import { getCapabilities } from "@earendil-works/pi-tui";
@@ -160,14 +161,30 @@ export class Accounts {
   async ready(ctx: ExtensionContext): Promise<void> {
     // Discover native Pi OAuth before provider routing is installed, including while routing is off.
     // Recheck on account manager open so a recent native /login is detected without a restart.
-    await this.store.discoverNativeAccounts(id => Boolean(ctx.modelRegistry.getProvider(id)?.auth.oauth));
+    try {
+      await this.store.discoverNativeAccounts(id => Boolean(ctx.modelRegistry.getProvider(id)?.auth.oauth));
+    } catch (error) {
+      const policy = this.settings();
+      if (policy.mode === "off" && !isUnsafeRouting(policy)) {
+        this.restoreNativeProviders(ctx);
+      } else {
+        // Pi continues after a session-start error, so discovery must never leave
+        // its primary credentials available when account routing is enforced.
+        this.router.configurationError = "Native account discovery failed; account routing is blocked until the error is fixed";
+        this.installProviders(ctx, new Set(ctx.modelRegistry.getAll().map(model => model.provider)));
+      }
+      throw error;
+    }
     this.sync(ctx);
     if (this.settings().mode === "off" || !this.originals.size) return;
     // Publish account-backed availability before default/profile role activation; no catalog IO.
     await ctx.modelRegistry.refresh({ providers: [...this.originals.keys()], allowNetwork: false });
   }
-  private interaction(ctx: ExtensionContext, preferDeviceCode = false): AuthInteraction {
-    return {
+  private interaction(ctx: ExtensionContext, controller: AbortController, preferDeviceCode = false): AuthInteraction & { dispose(): void } {
+    let closeDeviceCode: (() => void) | undefined;
+    const interaction: AuthInteraction & { dispose(): void } = {
+      signal: controller.signal,
+      dispose() { closeDeviceCode?.(); closeDeviceCode = undefined; },
       prompt: async prompt => {
         prompt.signal?.throwIfAborted();
         if (prompt.type === "secret") throw new Error("Use an environment-backed account for API keys");
@@ -203,15 +220,18 @@ export class Accounts {
           this.openBrowser(event.url);
         }
         else if (event.type === "device_code") {
-          const linked = getCapabilities().hyperlinks;
-          const link = formatLoginLink(event.verificationUri, "Open verification page", linked);
-          const hint = linked ? (process.platform === "darwin" ? "Cmd+click the link" : "Ctrl+click the link")
-            : "Copy the URL above";
-          ctx.ui.notify(`Device sign-in: ${link} · code ${event.userCode}\n${hint} and enter the code. Pi is waiting for confirmation.`, "info");
+          closeDeviceCode?.();
+          closeDeviceCode = showDeviceCodeDialog(ctx, event.verificationUri, event.userCode,
+            this.openBrowser, () => controller.abort(), controller.signal, {
+              openBrowser: event.openBrowserOnConfirm,
+              copyCode: event.copyCodeOnConfirm,
+            });
+          ctx.ui.notify("Device login is waiting for approval. Use the sign-in dialog to open the page, copy the code, or cancel.", "info");
         }
         else if (event.type === "info" || event.type === "progress") ctx.ui.notify(event.message, "info");
       }
     };
+    return interaction;
   }
   /** Pin a named account for one provider, or restore automatic routing for that provider. */
   pin(providerId: string, name: string | undefined, ctx: ExtensionContext): void {
@@ -377,8 +397,14 @@ export class Accounts {
       try {
         const models = await this.store.models(existing ?? account, provider);
         // Use Pi's native OAuth flow, not a second credential implementation.
-        await models.login(providerId, "oauth", this.interaction(ctx, action === "login-device"),
-          { getDeviceId: () => this.store.deviceId() });
+        const controller = new AbortController();
+        const interaction = this.interaction(ctx, controller, action === "login-device");
+        try {
+          await models.login(providerId, "oauth", interaction,
+            { getDeviceId: () => this.store.deviceId() });
+        } finally {
+          interaction.dispose();
+        }
       } catch (error) {
         let recovery = "";
         if (!existing) {

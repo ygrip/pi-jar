@@ -86,6 +86,41 @@ test("OMP-style provider switching only pins the chosen provider", async () => {
   assert.deepEqual(actions, []);
 });
 
+test("account manager waits for OAuth completion and closes after successful login", async () => {
+  let completeLogin!: () => void;
+  let loginStarted!: () => void;
+  const started = new Promise<void>(resolve => { loginStarted = resolve; });
+  const pending = new Promise<void>(resolve => { completeLogin = resolve; });
+  const commands: string[] = [];
+  const accounts = {
+    store: { list: () => [] },
+    router: { status: () => [] },
+    policy: () => ({ mode: "off", accounts: [] }),
+    command: async (command: string) => { commands.push(command); loginStarted(); await pending; }
+  };
+  const actions = ["a", "\r", "work\r"];
+  const ctx = {
+    hasUI: true, mode: "tui", model: { provider: "openai-codex" },
+    modelRegistry: { getAll: () => [{ provider: "openai-codex" }], getProvider: () => ({ id: "openai-codex", auth: { oauth: {} } }) },
+    ui: { notify() {}, custom: async (factory: Function) => new Promise(resolve => {
+      const view = factory(mockTui, mockTheme, {}, resolve);
+      view.render(80);
+      const action = actions.shift();
+      assert.ok(action, "the manager must not reopen after login");
+      if (action === "work\r") { view.handleInput("work"); view.handleInput("\r"); }
+      else view.handleInput(action);
+    }) }
+  };
+  let closed = false;
+  const manager = openAccountManager(ctx as never, accounts as never).then(() => { closed = true; });
+  await started;
+  assert.equal(closed, false, "setup stays open while the provider is waiting");
+  completeLogin();
+  await manager;
+  assert.equal(closed, true);
+  assert.deepEqual(commands, ["login openai-codex work"]);
+});
+
 test("native manual-code popup closes when Pi's OAuth callback wins", async () => {
   const controller = new AbortController();
   const ctx = {

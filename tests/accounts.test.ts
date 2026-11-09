@@ -1093,6 +1093,42 @@ test("an unsafe policy is reset only by an explicit mode choice; pin and use ref
   assert.deepEqual(policy, { mode: "off", accounts: [] }, "the bad fields were dropped, not inherited");
 });
 
+for (const [label, policy, blocked] of [
+  ["enabled", { mode: "sticky", accounts: [] }, true],
+  ["unsafe", parseAccountRouting({ mode: "invalid" }), true],
+  ["disabled", { mode: "off", accounts: [] }, false],
+] as const) {
+  test(`native discovery failure keeps ${label} routing safe`, async t => {
+    const f = fixture(t);
+    const registered = new Map<string, Provider>();
+    const accounts = new Accounts({ registerProvider: (provider: Provider) => registered.set(provider.id, provider) } as never,
+      () => policy as AccountRoutingSettings, () => {}, f.directory);
+    const ctx = { hasUI: false, modelRegistry: { getAll: () => [model], getProvider: () => f.provider, refresh: async () => {} }, ui: { notify() {} } };
+    const discover = accounts.store.discoverNativeAccounts.bind(accounts.store);
+    accounts.store.discoverNativeAccounts = async () => { throw new Error("discovery failed"); };
+
+    await assert.rejects(() => accounts.ready(ctx as never), /discovery failed/);
+    const provider = registered.get("openai") ?? f.provider;
+    const result = await provider.streamSimple(model, context).result();
+    if (blocked) {
+      assert.equal(result.stopReason, "error");
+      assert.match(result.errorMessage ?? "", /discovery failed/);
+      assert.deepEqual(f.calls, []);
+    } else {
+      assert.equal(result.stopReason, "stop");
+      assert.deepEqual(f.calls, ["missing"]);
+    }
+
+    accounts.store.discoverNativeAccounts = discover;
+    await accounts.ready(ctx as never);
+    if (isUnsafeRouting(policy as AccountRoutingSettings)) {
+      assert.match(accounts.router.configurationError ?? "", /unsafe/);
+    } else {
+      assert.equal(accounts.router.configurationError, undefined);
+    }
+  });
+}
+
 test("an unreadable inherited policy locks the child instead of failing the extension load", () => {
   const previous = process.env[ACCOUNT_ROUTING_ENV];
   process.env[ACCOUNT_ROUTING_ENV] = "{ not json";
