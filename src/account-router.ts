@@ -120,7 +120,7 @@ export class AccountRouter {
   }
   private sameIdentity(state: AccountState, account: AccountDefinition, health: AccountHealth): boolean {
     const known = state.definition;
-    return known.provider === account.provider && known.auth === account.auth && known.env === account.env
+    return known.provider === account.provider && known.auth === account.auth && known.env === account.env && known.source === account.source
       && state.generation === health.credentialGeneration;
   }
   private dropLastUsed(name: string): void {

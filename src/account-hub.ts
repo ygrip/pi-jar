@@ -98,7 +98,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
           const flags = [pinned === account.name ? "PINNED" : "", !pinned && status?.lastUsed ? "LAST USED" : "", blocked ? "COOLDOWN" : "",
             missing ? "SIGN IN" : "", excluded ? "EXCLUDED" : ""].filter(Boolean).join(" · ");
           return { kind: "account" as const, name: account.name,
-            label: `${account.name} · ${account.auth === "oauth" ? "OAuth" : "API"} · ${quota}${flags ? " · " + flags : ""}` };
+            label: `${account.name} · ${account.source === "native" ? "Pi OAuth" : account.auth === "oauth" ? "OAuth" : "API"} · ${quota}${flags ? " · " + flags : ""}` };
         }),
         ...(registered ? [
           { kind: "add" as const, label: "＋ Add account to this provider" },

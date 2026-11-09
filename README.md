@@ -106,7 +106,7 @@ Pi 1.5 fixes Apple Terminal's local Shift+Return fallback for setups sending ESC
 
 ### Set up multiple accounts
 
-Open `/jar settings` → **Accounts** → **Manage accounts** to add provider accounts, sign in, and choose routing. OAuth subscriptions can be added separately by provider and account name:
+Open `/jar settings` → **Accounts** → **Manage accounts** to add provider accounts, sign in, and choose routing. Existing native Pi OAuth logins (including OpenAI Codex and Anthropic) are auto-linked as `pi-openai-codex` / `pi-anthropic` when available; no login or token migration is needed. Linked entries reuse Pi's primary credential store and cannot be signed out or removed by Pi Jar. New browser OAuth sign-ins open the system browser automatically, like native Pi, and show a compact clickable link in OSC 8-capable terminals (with the full URL only as a fallback on unsupported terminals). OAuth subscriptions can also be added separately by provider and account name:
 
 ```text
 /jar accounts login openai-codex work
