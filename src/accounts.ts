@@ -5,7 +5,8 @@ import { AccountRouter } from "./account-router.ts";
 import { QUOTA_PREFIX, QUOTA_TTL_MS } from "./quota.ts";
 import { promptText } from "./dialogs.ts";
 import { cleanText } from "./status.ts";
-import { openLoginBrowser } from "./login-browser.ts";
+import { formatLoginLink, openLoginBrowser } from "./login-browser.ts";
+import { getCapabilities } from "@earendil-works/pi-tui";
 import { ACCOUNT_ROUTING_ENV, ACCOUNT_ROUTING_MODES, isUnsafeRouting, parseAccountRouting, unsafeAccountRouting, withRoutingMode, type AccountRoutingSettings } from "./account-settings.ts";
 
 /** Parent settings are captured at each child launch; no secrets travel in the environment. */
@@ -194,11 +195,20 @@ export class Accounts {
       },
       notify: event => {
         if (event.type === "auth_url") {
-          ctx.ui.notify(`Open this login URL in your browser: ${event.url}\n${event.instructions ?? "If the callback is unreachable (SSH/container), paste the redirected URL when prompted."}`, "info");
+          const linked = getCapabilities().hyperlinks;
+          const link = formatLoginLink(event.url, "Open provider login", linked);
+          const hint = linked ? (process.platform === "darwin" ? "Cmd+click the link to open it." : "Ctrl+click the link to open it.")
+            : "Copy the URL above into your browser.";
+          ctx.ui.notify(`Sign in: ${link}\n${hint}\n${event.instructions ?? "If the callback is unreachable (SSH/container), paste the redirected URL when prompted."}`, "info");
           this.openBrowser(event.url);
         }
-        else if (event.type === "device_code") ctx.ui.notify(
-          `Open ${event.verificationUri} and enter code ${event.userCode}. Pi is waiting for confirmation.`, "info");
+        else if (event.type === "device_code") {
+          const linked = getCapabilities().hyperlinks;
+          const link = formatLoginLink(event.verificationUri, "Open verification page", linked);
+          const hint = linked ? (process.platform === "darwin" ? "Cmd+click the link" : "Ctrl+click the link")
+            : "Copy the URL above";
+          ctx.ui.notify(`Device sign-in: ${link} · code ${event.userCode}\n${hint} and enter the code. Pi is waiting for confirmation.`, "info");
+        }
         else if (event.type === "info" || event.type === "progress") ctx.ui.notify(event.message, "info");
       }
     };
