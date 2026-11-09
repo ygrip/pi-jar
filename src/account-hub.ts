@@ -95,10 +95,15 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
           const blocked = (status?.blockedUntil ?? 0) > Date.now();
           const missing = !hasCredentials(account);
           const excluded = allow.length > 0 && !allow.includes(account.name);
+          let identity = "";
+          try {
+            const email = accounts.store.email?.(account);
+            if (email) identity = ` · ${email}`;
+          } catch { identity = " · email unavailable"; }
           const flags = [pinned === account.name ? "PINNED" : "", !pinned && status?.lastUsed ? "LAST USED" : "", blocked ? "COOLDOWN" : "",
             missing ? "SIGN IN" : "", excluded ? "EXCLUDED" : ""].filter(Boolean).join(" · ");
           return { kind: "account" as const, name: account.name,
-            label: `${account.name} · ${account.source === "native" ? "Pi OAuth" : account.auth === "oauth" ? "OAuth" : "API"} · ${quota}${flags ? " · " + flags : ""}` };
+            label: `${account.name} · ${account.source === "native" ? "Pi OAuth" : account.auth === "oauth" ? "OAuth" : "API"} · ${quota}${flags ? " · " + flags : ""}${identity}` };
         }),
         ...(registered ? [
           { kind: "add" as const, label: "＋ Add account to this provider" },

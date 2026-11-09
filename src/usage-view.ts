@@ -53,8 +53,8 @@ function resetText(window: QuotaWindow, now: number): string {
   return `Resets ${when} (in ${duration(Math.max(0, at - now))})`;
 }
 
-export interface AccountQuota { name: string; provider: string; quota?: Quota; stale?: boolean }
-export interface UsageView { stats: UsageStats; provider?: string; quota?: Quota; accountQuotas?: readonly AccountQuota[]; quotaFailure?: { error: string; retryInMs: number }; quotaEnabled: boolean; now: number }
+export interface AccountQuota { name: string; provider: string; email?: string; quota?: Quota; stale?: boolean; failure?: string }
+export interface UsageView { stats: UsageStats; provider?: string; quota?: Quota; accountQuotas?: readonly AccountQuota[]; quotaFailure?: { error: string; retryInMs: number }; quotaEnabled: boolean; routed?: boolean; now: number }
 
 /** Claude-style usage page: session totals, per-model breakdown, then plan limit bars. */
 export function usageLines(view: UsageView, width: number, fg: Paint): string[] {
@@ -79,22 +79,38 @@ export function usageLines(view: UsageView, width: number, fg: Paint): string[] 
   }
   if (view.accountQuotas?.length) {
     lines.push("", heading("Account usage limits"));
+    const providers = new Map<string, AccountQuota[]>();
     for (const account of view.accountQuotas) {
-      if (!account.quota || (!account.quota.fiveHour && !account.quota.week)) {
-        lines.push("  " + row(`${account.name} · ${account.provider}`, "quota unavailable", inner - 2));
-        continue;
-      }
-      for (const [label, window] of [["5h", account.quota.fiveHour], ["week", account.quota.week]] as const) {
-        if (!window) continue;
-        let accountLabel = `${account.name} · ${account.provider} · ${label}`;
-        if (account.stale) accountLabel += " · stale";
-        const used = Math.round(window.used);
-        const color = used >= 90 ? "error" : used >= 70 ? "warning" : "accent";
-        const suffix = ` ${used}% used`;
-        lines.push("  " + row(accountLabel, "", inner - 2));
-        lines.push("  " + bar(fg, window.used, Math.min(50, inner - 4 - suffix.length), color) + suffix);
-        const reset = resetText(window, now);
-        if (reset) lines.push(fg("dim", "  " + reset));
+      const accounts = providers.get(account.provider) ?? [];
+      accounts.push(account);
+      providers.set(account.provider, accounts);
+    }
+    for (const [provider, accounts] of providers) {
+      lines.push("", heading(`  ${provider}`));
+      for (const account of accounts) {
+        const identity = account.name;
+        const email = account.email ?? "email unavailable";
+        if (!account.quota || (!account.quota.fiveHour && !account.quota.week)) {
+          let status = "quota unavailable";
+          if (account.failure) status = `lookup failed: ${account.failure}`;
+          lines.push("    " + row(identity, status, inner - 4), fg("dim", "      " + email));
+          continue;
+        }
+        lines.push(fg("dim", "    " + identity + " · " + email));
+        for (const [label, window] of [["5h", account.quota.fiveHour], ["week", account.quota.week]] as const) {
+          if (!window) continue;
+          let accountLabel = label;
+          if (account.stale) accountLabel += " · stale";
+          const used = Math.round(window.used);
+          let color = "accent";
+          if (used >= 90) color = "error";
+          else if (used >= 70) color = "warning";
+          const suffix = ` ${used}% used`;
+          lines.push("      " + accountLabel);
+          lines.push("      " + bar(fg, window.used, Math.min(50, inner - 8 - suffix.length), color) + suffix);
+          const reset = resetText(window, now);
+          if (reset) lines.push(fg("dim", "      " + reset));
+        }
       }
     }
   }
@@ -106,6 +122,7 @@ export function usageLines(view: UsageView, width: number, fg: Paint): string[] 
     lines.push(fg(supported && view.quotaEnabled && failure ? "warning" : "dim", !supported
       ? "  Plan limits are available for anthropic and openai-codex subscriptions."
       : !view.quotaEnabled ? "  Limit lookup is off; enable it with /jar quota on."
+      : view.routed ? "  See Account usage limits above; no active account limits are available yet."
       : failure ? `  Limits unavailable: ${failure.error}. Retrying in ${duration(failure.retryInMs)}.`
       : "  Loading limits…"));
     return lines;

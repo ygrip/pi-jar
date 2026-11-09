@@ -55,6 +55,11 @@ export class Accounts {
     if (this.settings().mode === "off" || isUnsafeRouting(this.settings())) return;
     await this.router.refreshActiveQuota(provider);
   }
+  async refreshConfiguredQuota(providerId: string, ctx: ExtensionContext, skipNative = false): Promise<void> {
+    const provider = this.originals.get(providerId) ?? ctx.modelRegistry.getProvider(providerId);
+    if (!provider) return;
+    await this.router.refreshConfiguredQuota(providerId, provider, skipNative);
+  }
   /**
    * Credential variables a subagent must not inherit: keys of environment-backed accounts the
    * routing allowlist excludes. Variables also used by an allowed account stay. With routing off
@@ -79,6 +84,7 @@ export class Accounts {
   }
   sync(ctx: ExtensionContext): void {
     this.clearQuotaStatuses(ctx);
+    this.router.onQuotaChange = () => this.onQuotaChange?.();
     this.router.onRoute = (name, provider, health) => {
       if (!ctx.hasUI || typeof ctx.ui.setStatus !== "function") return;
       ctx.ui.setStatus("pi-jar.account", `account:${name}`);

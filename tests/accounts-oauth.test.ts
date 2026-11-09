@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createAssistantMessageEventStream, createModels, InMemoryCredentialStore, normalizeContext,
   type Provider, type Model, type Api, type AssistantMessage, type OAuthCredential } from "@earendil-works/pi-ai";
 import { AccountStore } from "../src/account-store.ts";
 import { AccountRouter } from "../src/account-router.ts";
+import { Accounts } from "../src/accounts.ts";
 import type { AccountRoutingSettings } from "../src/account-settings.ts";
 
 const model: Model<Api> = { id: "test", name: "Test", api: "anthropic-messages", provider: "anthropic",
@@ -131,6 +132,80 @@ test("native OAuth refresh is locked per account, quota probes coalesce, main lo
   await wrapped.streamSimple(model, context).result();
   assert.deepEqual(calls.slice(beforeAllowlist), ["b-fresh", "b-fresh"],
     "a profile allowlist cannot silently borrow another same-provider OAuth token");
+});
+
+test("account email is read locally from a Codex token without exposing credentials", t => {
+  const directory = mkdtempSync(join(tmpdir(), "jar-oauth-email-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  const account = { version: 1 as const, name: "work", provider: "openai-codex", auth: "oauth" as const };
+  store.reserve(account.name);
+  const payload = Buffer.from(JSON.stringify({ "https://api.openai.com/profile": { email: "person@example.com" } })).toString("base64url");
+  const path = join(store.root, account.name, "auth.json");
+  writeFileSync(path, JSON.stringify({ "openai-codex": { type: "oauth", access: `header.${payload}.signature` } }), { mode: 0o600 });
+  assert.equal(store.email(account), "person@example.com");
+  const unsafe = Buffer.from(JSON.stringify({ email: "person\u001b[31m@example.com" })).toString("base64url");
+  writeFileSync(path, JSON.stringify({ "openai-codex": { type: "oauth", access: `header.${unsafe}.signature` } }));
+  assert.equal(store.email(account), undefined);
+  writeFileSync(path, JSON.stringify({ "openai-codex": { type: "oauth", access: "opaque" } }));
+  assert.equal(store.email(account), undefined);
+  assert.equal(store.email({ ...account, provider: "anthropic" }), undefined);
+});
+
+test("explicit configured-account quota refresh works with routing off", { timeout: 20000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), "jar-oauth-explicit-quota-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new AccountStore(directory);
+  const account = { version: 1 as const, name: "work", provider: "anthropic", auth: "oauth" as const };
+  store.reserve(account.name);
+  const provider: Provider = {
+    id: "anthropic", name: "OAuth Test", getModels: () => [model],
+    auth: { oauth: { name: "OAuth", login: async () => credential("work-token", Date.now() + 3600_000),
+      refresh: async current => current, toAuth: async current => ({ apiKey: current.access }) } },
+    stream: () => { throw new Error("unused"); }, streamSimple: () => { throw new Error("unused"); }
+  };
+  const runtime = await store.models(account, provider);
+  await runtime.login("anthropic", "oauth", { prompt: async () => "unused", notify() {} });
+  store.save(account);
+  store.reserve("pi-anthropic");
+  store.save({ version: 1, name: "pi-anthropic", provider: "anthropic", auth: "oauth", source: "native" });
+  const settings: AccountRoutingSettings = { mode: "off", accounts: [] };
+  let lookups = 0;
+  let changed = 0;
+  const router = new AccountRouter(store, () => settings, Date.now, async (_id, auth) => {
+    lookups++;
+    assert.equal((await auth("anthropic"))?.auth.apiKey, "work-token");
+    return { fiveHour: { used: 0 } };
+  });
+  router.onQuotaChange = () => changed++;
+  await router.refreshConfiguredQuota("anthropic", provider, true);
+  assert.equal(lookups, 1, "native quota is fetched only by the shared native cache");
+  assert.equal(store.health("work").quota?.fiveHour?.used, 0, "zero usage is retained");
+  assert.equal(changed, 1, "settled probe notifies an open usage panel");
+});
+
+test("configured quota refresh uses the original OAuth provider while routing is enabled", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "jar-oauth-original-provider-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const provider: Provider = {
+    id: "anthropic", name: "OAuth Test", getModels: () => [model],
+    auth: { oauth: { name: "OAuth", login: async () => credential("token"),
+      refresh: async current => current, toAuth: async current => ({ apiKey: current.access }) } },
+    stream: () => { throw new Error("unused"); }, streamSimple: () => { throw new Error("unused"); }
+  };
+  let registered = provider;
+  const settings: AccountRoutingSettings = { mode: "sticky", accounts: [] };
+  const accounts = new Accounts({ registerProvider: (next: Provider) => { registered = next; } } as never,
+    () => settings, () => {}, directory);
+  accounts.store.reserve("work");
+  accounts.store.save({ version: 1, name: "work", provider: "anthropic", auth: "oauth" });
+  const ctx = { hasUI: false, modelRegistry: { getProvider: () => registered, getAll: () => [model] } };
+  accounts.sync(ctx as never);
+  assert.notEqual(registered, provider);
+  let captured: Provider | undefined;
+  accounts.router.refreshConfiguredQuota = async (_id, selected) => { captured = selected; };
+  await accounts.refreshConfiguredQuota("anthropic", ctx as never);
+  assert.equal(captured, provider);
 });
 
 test("sign-out waits for an in-flight native refresh in another process and the account stays disconnected", { timeout: 20000 }, async t => {

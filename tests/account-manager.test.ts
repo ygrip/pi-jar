@@ -335,7 +335,7 @@ test("hub redraws show quota and cooldown changes that arrive between two render
   const members = [{ version: 1, name: "work", provider: "openai-codex", auth: "oauth" }];
   let status: Record<string, unknown> = { name: "work", provider: "openai-codex", remaining: 70, inFlight: 0, lastUsed: false };
   const accounts = {
-    store: { list: () => members, hasCredentials: () => true },
+    store: { list: () => members, hasCredentials: () => true, email: () => "person@example.com" },
     router: { status: () => [status] },
     policy: () => ({ mode: "sticky", accounts: [] })
   };
@@ -343,10 +343,10 @@ test("hub redraws show quota and cooldown changes that arrive between two render
     modelRegistry: { getAll: () => [{ provider: "openai-codex" }], getProvider: () => ({ id: "openai-codex", name: "Codex" }) },
     ui: { custom: async (factory: Function) => new Promise(resolve => {
       const view = factory(mockTui, mockTheme, {}, resolve);
-      assert.match(view.render(100).join("\n"), /work · OAuth · 70% left/);
+      assert.match(view.render(140).join("\n"), /work · OAuth · 70% left · person@example.com/);
       // A background probe lands and another request makes the account the last used one; no key is pressed.
       status = { ...status, remaining: 20, lastUsed: true, blockedUntil: Date.now() + 60_000 };
-      const next = view.render(100).join("\n");
+      const next = view.render(80).join("\n");
       assert.match(next, /work · OAuth · 20% left · LAST USED · COOLDOWN/);
       assert.doesNotMatch(next, /70% left/);
       view.handleInput("\x1b");

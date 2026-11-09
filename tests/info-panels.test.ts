@@ -4,6 +4,7 @@ import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { contextBreakdown, contextLines } from "../src/context-view.ts";
 import { openPanel, tokens } from "../src/panel.ts";
 import { collectUsage, usageLines } from "../src/usage-view.ts";
+import { registerInfoPanels } from "../src/info-panels.ts";
 
 const plain = (_color: string, text: string) => text;
 const assistant = (model: string, input: number, output: number, cost: number, at: string) => ({ type: "message", timestamp: at,
@@ -34,6 +35,7 @@ test("usage totals the session per model, adds side calls and shows limit bars",
   assert.match(text, /Current week\n\s+█+░* 92% used/);
   assert.ok(lines.every((line) => visibleWidth(line) <= 80));
   assert.match(usageLines({ stats, provider: "openai", quotaEnabled: true, now }, 80, plain).join("\n"), /available for anthropic and openai-codex/);
+  assert.match(usageLines({ stats, provider: "openai-codex", quotaEnabled: true, routed: true, now }, 80, plain).join("\n"), /See Account usage limits/);
   assert.match(usageLines({ stats, provider: "anthropic", quotaEnabled: false, now }, 80, plain).join("\n"), /\/jar quota on/);
   const failed = usageLines({ stats, provider: "anthropic", quotaEnabled: true, now, quotaFailure: { error: "rate limited by the provider (HTTP 429)", retryInMs: 600_000 } }, 80, plain).join("\n");
   assert.match(failed, /Limits unavailable: rate limited by the provider \(HTTP 429\)\. Retrying in 10m\./);
@@ -43,14 +45,15 @@ test("usage totals the session per model, adds side calls and shows limit bars",
 test("usage lists cached limits for every routed account", () => {
   const stats = collectUsage([], []);
   const lines = usageLines({ stats, quotaEnabled: true, now: Date.parse("2026-09-25T10:00:00Z"), accountQuotas: [
-    { name: "work", provider: "anthropic", quota: { fiveHour: { used: 25 } } },
+    { name: "work", provider: "anthropic", email: "person@example.com", quota: { fiveHour: { used: 25 } } },
+    { name: "unknown", provider: "openai" },
     { name: "backup", provider: "anthropic", quota: { week: { used: 80 } }, stale: true },
-    { name: "unknown", provider: "openai" }
+    { name: "stalled", provider: "openai-codex", failure: "HTTP 429" }
   ] }, 80, plain).join("\n");
   assert.match(lines, /Account usage limits/);
-  assert.match(lines, /work · anthropic · 5h[\s\S]*25% used/);
-  assert.match(lines, /backup · anthropic · week · stale[\s\S]*80% used/);
-  assert.match(lines, /unknown · openai[\s\S]*quota unavailable/);
+  assert.match(lines, /anthropic\n[\s\S]*work · person@example.com[\s\S]*5h[\s\S]*25% used[\s\S]*backup · email unavailable[\s\S]*week · stale[\s\S]*80% used[\s\S]*openai\n/);
+  assert.match(lines, /openai\n[\s\S]*unknown\s+quota unavailable/);
+  assert.match(lines, /openai-codex\n[\s\S]*stalled\s+lookup failed: HTTP 429/);
 });
 
 test("context breakdown splits categories, scales to the reported total and draws a 10×10 grid", () => {
@@ -87,6 +90,36 @@ test("context breakdown splits categories, scales to the reported total and draw
   assert.match(contextLines({ ...view, window: 0 }, 90, plain).join("\n"), /context window unknown[\s\S]*System prompt: [\d.]+k$/m);
   assert.equal(tokens(1500), "1.5k");
   assert.equal(tokens(2_500_000), "2.5M");
+});
+
+test("opening /usage starts account quota probes and redraws when they settle", async () => {
+  const commands = new Map<string, (args: string, ctx: unknown) => Promise<void>>();
+  let component: any;
+  let started = false;
+  let settled!: () => void;
+  let renders = 0;
+  registerInfoPanels({ on() {}, registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+    commands.set(name, options.handler);
+  } } as never, {
+    side: { all: () => [] } as never,
+    quota: () => undefined,
+    quotaFailure: () => undefined,
+    quotaEnabled: () => true,
+    refreshQuota(_ctx, onChange) { started = true; settled = onChange!; },
+  });
+  const ctx = { hasUI: true, mode: "tui", model: undefined,
+    sessionManager: { getBranch: () => [] },
+    ui: { custom(factory: Function) {
+      return new Promise<void>(resolve => {
+        component = factory({ requestRender() { renders++; }, terminal: { rows: 24 } }, { fg: plain, bold: (text: string) => text }, {}, resolve);
+      });
+    } } };
+  const opened = commands.get("usage")!("", ctx);
+  assert.equal(started, true, "opening usage starts explicit quota lookups");
+  settled();
+  assert.equal(renders, 1, "settled account probes refresh the open usage panel");
+  component.handleInput("\x1b");
+  await opened;
 });
 
 test("panel switches tabs with Tab and a click, scrolls and closes", async () => {

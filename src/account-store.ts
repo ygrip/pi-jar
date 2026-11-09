@@ -168,6 +168,33 @@ export class AccountStore {
     catch (error) { if (missing(error)) return false; throw error; }
     return this.holdsOAuthEntry(raw, account);
   }
+  /** Read an optional email claim locally; no profile request or identity is persisted. */
+  email(account: AccountDefinition): string | undefined {
+    if (account.auth !== "oauth" || account.provider !== "openai-codex") return undefined;
+    const path = account.source === "native" ? join(this.agentDirectory, "auth.json") : this.credentialPath(account.name);
+    let raw: string;
+    try { privatePath(path, false); raw = readFileSync(path, "utf8"); }
+    catch (error) { if (missing(error)) return undefined; throw error; }
+    let data: Record<string, unknown>;
+    try { data = JSON.parse(raw) as Record<string, unknown>; }
+    catch { throw new Error(`Account ${account.name} has an unreadable credential file`); }
+    const entry = data?.[account.provider];
+    if (!entry || typeof entry !== "object") return undefined;
+    const credential = entry as Record<string, unknown>;
+    if (credential.type !== "oauth") return undefined;
+    const token = credential.access;
+    if (typeof token !== "string" || token.length > 32768) return undefined;
+    const parts = token.split(".");
+    if (parts.length !== 3 || !parts[1]) return undefined;
+    let claims: Record<string, unknown>;
+    try { claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>; }
+    catch { return undefined; }
+    const profile = claims?.["https://api.openai.com/profile"];
+    let email = claims?.email;
+    if (profile && typeof profile === "object") email = (profile as Record<string, unknown>).email ?? email;
+    if (typeof email !== "string" || email.length > 254 || !/^[\x21-\x3f\x41-\x7e]+@[\x21-\x3f\x41-\x7e]+$/.test(email)) return undefined;
+    return email;
+  }
   private holdsOAuthEntry(raw: string, account: AccountDefinition): boolean {
     let stored: unknown;
     try { stored = JSON.parse(raw); }

@@ -142,12 +142,21 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
       const cooldown = (status?.blockedUntil ?? 0) > Date.now() ? " · cooldown " + new Date(status!.blockedUntil!).toLocaleString() : "";
       return `${account.name} · ${windowLabel("5h", health.quota?.fiveHour)} · ${windowLabel("week", health.quota?.week)}${cooldown}${status?.warning ? " · warning" : ""}`;
     });
-    await promptChoice(ctx, `Quota & limits · ${id}`,
-      "Cached provider values only; API keys and unsupported providers have unknown limits. Select Back to return.",
-      [...summaries, "Back"]);
+    const refreshIndex = summaries.length;
+    const choice = await promptChoice(ctx, `Quota & limits · ${id}`,
+      "Cached values only. API-key and unsupported-provider limits are unknown. Refresh starts supported OAuth lookups explicitly; it may take a few seconds.",
+      [...summaries, "Refresh supported OAuth usage now", "Back"]);
+    if (choice === refreshIndex) {
+      void accounts.refreshConfiguredQuota(id, ctx).then(() => {
+        ctx.ui.notify(`Quota refresh finished for ${id}. Reopen Quota & limits to view updated values.`, "info");
+      }).catch(notifyError);
+    }
   };
 
   const manageAccount = async (account: AccountDefinition): Promise<void> => {
+    let email = "email unavailable";
+    try { email = accounts.store.email?.(account) ?? email; }
+    catch { email = "email unavailable"; }
     if (!ctx.modelRegistry.getProvider(account.provider)) {
       if (account.source === "native") {
         ctx.ui.notify("Pi's native account is linked but the provider is unavailable. The primary credential is never removed by Pi Jar.", "warning");
@@ -162,7 +171,7 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
     if (account.source === "native") {
       const choices = ["Make active for this provider (pin)", "Reconnect / renew native Pi login", "View quota & cooldown", "Back"];
       const choice = await promptChoice(ctx, `${account.provider} / ${account.name} · linked Pi login`,
-        "Uses Pi's primary OAuth credentials and refresh lock. Sign out with native Pi /logout; Pi Jar cannot delete this credential.", choices);
+        `${email} · Uses Pi's primary OAuth credentials and refresh lock. Sign out with native Pi /logout; Pi Jar cannot delete this credential.`, choices);
       if (choice === 0) accounts.pin(account.provider, account.name, ctx);
       else if (choice === 1) await signIn(account.provider, account.name);
       else if (choice === 2) await showLimits(account.provider);
@@ -176,7 +185,7 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
       "Back"
     ];
     const choice = await promptChoice(ctx, `${account.provider} / ${account.name}`,
-      `${account.auth === "oauth" ? "Pi native OAuth" : "Environment: " + account.env} · ${accounts.policy().pinned?.[account.provider] === account.name ? "Pinned" : "Automatic routing"}`,
+      `${email} · ${account.auth === "oauth" ? "Pi native OAuth" : "Environment: " + account.env} · ${accounts.policy().pinned?.[account.provider] === account.name ? "Pinned" : "Automatic routing"}`,
       choices);
     if (choice === undefined || choice === choices.length - 1) return;
     if (choice === 0) return accounts.pin(account.provider, account.name, ctx);

@@ -168,11 +168,21 @@ export default function piJar(pi: ExtensionAPI): void {
     quotaRefreshTimer.unref?.();
   };
   /** Routed accounts publish their own quota; the provider-global fallback is only for native auth. */
-  const refreshQuota = (ctx: ExtensionContext, explicit = false) => {
+  const refreshQuota = (ctx: ExtensionContext, explicit = false, onChange?: () => void) => {
     if (!quotaCache?.enabled) return;
     if (!explicit && (!footerTui || !footerSettings.quota)) return;
     quotaContext = ctx;
-    if (accounts.routesProvider(ctx.model?.provider)) {
+    if (explicit) {
+      const providers = [...new Set(accounts.store.list().map(account => account.provider))];
+      for (const providerId of providers) {
+        const skipNative = providerId === ctx.model?.provider && !accounts.routesProvider(providerId);
+        void accounts.refreshConfiguredQuota(providerId, ctx, skipNative).then(() => onChange?.()).catch((error: unknown) => {
+          console.error("pi-jar: configured account quota refresh failed", error);
+          onChange?.();
+        });
+      }
+      if (!accounts.routesProvider(ctx.model?.provider)) quotaCache.refresh(ctx.model?.provider, welcomeStatuses(), Date.now(), onChange);
+    } else if (accounts.routesProvider(ctx.model?.provider)) {
       void accounts.refreshQuota(ctx.model?.provider).catch((error: unknown) => {
         console.error("pi-jar: routed quota refresh failed", error);
       });
@@ -367,22 +377,37 @@ export default function piJar(pi: ExtensionAPI): void {
   const cacheBreaks = registerCacheBreaks(pi, { enabled: () => !delegatedChild && visualSettings.cacheDiagnostics !== false });
   const advisor = registerAdvisor(pi, modelRoles, { enabled: () => !delegatedChild && visualSettings.advisor, gates: () => !delegatedChild && visualSettings.advisorGates, usage: sideUsage });
   registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
+    routed: (ctx) => accounts.routesProvider(ctx.model?.provider),
     quota: (ctx) => quotaFor(ctx, welcomeStatuses(), Date.now()),
-    accountQuotas: () => accounts.store.list().map((account) => {
-      const health = accounts.store.health(account.name);
-      return {
-        name: account.name,
-        provider: account.provider,
-        quota: health.quota,
-        stale: !health.checkedAt || health.checkedAt + QUOTA_TTL_MS <= Date.now()
-      };
-    }),
+    accountQuotas: (ctx) => {
+      const statuses = new Map(accounts.router.status().map(status => [status.name, status]));
+      return accounts.store.list().map(account => {
+        const health = accounts.store.health(account.name);
+        let email: string | undefined;
+        try { email = accounts.store.email(account); }
+        catch { email = undefined; }
+        let quota = health.quota;
+        let stale = !health.checkedAt || health.checkedAt + QUOTA_TTL_MS <= Date.now();
+        if (account.source === "native" && account.provider === ctx.model?.provider && !accounts.routesProvider(account.provider)) {
+          const nativeQuota = quotaCache?.get(account.provider, welcomeStatuses(), Date.now());
+          if (nativeQuota) { quota = nativeQuota; stale = false; }
+        }
+        return {
+          name: account.name,
+          provider: account.provider,
+          email,
+          quota,
+          stale,
+          failure: statuses.get(account.name)?.warning
+        };
+      });
+    },
     quotaFailure: (ctx) => {
       if (accounts.routesProvider(ctx.model?.provider)) return undefined;
       return quotaCache?.failure(ctx.model?.provider, Date.now());
     },
     cacheBreaks: (ctx) => cacheBreaks.state(ctx),
-    refreshQuota: (ctx) => { refreshQuota(ctx, true); } });
+    refreshQuota: (ctx, onChange) => { refreshQuota(ctx, true, onChange); } });
   let followingTheme: string | undefined;
   const profileEntries = (ctx: ExtensionContext): readonly unknown[] => {
     try { return ctx.sessionManager.getEntries?.() ?? sessionBranch(ctx); } catch { return sessionBranch(ctx); }
