@@ -213,6 +213,13 @@ export class AccountStore {
   save(account: AccountDefinition): void {
     privatePath(this.directory(account.name), true);
     writeFileSync(join(this.directory(account.name), "account.json"), JSON.stringify(account) + "\n", { flag: "wx", mode: 0o600 });
+    // Every new account gets its own identity epoch. Without one, a label removed and re-created
+    // (even for the same provider) would look identical to a stale in-flight quota probe or 429.
+    this.resetHealthForCredentialChange(account.name);
+  }
+  /** Give an account created before identity epochs existed one, without touching its other health data. */
+  ensureCredentialGeneration(name: string): void {
+    this.updateHealth(name, current => current.credentialGeneration ? current : { ...current, credentialGeneration: randomUUID() });
   }
   private credentialPath(name: string): string {
     privatePath(this.root, true);

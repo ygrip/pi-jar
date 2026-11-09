@@ -601,6 +601,7 @@ test("routing does not await delayed quota endpoints and validates only the pref
     hasCredentials: () => true,
     health: () => ({}),
     updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    ensureCredentialGeneration: () => {},
     models: () => Promise.resolve({
       getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
       getAllAvailable: async () => {
@@ -779,6 +780,7 @@ test("a hung catalog check is skipped after its time limit instead of blocking l
     hasCredentials: () => true,
     health: () => ({}),
     updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    ensureCredentialGeneration: () => {},
     models: (account: { name: string }) => Promise.resolve({
       getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
       // The hung account never answers and ignores its abort signal.
@@ -884,6 +886,7 @@ test("quota probes for a large pool run at most four at a time per provider and 
     hasCredentials: () => true,
     health: () => ({}),
     updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    ensureCredentialGeneration: () => {},
     models: () => Promise.resolve({
       getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
       getAllAvailable: async () => [routedModel],
@@ -909,4 +912,37 @@ test("quota probes for a large pool run at most four at a time per provider and 
   for (let wait = 0; wait < 200 && finished < 20; wait++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(finished, 20, "queued probes all run");
   assert.ok(maximum <= 4 && maximum > 1, `concurrency stayed bounded (${maximum})`);
+});
+
+test("a label re-created for the same provider gets a new identity epoch, so old in-flight results are discarded", async t => {
+  const f = fixture(t);
+  const first = f.store.health("a").credentialGeneration;
+  assert.ok(first, "creating an account allocates a credential generation");
+
+  let release!: () => void, dispatched!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const sent = new Promise<void>(resolve => { dispatched = resolve; });
+  const slow: Provider = { ...f.provider,
+    streamSimple: (m, c, options) => f.provider.streamSimple(m, c, { ...options,
+      onResponse: async (response, selected) => { dispatched(); await gate; await options?.onResponse?.(response, selected); } }) };
+  f.fail(429);
+  const pending = f.router.wrap(slow).streamSimple(model, context).result(); // process A, request in flight on "a"
+  await sent;
+  // Process B removes "a" and creates a different subscription under the same label and provider.
+  const other = new AccountStore(f.directory);
+  other.remove("a");
+  other.reserve("a");
+  other.save({ version: 1, name: "a", provider: "openai", auth: "env", env: "JAR_TEST_A" });
+  assert.notEqual(other.health("a").credentialGeneration, first);
+  release();
+  await pending;
+  assert.equal(other.health("a").blockedUntil, undefined, "the old identity's late 429 did not cool down the replacement");
+});
+
+test("an account created before identity epochs existed is given one on first use", async t => {
+  const f = fixture(t);
+  f.store.saveHealth("b", {}); // legacy: no credentialGeneration
+  assert.equal(f.store.health("b").credentialGeneration, undefined);
+  await f.router.wrap(f.provider).streamSimple(model, context).result();
+  assert.ok(f.store.health("b").credentialGeneration);
 });

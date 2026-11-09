@@ -99,7 +99,11 @@ export class AccountRouter {
    * all of those still match; otherwise it is retired and rebuilt.
    */
   private state(account: AccountDefinition, provider: Provider): AccountState {
-    const health = this.store.health(account.name);
+    let health = this.store.health(account.name);
+    if (!health.credentialGeneration) {
+      this.store.ensureCredentialGeneration(account.name);
+      health = this.store.health(account.name);
+    }
     let state = this.states.get(account.name);
     if (state && !this.sameIdentity(state, account, health)) {
       state.invalidated = true;
