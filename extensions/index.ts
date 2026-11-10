@@ -13,6 +13,7 @@ import { WELCOME_INTERVAL_MS } from "../src/animations.ts";
 import { promptText, selectPopup } from "../src/dialogs.ts";
 import { taskWidget, type TaskWidgetState } from "../src/task-widget.ts";
 import { renderFooterLayout, type ActivityState, type FooterActivity, type FooterHit, type FooterTarget } from "../src/footer.ts";
+import { resolveFileLinks } from "../src/file-links.ts";
 import { openJarHistory } from "../src/history-ui.ts";
 import { GOAL_ENTRY, GoalStore } from "../src/goals.ts";
 import { GoalLoop } from "../src/goal-loop.ts";
@@ -70,6 +71,11 @@ const WELCOME_CLICK_DEDUPE_MS = 400;
 /** Conversation content, unlike startup metadata or extension bookkeeping. */
 const SESSION_TRANSCRIPT_ENTRIES = new Set(["message", "custom_message", "compaction", "branch_summary"]);
 export default function piJar(pi: ExtensionAPI): void {
+  let sessionCwd = "";
+  pi.registerMarkdownTransformer?.((markdown, context) => {
+    if (context.messageType !== "assistant") return markdown;
+    return resolveFileLinks(markdown, sessionCwd);
+  });
   const delegatedChild = process.env[CHILD_ENV] === "1";
   const delegatedWorktree = delegatedChild ? process.env[CHILD_WORKTREE_ENV] : undefined;
   if (delegatedChild) {
@@ -938,6 +944,7 @@ export default function piJar(pi: ExtensionAPI): void {
     try { goals?.restore(branch ?? sessionBranch(ctx)); } catch { goals?.restore([]); }
   };
   pi.on("session_start", (event, ctx) => {
+    sessionCwd = ctx.cwd;
     sideUsage.clear();
     sessionPin = undefined;
     if (!profileStore) initializeProfiles(ctx);

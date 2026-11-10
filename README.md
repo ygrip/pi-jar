@@ -123,6 +123,10 @@ For API-key accounts, set key variables in Pi's environment, then add references
 
 Routing defaults to off. Use **Accounts → Account routing policy** to enable sticky, round-robin, or quota-first routing. Setup details and credential-safety guidance: [Multi-account routing](docs/MULTI_ACCOUNT.md).
 
+## Local file links
+
+Pi-jar resolves local Markdown links in assistant messages against the session working directory for terminal display. HTTP links and stored messages stay unchanged. Opening links still depends on terminal hyperlink support and your system's file handler.
+
 ## Popup navigation
 
 Pi-jar questions (`jar_ask`) sit at the bottom above other pi-jar popups, which resume when the question finishes. Their compact option list supports ↑/↓ selection, PgUp/PgDn or wheel scrolling, and shows descriptions for the selected option only.
