@@ -1,6 +1,6 @@
 import { getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
 import { cacheBreakLines } from "./cache-breaks-view.ts";
-import type { CacheBreakState } from "./cache-breaks.ts";
+import { summarizeBreaks, type CacheBreakState } from "./cache-breaks.ts";
 import { contextBreakdown, contextLines } from "./context-view.ts";
 import { openPanel, type Paint, type PanelTab } from "./panel.ts";
 import type { Quota } from "./quota.ts";
@@ -8,6 +8,7 @@ import type { AccountQuota } from "./usage-view.ts";
 import type { SideUsage } from "./side-model.ts";
 import { collectUsage, usageLines } from "./usage-view.ts";
 import { sessionBranch } from "./session-branch.ts";
+import { auditSession, tokenAuditLines } from "./token-audit.ts";
 
 /** Pi's default compaction reserve, used when its settings cannot be read. */
 const DEFAULT_RESERVE = 16_384;
@@ -56,7 +57,7 @@ export function contextFor(pi: ExtensionAPI, ctx: ExtensionContext, options?: Pr
 }
 
 /** `/usage`, `/context` and `/cache-breaks`: one tabbed panel, like Claude's usage and context views. */
-export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void {
+export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): { openTokenAudit(ctx: ExtensionContext): Promise<void> } {
   let parts: PromptParts | undefined;
   pi.on("before_agent_start", (event) => {
     parts = { contextFiles: event.systemPromptOptions.contextFiles ?? [], skills: event.systemPromptOptions.skills ?? [] };
@@ -67,6 +68,15 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
     // panel open, lazily on first render, so scrolling/resizing does not repeat O(history) work.
     let usage: ReturnType<typeof collectUsage> | undefined;
     let context: ReturnType<typeof contextFor> | undefined;
+    let audit: ReturnType<typeof auditSession> | undefined;
+    const sideTotals = () => {
+      const calls = deps.side.all();
+      return { calls: calls.length, cost: calls.reduce((sum, call) => sum + call.cost, 0) };
+    };
+    const breakTotals = (state: CacheBreakState) => {
+      const totals = summarizeBreaks(state.breaks);
+      return { count: totals.count, rewritten: totals.rewritten, cost: totals.cost };
+    };
     return [
       { name: "Usage", render: (width, fg) => {
         usage ??= collectUsage(sessionBranch(ctx) as never, deps.side.all());
@@ -85,7 +95,15 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
         context ??= contextFor(pi, ctx, parts);
         return contextLines(context, width, fg);
       } },
-      ...(deps.cacheBreaks ? [{ name: "Cache", render: (width: number, fg: Paint) => cacheBreakLines({ ...deps.cacheBreaks!(ctx), now: Date.now() }, width, fg) }] : [])
+      ...(deps.cacheBreaks ? [{ name: "Cache", render: (width: number, fg: Paint) => cacheBreakLines({ ...deps.cacheBreaks!(ctx), now: Date.now() }, width, fg) }] : []),
+      { name: "Audit", render: (width, fg) => {
+        audit ??= auditSession({
+          entries: sessionBranch(ctx),
+          side: sideTotals(),
+          ...(deps.cacheBreaks ? { breaks: breakTotals(deps.cacheBreaks(ctx)) } : {})
+        });
+        return tokenAuditLines(audit, width, fg);
+      } }
     ];
   };
   const plain = (_color: string, text: string) => text;
@@ -103,4 +121,7 @@ export function registerInfoPanels(pi: ExtensionAPI, deps: InfoPanelDeps): void 
   pi.registerCommand("usage", { description: "Session cost, tokens per model and plan limits (pi-jar)", handler: async (_args, ctx) => open(ctx, 0) });
   pi.registerCommand("context", { description: "Breakdown of what fills the context window (pi-jar)", handler: async (_args, ctx) => open(ctx, 1) });
   if (deps.cacheBreaks) pi.registerCommand("cache-breaks", { description: "Costly prompt-cache breaks in this session and what changed (pi-jar)", handler: async (_args, ctx) => open(ctx, 2) });
+  const auditTab = deps.cacheBreaks ? 3 : 2;
+  pi.registerCommand("token-audit", { description: "Where tokens and cost go: top tool results, reasoning, repeated reads, cache misses (pi-jar)", handler: async (_args, ctx) => open(ctx, auditTab) });
+  return { openTokenAudit: (ctx: ExtensionContext) => open(ctx, auditTab) };
 }

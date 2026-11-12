@@ -47,7 +47,7 @@ export async function openJarSettings(
     const fields = () => {
       if (choosing) return choices().length;
       if (page === "footer") return FOOTER_FIELDS.length;
-      if (page === "pi") return 8;
+      if (page === "pi") return 9;
       if (page === "accounts") {
         if (manageAccounts) return 2;
         return 1;
@@ -100,6 +100,7 @@ export async function openJarSettings(
         else if (index === 5) update({ ...state, advisorGates: !state.advisorGates });
         else if (index === 6) update({ ...state, cacheDiagnostics: !state.cacheDiagnostics });
         else if (index === 7) update({ ...state, readCache: !state.readCache });
+        else if (index === 8) update({ ...state, lazyToolOutput: !state.lazyToolOutput });
 
       } else if (index === 0) {
         const at = Math.max(0, accents.indexOf(state.accent));
@@ -191,7 +192,8 @@ export async function openJarSettings(
             row(4, "Advisor (jar_advisor, /advisor)", state.advisor ? "ON" : "OFF", state.advisor),
             row(5, "Advisor gates (loops, repeated failures)", state.advisorGates ? "ON" : "OFF", state.advisorGates),
             row(6, "Cache diagnostics (explain cache breaks)", state.cacheDiagnostics ? "ON" : "OFF", state.cacheDiagnostics),
-            row(7, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache)
+            row(7, "Repeated-read stub (unchanged re-reads)", state.readCache ? "ON" : "OFF", state.readCache),
+            row(8, "Lazy tool output (stub stale large results)", state.lazyToolOutput ? "ON" : "OFF", state.lazyToolOutput)
           ] : page === "accounts" ? [
             row(0, "Account routing policy", isUnsafeRouting(state.accountRouting) ? "BLOCKED (unsafe)" : state.accountRouting.mode.toUpperCase(), state.accountRouting.mode !== "off"),
             ...(manageAccounts ? [row(1, "Manage accounts…", "OPEN", true)] : [])
@@ -216,7 +218,8 @@ export async function openJarSettings(
             : choosing ? " Select a value; Enter/click to save, Esc to cancel"
             : page === "footer" ? ` Footer fields ${start + 1}–${start + rows.length}/${fields()}`
             : page === "pi" ? (selected === 6 ? " Names what changed when a call re-sent cached context (/cache-breaks)"
-              : selected === 7 ? " An unchanged re-read of the same range returns a short stub" : " Fullscreen mode enables clicks and copy-on-select")
+              : selected === 7 ? " An unchanged re-read of the same range returns a short stub"
+              : selected === 8 ? " Stale large tool outputs become a stub; full text stays on disk (/token-audit)" : " Fullscreen mode enables clicks and copy-on-select")
             : page === "accounts" ? " Add provider accounts, manage sign-in and routing" : page === "profiles" ? " Switch only in a fresh, idle session; roles via /roles" : " Accent cycles through loaded themes")),
           ...rows,
           line(theme.fg("dim", choosing ? " ↑↓: choose · Enter/click: save · Esc: cancel"

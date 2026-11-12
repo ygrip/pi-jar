@@ -28,6 +28,8 @@ export interface JarVisualSettings {
   cacheDiagnostics: boolean;
   /** Opt-in: an unchanged repeated `read` of the same range returns a short stub instead of the content. */
   readCache: boolean;
+  /** Replace stale large tool outputs with a short stub (full text saved to disk) once that pays for the cache rewrite. */
+  lazyToolOutput: boolean;
   /** Glyph set for footer, composer and views: unicode, Nerd Font icons, or plain ascii. */
   icons: IconSet;
   footer: FooterSettings;
@@ -43,7 +45,7 @@ export function isMaxSubagents(value: unknown): value is MaxSubagents {
 
 export const SETTINGS_FILE = "pi-jar-settings.json";
 export function defaultVisualSettings(footer: FooterSettings = DEFAULT_FOOTER_SETTINGS): JarVisualSettings {
-  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 2, advisor: true, advisorGates: false, cacheDiagnostics: true, readCache: false, icons: "unicode", accountRouting: { mode: "off", accounts: [] }, footer: { ...footer } };
+  return { version: 1, accent: "follow", animations: true, ui: true, composer: true, mascot: true, suggestions: true, goalRounds: 8, maxSubagents: 2, advisor: true, advisorGates: false, cacheDiagnostics: true, readCache: false, lazyToolOutput: true, icons: "unicode", accountRouting: { mode: "off", accounts: [] }, footer: { ...footer } };
 }
 
 /**
@@ -88,6 +90,7 @@ export function loadVisualSettings(directory: string): JarVisualSettings {
     advisorGates: typeof value.advisorGates === "boolean" ? value.advisorGates : fallback.advisorGates,
     cacheDiagnostics: typeof value.cacheDiagnostics === "boolean" ? value.cacheDiagnostics : fallback.cacheDiagnostics,
     readCache: typeof value.readCache === "boolean" ? value.readCache : fallback.readCache,
+    lazyToolOutput: typeof value.lazyToolOutput === "boolean" ? value.lazyToolOutput : fallback.lazyToolOutput,
     icons: ICON_SETS.some((set) => set === value.icons) ? value.icons as IconSet : fallback.icons,
     footer: Object.fromEntries(FOOTER_FIELDS.map((field) => [field,
       typeof footer[field] === "boolean" ? footer[field] : fallback.footer[field]])) as FooterSettings

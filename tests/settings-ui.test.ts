@@ -138,6 +138,9 @@ test("retired context controls are absent and remaining Pi settings keep working
       pane.handleInput(" ");
       assert.equal(state.readCache, true);
       assert.equal(state.cacheDiagnostics, true);
+      down(1);
+      pane.handleInput(" ");
+      assert.equal(state.lazyToolOutput, false, "lazy tool output is on by default");
       pane.handleInput("\x1b[B"); // wraps to the first Pi row
       assert.match(text(), /❯ Mouse clicks/);
       pane.handleInput("\t");

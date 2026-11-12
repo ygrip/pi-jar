@@ -524,7 +524,7 @@ test("/cache-breaks opens the Cache tab next to Usage and Context", async () => 
   const pi = { on() {}, registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => Promise<void>; description: string }) => { commands.set(name, options); } };
   registerInfoPanels(pi as never, { side: { all: () => [] } as never, quota: () => undefined, quotaFailure: () => undefined, quotaEnabled: () => false, refreshQuota() {},
     cacheBreaks: () => ({ enabled: true, calls: 9, breaks: [entry()], file: undefined }) });
-  assert.deepEqual([...commands.keys()].sort(), ["cache-breaks", "context", "usage"]);
+  assert.deepEqual([...commands.keys()].sort(), ["cache-breaks", "context", "token-audit", "usage"]);
   assert.match(commands.get("cache-breaks")!.description, /prompt-cache breaks/);
   const notices: string[] = [];
   await commands.get("cache-breaks")!.handler("", { hasUI: false, mode: "print", ui: { notify: (text: string) => notices.push(text) } });
@@ -535,5 +535,5 @@ test("/cache-breaks opens the Cache tab next to Usage and Context", async () => 
   const bare = new Map<string, unknown>();
   registerInfoPanels({ on() {}, registerCommand: (name: string) => { bare.set(name, true); } } as never,
     { side: { all: () => [] } as never, quota: () => undefined, quotaFailure: () => undefined, quotaEnabled: () => false, refreshQuota() {} });
-  assert.deepEqual([...bare.keys()].sort(), ["context", "usage"]);
+  assert.deepEqual([...bare.keys()].sort(), ["context", "token-audit", "usage"]);
 });

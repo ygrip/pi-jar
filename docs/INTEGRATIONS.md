@@ -50,7 +50,7 @@ ctx.ui.setStatus("pi-jar.quota.openai-codex", JSON.stringify({
 | `pi-jar.goal` | goal events (`set`, `status`, `round`; v1 `set`/`clear` accepted) | active branch |
 | `pi-jar.plan` | plan state (`enabled`, `steps`, `text`, `path`, `title`) | active branch |
 
-Hidden context messages (`pi-jar.plan-context`, `pi-jar.plan-reminder`, `pi-jar.goal-context`, `pi-jar.goal-continuation`, `pi-jar.moderator-context`, `pi-jar.suggest-reminder`) are filtered or deduplicated in the `context` hook, so they never accumulate. Pi applies a `context` rewrite to one LLM call only and re-sends the full persisted history before the next, so the pruning runs on every call.
+Hidden context messages (`pi-jar.plan-context`, `pi-jar.plan-reminder`, `pi-jar.goal-context`, `pi-jar.goal-continuation`, `pi-jar.moderator-context`, `pi-jar.suggest-reminder`) are filtered or deduplicated in the `context` hook, so they never accumulate. Dedupe only looks at earlier messages and never drops an older copy: removing a mid-history message rewrites the cached prefix. The goal context is static (task state lives in `jar_todo` results) and the moderator roster lists fleet membership only, so each is added once per change instead of once per turn. Pi applies a `context` rewrite to one LLM call only and re-sends the full persisted history before the next, so the pruning runs on every call.
 
 ## Tools pi-jar registers
 
@@ -74,7 +74,7 @@ Mode-specific tools are deactivated when their mode is off, so their schema and 
 
 ## Commands that overlap other packages
 
-pi-jar registers `/usage`, `/context`, `/cache-breaks` and `/advisor`. Pi keeps both commands when two extensions register the same name and suffixes the later one (for example `/usage:2`), so remove packages whose commands you no longer need (such as a separate usage, context or advisor extension) to keep the plain names on pi-jar.
+pi-jar registers `/usage`, `/context`, `/cache-breaks`, `/token-audit` and `/advisor`. Pi keeps both commands when two extensions register the same name and suffixes the later one (for example `/usage:2`), so remove packages whose commands you no longer need (such as a separate usage, context or advisor extension) to keep the plain names on pi-jar.
 
 ## Keeping sessions cheap (recommendations)
 

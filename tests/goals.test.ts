@@ -90,10 +90,14 @@ test("goal command starts the loop; edits are blocked until a task is open", asy
   h.todos.add("Register command");
   assert.equal(await h.guard("write", { path: "a.ts" }), undefined);
   const injected = await h.events.get("before_agent_start")!({}, h.ctx);
-  assert.match(injected.message.content, /ACTIVE GOAL[\s\S]*Ship the hello command[\s\S]*\[ \] Register command/);
+  assert.match(injected.message.content, /ACTIVE GOAL[\s\S]*Ship the hello command[\s\S]*jar_todo list/);
+  assert.doesNotMatch(injected.message.content, /Register command/, "the task list lives in jar_todo results, not in a message that changes every turn");
+  h.todos.add("Wire it up");
+  const again = await h.events.get("before_agent_start")!({}, h.ctx);
+  assert.equal(again.message.content, injected.message.content, "static context: repeats are deduplicated");
 });
 
-test("jar_goal is active only while a goal runs", async () => {
+test("jar_goal is offered from the first goal on and then stays: every toggle rewrites the cached prompt", async () => {
   const h = harness();
   await h.events.get("before_agent_start")!({}, h.ctx);
   assert.deepEqual(h.active(), [], "no goal: no schema or rules tokens");
@@ -102,7 +106,10 @@ test("jar_goal is active only while a goal runs", async () => {
   assert.deepEqual(h.active(), [GOAL_TOOL]);
   h.goals.setStatus("complete", { evidence: "tests pass" });
   await h.events.get("before_agent_start")!({}, h.ctx);
-  assert.deepEqual(h.active(), []);
+  assert.deepEqual(h.active(), [GOAL_TOOL]);
+  await h.events.get("session_start")!({}, h.ctx);
+  await h.events.get("before_agent_start")!({}, h.ctx);
+  assert.deepEqual(h.active(), [], "a new session starts without the goal tool");
 });
 
 test("goal prompts keep a stable prefix on every LLM call: repeats dropped, sent copies kept, all dropped once complete", async () => {
@@ -219,7 +226,8 @@ test("goal continuation uses live tasks even when compacted context omits the or
   await h.commands.get("goal")!("Ship the feature", h.ctx);
   const first = h.todos.add("Implement the feature")!;
   const initial = await h.events.get("before_agent_start")!({}, h.ctx);
-  assert.match(initial.message.content, /Implement the feature/);
+  assert.doesNotMatch(initial.message.content, /Implement the feature/);
+  assert.match(initial.message.content, /jar_todo list/);
   h.todos.setDone(first.id, true);
   h.todos.add("Verify the feature");
   // Model-visible compaction projection is not the append-only task/goal state.

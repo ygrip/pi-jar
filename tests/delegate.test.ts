@@ -939,19 +939,21 @@ test("delegation routing guidance is present before any agent is launched", () =
   assert.equal(result.message, undefined, "initial guidance does not add hidden transcript messages");
 });
 
-test("stale moderator context is pruned on every LLM call while the fleet is retained", async () => {
+test("moderator roster keeps older copies for a stable prefix and drops only identical repeats", async () => {
   const fake = fakeSpawn((child) => { say(child, "ready"); settle(child); });
   const host = moderatorHost(fake.spawn);
   await host.delegate.execute("d", { tasks: [{ task: "inspect" }] }, undefined, undefined, quiet);
   const messages = [
     { customType: "pi-jar.moderator-context", content: "old fleet" },
     { role: "user", content: "normal" },
+    { customType: "pi-jar.moderator-context", content: "old fleet" },
     { customType: "pi-jar.moderator-context", content: "new fleet" }
   ];
-  // Pi re-sends the full persisted history to the context hook before each LLM call.
+  // Pi re-sends the full persisted history to the context hook before each LLM call. Dropping the
+  // older roster would rewrite the cached prefix, so only the identical repeat goes.
   for (let call = 1; call <= 3; call++) {
-    const pruned = host.events.get("context")!({ messages });
-    assert.deepEqual(pruned?.messages.map((item) => (item as { content: string }).content), ["normal", "new fleet"], `call ${call}`);
+    const projected = host.events.get("context")!({ messages });
+    assert.deepEqual(projected?.messages.map((item) => (item as { content: string }).content), ["old fleet", "normal", "new fleet"], `call ${call}`);
   }
   await host.registry.records()[0]!.stop();
 });

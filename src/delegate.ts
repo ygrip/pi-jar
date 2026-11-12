@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { projectWorkflowMessages } from "./workflow-context.ts";
 import type { ChangeTracker } from "./changes.ts";
 import { CHILD_BASELINE_ENV, readChildBaseline } from "./child-baselines.ts";
 import type { ModelRoleManager } from "./model-roles.ts";
@@ -1273,8 +1274,6 @@ export interface DelegateOptions {
   withheldEnv?: () => readonly string[];
   /** The agent was permanently stopped or discarded: release its discussion identity. */
   discussionRetire?: (key: string) => void;
-  /** Unread discussion messages waiting for an agent, shown in the moderator's fleet line. */
-  discussionUnread?: (key: string) => number;
   /** The moderator's unread discussion mail as one notice, marked read; it rides along with subagent events. */
   discussionDigest?: () => string | undefined;
   /** Settled quiet time before a retained child's process hibernates; defaults to HIBERNATE_AFTER_MS. */
@@ -1394,10 +1393,6 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     try { return options.discussionEnv?.(key, name) ?? {}; }
     catch (error) { console.error("pi-jar: discussion broker unavailable for a subagent", error); return {}; }
   };
-  const discussionUnread = (key: string): number => {
-    try { return Math.max(0, Math.floor(options.discussionUnread?.(key) ?? 0)) || 0; }
-    catch { return 0; } // the count is decoration; the fleet line must still render
-  };
   const discussionDigest = (): string | undefined => {
     try { return options.discussionDigest?.(); }
     catch (error) { console.error("pi-jar: could not read the moderator's discussion mail", error); return undefined; }
@@ -1406,6 +1401,8 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     try { options.discussionRetire?.(key); } catch (error) { console.error("pi-jar: could not retire a subagent's discussion identity", error); }
   };
 
+  const MODERATOR_CONTEXT = "pi-jar.moderator-context";
+  let moderatorSeen = false;
   pi.on?.("before_agent_start", (_event, ctx) => {
     controllerContext = ctx;
     const retained = registry.records().filter((record) => isRetained(record.run.state));
@@ -1416,31 +1413,27 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       "For substantial work, identify independent, bounded tasks before starting tool-heavy implementation. Delegate when parallel ownership saves work; do small, tightly coupled tasks directly.",
       "Use scout for fresh research, external documentation and cross-repository discovery; fork for read-only review with conversation context; worktree only for isolated implementation (no shells or external paths: research those yourself or with a scout first). Completions arrive as pi-jar.subagent events: never poll, reuse retained agents instead of spawning, and stop finished worktree workers to reconcile their changes into /diff."
     ].join("\n");
-    if (!retained.length) return { systemPrompt };
-    const fleet = retained.map((record) => {
-      const unread = discussionUnread(record.key);
-      return `- ${record.key} · ${record.run.name} · ${record.run.state}${unread ? ` · ${plural(unread, "unread discussion message")}` : ""} · ${record.run.role}: ${cleanText(record.run.task, 140)}`;
-    }).join("\n");
-    return { systemPrompt, message: { customType: "pi-jar.moderator-context", display: false, content: [
+    if (!retained.length) {
+      // A stale roster must not outlive the fleet, but silence before any fleet existed costs nothing.
+      if (!moderatorSeen) return { systemPrompt };
+      return { systemPrompt, message: { customType: MODERATOR_CONTEXT, display: false, content: "[PI-JAR MODERATOR MODE] No retained subagents." } };
+    }
+    moderatorSeen = true;
+    // Membership only: live state arrives as pi-jar.subagent events, so this text changes (and a new
+    // hidden message is added) only when an agent joins or leaves, not on every state change.
+    const fleet = retained.map((record) => `- ${record.key} · ${record.run.name} · ${record.run.role}: ${cleanText(record.run.task, 140)}`).join("\n");
+    return { systemPrompt, message: { customType: MODERATOR_CONTEXT, display: false, content: [
       "[PI-JAR MODERATOR MODE]",
-      "Retained subagents own their delegated tasks: don't duplicate their work. An accepted receipt is not completion; results arrive as pi-jar.subagent events. Hibernated agents relaunch intact on resume or ask.",
+      "Retained subagents own their delegated tasks: don't duplicate their work. An accepted receipt is not completion; results arrive as pi-jar.subagent events (jar_subagent peek for live state). Hibernated agents relaunch intact on resume or ask.",
       "Retained fleet:",
       fleet
     ].join("\n") } };
   });
-  // Context rewrites apply to one LLM call only, so the stale copies must be pruned on every call.
+  // Context rewrites apply to one LLM call only. Older roster messages stay (dropping one would rewrite
+  // the cached prefix); identical repeats are dropped, which depends only on earlier messages.
   pi.on?.("context", (event) => {
-    const active = registry.retained() > 0;
-    let latest = -1;
-    let prune = false;
-    for (let index = event.messages.length - 1; index >= 0; index--) {
-      if ((event.messages[index] as { customType?: string }).customType !== "pi-jar.moderator-context") continue;
-      if (!active || latest >= 0) prune = true;
-      else latest = index;
-    }
-    if (!prune) return;
-    return { messages: event.messages.filter((raw, index) =>
-      (raw as { customType?: string }).customType !== "pi-jar.moderator-context" || (active && index === latest)) };
+    const messages = projectWorkflowMessages(event.messages, { [MODERATOR_CONTEXT]: { keep: true, dedupe: true } });
+    if (messages) return { messages };
   });
 
   /** Native RPC drives registry state. Completion events wait in our own queue, never Pi's irrevocable

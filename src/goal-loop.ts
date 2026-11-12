@@ -13,6 +13,8 @@ export const DEFAULT_GOAL_ROUNDS = 8;
 const CONTEXT_TYPE = "pi-jar.goal-context";
 const CONTINUATION_TYPE = "pi-jar.goal-continuation";
 const WRITE_TOOLS = new Set(["write", "edit"]);
+/** Open tasks listed in each continuation; the rest is one jar_todo call away. */
+const OPEN_TASKS_SHOWN = 5;
 
 export interface GoalLoopOptions {
   goals: () => GoalStore | undefined;
@@ -51,6 +53,8 @@ export class GoalLoop {
   private prompting = 0;
   private restoreRole: (() => Promise<void>) | undefined;
   private roleInUse: "implement" | "advisor" | undefined;
+  /** Once jar_goal has been offered in a session it stays: every toggle rewrites the cached prompt. */
+  private goalToolOffered = false;
 
   constructor(pi: ExtensionAPI, options: GoalLoopOptions) {
     this.pi = pi;
@@ -85,8 +89,8 @@ export class GoalLoop {
     this.roleInUse = role;
   }
 
+  /** Static for the goal's lifetime: a changing task list would add a new hidden message on every turn. */
   private context(goal: Goal): string {
-    const tasks = this.tasks();
     return [
       "[PI-JAR ACTIVE GOAL]",
       goal.text,
@@ -95,18 +99,20 @@ export class GoalLoop {
       "- Keep jar_todo synchronized: mark tasks done only when their outcome is verified, add tasks for newly discovered work.",
       "- pi-jar keeps you going while tasks remain. When all are done an audit pass verifies the goal; only then call jar_goal complete with evidence.",
       "- If you are truly blocked on the user, call jar_goal block with the reason instead of stopping silently.",
-      "Current tasks:",
-      taskLines(tasks)
+      "Task state: call jar_todo list (the task list is not repeated here, so this message stays identical and is sent once)."
     ].join("\n");
   }
 
   private implementMessage(goal: Goal, round: number): string {
     const open = this.tasks().filter((item) => !item.done);
+    const shown = open.slice(0, OPEN_TASKS_SHOWN);
+    const hidden = open.length - shown.length;
     return [
       `[PI-JAR GOAL · implementor · round ${round}/${this.maxRounds()}]`,
       "Goal: " + goal.text,
       open.length ? "Continue with the open tasks. Verify each outcome before marking it done:" : "There are no tasks yet. Break the goal into concrete jar_todo tasks now, then start the first one.",
-      open.length ? taskLines(open) : ""
+      open.length ? taskLines(shown) : "",
+      hidden > 0 ? `(+${hidden} more open: jar_todo list)` : ""
     ].filter(Boolean).join("\n");
   }
 
@@ -117,8 +123,7 @@ export class GoalLoop {
       "All tracked tasks are marked done. Act as an independent auditor: check the goal against the current repository state, run the relevant tests or commands, and look for missed requirements or regressions.",
       "- If anything is missing or wrong, add jar_todo tasks for the gaps (do not edit files during the audit) and stop; the implementor will continue.",
       "- If the goal is fully achieved, call jar_goal complete with concrete evidence (commands run, results, files).",
-      "Tasks:",
-      taskLines(this.tasks())
+      `Tasks: ${this.tasks().length} tracked, all done (jar_todo list for details).`
     ].join("\n");
   }
 
@@ -229,6 +234,7 @@ export class GoalLoop {
       }
     });
 
+    this.pi.on("session_start", () => { this.goalToolOffered = false; });
     this.pi.on("ui_prompt_start", () => { this.prompting++; });
     this.pi.on("ui_prompt_end", () => { this.prompting = Math.max(0, this.prompting - 1); });
 
@@ -264,8 +270,10 @@ export class GoalLoop {
 
     this.pi.on("before_agent_start", async (_event, ctx) => {
       const goal = this.goal();
-      // jar_goal is only useful while a goal runs; inactive, it costs no schema or rules tokens.
-      setToolActive(this.pi, GOAL_TOOL, !!goal && goal.status !== "complete");
+      // jar_goal is only useful while a goal runs; inactive, it costs no schema or rules tokens. Tools sit
+      // at the front of the prompt, so once offered it stays for the session instead of toggling per goal.
+      if (goal && goal.status !== "complete") this.goalToolOffered = true;
+      setToolActive(this.pi, GOAL_TOOL, this.goalToolOffered);
       if (!goal || goal.status === "complete") return;
       if (goal.status === "active" && !this.options.planActive()) await this.useRole(goal.phase === "audit" ? "advisor" : "implement", ctx);
       return { message: { customType: CONTEXT_TYPE, content: this.context(goal), display: false } };

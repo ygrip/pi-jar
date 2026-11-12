@@ -43,7 +43,8 @@ function normalizeProfile(value: unknown): JarProfile | undefined {
     || typeof settings.composer !== "boolean" || typeof settings.mascot !== "boolean" || typeof settings.suggestions !== "boolean"
     || typeof settings.advisor !== "boolean" || typeof settings.advisorGates !== "boolean"
     || (settings.cacheDiagnostics !== undefined && typeof settings.cacheDiagnostics !== "boolean")
-    || (settings.readCache !== undefined && typeof settings.readCache !== "boolean") || !Number.isInteger(settings.goalRounds)
+    || (settings.readCache !== undefined && typeof settings.readCache !== "boolean")
+    || (settings.lazyToolOutput !== undefined && typeof settings.lazyToolOutput !== "boolean") || !Number.isInteger(settings.goalRounds)
     || (settings.goalRounds as number) < 1 || (settings.goalRounds as number) > 50
     || !isMaxSubagents(settings.maxSubagents) || typeof settings.accent !== "string"
     || !(settings.accent === "follow" || settings.accent === "default" || ACCENT_NAMES.includes(settings.accent as never))
@@ -56,6 +57,7 @@ function normalizeProfile(value: unknown): JarProfile | undefined {
   const { contextDiet: _diet, contextBudget: _budget, ...supported } = settings;
   return { id: raw.id as string, name: raw.name, theme: raw.theme, settings: { ...supported,
     cacheDiagnostics: settings.cacheDiagnostics ?? true, readCache: settings.readCache ?? false,
+    lazyToolOutput: settings.lazyToolOutput ?? true,
     accountRouting: parseAccountRouting(settings.accountRouting) } as unknown as JarVisualSettings, roles: parseRoleConfig(raw.roles) };
 }
 function atomicSave(file: string, document: ProfileDocument): string {
