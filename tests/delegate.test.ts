@@ -958,6 +958,18 @@ test("moderator roster keeps older copies for a stable prefix and drops only ide
   await host.registry.records()[0]!.stop();
 });
 
+test("an emptied fleet supersedes a stale roster once, and a fresh session never sees the notice", async () => {
+  const host = moderatorHost(fakeSpawn(() => {}).spawn);
+  const start = host.events.get("before_agent_start") as unknown as (event: { systemPrompt: string }, ctx: unknown) => { message?: { content: string } };
+  const withBranch = (branch: unknown[]) => ({ ...quiet, sessionManager: { getBranch: () => branch } });
+  const roster = { type: "custom_message", customType: "pi-jar.moderator-context", content: "[PI-JAR MODERATOR MODE]\nRetained fleet:\n- a" };
+  assert.equal(start({ systemPrompt: "s" }, withBranch([])).message, undefined, "a session that never had a fleet pays nothing");
+  assert.match(start({ systemPrompt: "s" }, withBranch([roster])).message!.content, /No retained subagents/);
+  const notice = { ...roster, content: start({ systemPrompt: "s" }, withBranch([roster])).message!.content };
+  assert.equal(start({ systemPrompt: "s" }, withBranch([roster, notice])).message, undefined, "the notice is sent once");
+  assert.equal(start({ systemPrompt: "s" }, withBranch([])).message, undefined, "no state leaks into the next session");
+});
+
 test("jar_delegate returns before the first turn ends so the moderator can steer", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const gate = new EventEmitter();

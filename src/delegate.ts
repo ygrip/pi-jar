@@ -1402,7 +1402,19 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
   };
 
   const MODERATOR_CONTEXT = "pi-jar.moderator-context";
-  let moderatorSeen = false;
+  const NO_FLEET_NOTICE = "[PI-JAR MODERATOR MODE] No retained subagents.";
+  /** Whether this session's history ends with a roster that is now stale. Derived from the branch, so it can never leak across sessions. */
+  const staleRosterInHistory = (ctx: ExtensionContext): boolean => {
+    let branch: readonly unknown[];
+    try { branch = ctx.sessionManager?.getBranch?.() ?? []; }
+    catch { return false; }
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const entry = branch[index] as { type?: string; customType?: string; content?: unknown };
+      if (entry.type !== "custom_message" || entry.customType !== MODERATOR_CONTEXT) continue;
+      return entry.content !== NO_FLEET_NOTICE;
+    }
+    return false;
+  };
   pi.on?.("before_agent_start", (_event, ctx) => {
     controllerContext = ctx;
     const retained = registry.records().filter((record) => isRetained(record.run.state));
@@ -1414,11 +1426,10 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
       "Use scout for fresh research, external documentation and cross-repository discovery; fork for read-only review with conversation context; worktree only for isolated implementation (no shells or external paths: research those yourself or with a scout first). Completions arrive as pi-jar.subagent events: never poll, reuse retained agents instead of spawning, and stop finished worktree workers to reconcile their changes into /diff."
     ].join("\n");
     if (!retained.length) {
-      // A stale roster must not outlive the fleet, but silence before any fleet existed costs nothing.
-      if (!moderatorSeen) return { systemPrompt };
-      return { systemPrompt, message: { customType: MODERATOR_CONTEXT, display: false, content: "[PI-JAR MODERATOR MODE] No retained subagents." } };
+      // A stale roster must not outlive the fleet; a session that never had one pays nothing.
+      if (!staleRosterInHistory(ctx)) return { systemPrompt };
+      return { systemPrompt, message: { customType: MODERATOR_CONTEXT, display: false, content: NO_FLEET_NOTICE } };
     }
-    moderatorSeen = true;
     // Membership only: live state arrives as pi-jar.subagent events, so this text changes (and a new
     // hidden message is added) only when an agent joins or leaves, not on every state change.
     const fleet = retained.map((record) => `- ${record.key} · ${record.run.name} · ${record.run.role}: ${cleanText(record.run.task, 140)}`).join("\n");
