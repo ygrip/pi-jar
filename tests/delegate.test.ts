@@ -970,6 +970,19 @@ test("an emptied fleet supersedes a stale roster once, and a fresh session never
   assert.equal(start({ systemPrompt: "s" }, withBranch([])).message, undefined, "no state leaks into the next session");
 });
 
+test("prompts without a fleet scan the session branch once, not once per prompt", () => {
+  const host = moderatorHost(fakeSpawn(() => {}).spawn);
+  const start = host.events.get("before_agent_start") as unknown as (event: { systemPrompt: string }, ctx: unknown) => { message?: { content: string } };
+  const branch = Array.from({ length: 20_000 }, (_unused, index) => ({ type: "message", id: String(index) }));
+  let reads = 0;
+  const ctx = { ...quiet, sessionManager: { getBranch: () => { reads++; return branch; } } };
+  for (let prompt = 0; prompt < 500; prompt++) assert.equal(start({ systemPrompt: "s" }, ctx).message, undefined);
+  assert.equal(reads, 1);
+  (host.events.get("session_tree") as unknown as (event: object, ctx: unknown) => void)({}, ctx);
+  start({ systemPrompt: "s" }, ctx);
+  assert.equal(reads, 2, "a tree change scans again");
+});
+
 test("jar_delegate returns before the first turn ends so the moderator can steer", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const gate = new EventEmitter();

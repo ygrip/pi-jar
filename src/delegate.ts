@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { projectWorkflowMessages } from "./workflow-context.ts";
+import { sessionBranch } from "./session-branch.ts";
 import type { ChangeTracker } from "./changes.ts";
 import { CHILD_BASELINE_ENV, readChildBaseline } from "./child-baselines.ts";
 import type { ModelRoleManager } from "./model-roles.ts";
@@ -1382,7 +1383,7 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     cancelUpdates.clear();
   };
   pi.on?.("session_shutdown", () => { sessionActive = false; resetSession(); });
-  pi.on?.("session_start", (_event, ctx) => { resetSession(); sessionActive = true; controllerContext = ctx; });
+  pi.on?.("session_start", (_event, ctx) => { rosterStates = new WeakMap(); resetSession(); sessionActive = true; controllerContext = ctx; });
   const roleCandidates = (role: string) => {
     const manager = roles as ModelRoleManager & { resolveCandidates?: (name: string) => ReturnType<ModelRoleManager["resolveCandidates"]> };
     if (typeof manager.resolveCandidates === "function") return manager.resolveCandidates(role);
@@ -1403,10 +1404,16 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
 
   const MODERATOR_CONTEXT = "pi-jar.moderator-context";
   const NO_FLEET_NOTICE = "[PI-JAR MODERATOR MODE] No retained subagents.";
-  /** Whether this session's history ends with a roster that is now stale. Derived from the branch, so it can never leak across sessions. */
-  const staleRosterInHistory = (ctx: ExtensionContext): boolean => {
+  /**
+   * Whether a session's history ends with a roster that is now stale. The branch is scanned once per
+   * session (and again after the tree changes); every later prompt reads the remembered answer, which
+   * this hook keeps current because it is the only writer of these messages. Keyed by session manager
+   * and cleared on session start and tree changes, so it cannot leak across sessions.
+   */
+  let rosterStates = new WeakMap<object, { stale: boolean }>();
+  const scanForStaleRoster = (ctx: ExtensionContext): boolean => {
     let branch: readonly unknown[];
-    try { branch = ctx.sessionManager?.getBranch?.() ?? []; }
+    try { branch = sessionBranch(ctx); }
     catch { return false; }
     for (let index = branch.length - 1; index >= 0; index--) {
       const entry = branch[index] as { type?: string; customType?: string; content?: unknown };
@@ -1415,6 +1422,15 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     }
     return false;
   };
+  const rosterState = (ctx: ExtensionContext): { stale: boolean } => {
+    const manager = (ctx.sessionManager ?? ctx) as object;
+    const known = rosterStates.get(manager);
+    if (known) return known;
+    const state = { stale: scanForStaleRoster(ctx) };
+    rosterStates.set(manager, state);
+    return state;
+  };
+  pi.on?.("session_tree", () => { rosterStates = new WeakMap(); });
   pi.on?.("before_agent_start", (_event, ctx) => {
     controllerContext = ctx;
     const retained = registry.records().filter((record) => isRetained(record.run.state));
@@ -1427,11 +1443,14 @@ export function registerDelegate(pi: ExtensionAPI, roles: ModelRoleManager, regi
     ].join("\n");
     if (!retained.length) {
       // A stale roster must not outlive the fleet; a session that never had one pays nothing.
-      if (!staleRosterInHistory(ctx)) return { systemPrompt };
+      const state = rosterState(ctx);
+      if (!state.stale) return { systemPrompt };
+      state.stale = false;
       return { systemPrompt, message: { customType: MODERATOR_CONTEXT, display: false, content: NO_FLEET_NOTICE } };
     }
     // Membership only: live state arrives as pi-jar.subagent events, so this text changes (and a new
     // hidden message is added) only when an agent joins or leaves, not on every state change.
+    rosterState(ctx).stale = true;
     const fleet = retained.map((record) => `- ${record.key} · ${record.run.name} · ${record.run.role}: ${cleanText(record.run.task, 140)}`).join("\n");
     return { systemPrompt, message: { customType: MODERATOR_CONTEXT, display: false, content: [
       "[PI-JAR MODERATOR MODE]",

@@ -100,18 +100,38 @@ function privateDirectory(directory: string): void {
   chmodSync(directory, 0o700);
 }
 
-/** Owner-only directory and files, exclusive creation, never following links; content is verified on reuse. */
-export const diskSpill: SpillStore = {
-  ensure(file, text) {
-    privateDirectory(join(file, ".."));
-    if (holdsText(file, text)) return;
-    // Anything else at this path (stale, truncated, a link planted by someone else) is removed, then recreated exclusively.
-    try { unlinkSync(file); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    const descriptor = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-    try { writeSync(descriptor, text); }
-    finally { closeSync(descriptor); }
+/** `writeSync` as far as this module uses it: it may write fewer bytes than asked without throwing. */
+export type WriteBytes = (descriptor: number, bytes: Buffer, offset: number) => number;
+
+const writeFromOffset: WriteBytes = (descriptor, bytes, offset) => writeSync(descriptor, bytes, offset);
+
+/** Write every byte, or throw: a short write is retried and a write that makes no progress fails. */
+export function writeFully(descriptor: number, bytes: Buffer, write: WriteBytes = writeFromOffset): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = write(descriptor, bytes, offset);
+    if (!Number.isInteger(written) || written <= 0) throw new Error(`write stopped after ${offset} of ${bytes.length} bytes`);
+    offset += written;
   }
-};
+}
+
+/** Owner-only directory and files, exclusive creation, never following links. The copy is re-read and verified before it is trusted. */
+export function createDiskSpill(write: WriteBytes = writeFromOffset): SpillStore {
+  return {
+    ensure(file, text) {
+      privateDirectory(join(file, ".."));
+      if (holdsText(file, text)) return;
+      // Anything else at this path (stale, truncated, a link planted by someone else) is removed, then recreated exclusively.
+      try { unlinkSync(file); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const descriptor = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+      try { writeFully(descriptor, Buffer.from(text, "utf8"), write); }
+      finally { closeSync(descriptor); }
+      if (!holdsText(file, text)) throw new Error(`${file} does not hold the saved text`);
+    }
+  };
+}
+
+export const diskSpill: SpillStore = createDiskSpill();
 
 /** Remove session spill directories not touched for `maxAgeMs`. Returns what was removed. */
 export function pruneSpill(root: string, maxAgeMs: number, now: number): string[] {
@@ -138,6 +158,8 @@ export interface ProjectionEnvironment {
   /** Provider-reported context size when known; otherwise estimated from the messages. */
   contextTokens?: number | undefined;
   now: number;
+  /** When Pi last sent a keep-warm request for this session's cache; it can keep a cache warm without any assistant turn. */
+  lastWarmAt?: number | undefined;
   /** False keeps earlier replacements in place but starts no new sweep. */
   sweep: boolean;
 }
@@ -209,11 +231,13 @@ function unavailableStub(message: MessageLike, text: string): string {
 }
 
 /** Evidence that the next request will re-process the prompt anyway. */
-function cacheIsCold(messages: readonly MessageLike[], now: number, policy: LazyOutputPolicy): boolean {
+function cacheIsCold(messages: readonly MessageLike[], now: number, lastWarmAt: number | undefined, policy: LazyOutputPolicy): boolean {
   const assistants = messages.filter((message) => message.role === "assistant");
   const last = assistants.at(-1);
   if (!last || typeof last.timestamp !== "number") return true;
-  if (now - last.timestamp >= policy.coldIdleMs) return true;
+  // A keep-warm request refreshes the provider's expiry like a real turn does.
+  const lastTouch = Math.max(last.timestamp, lastWarmAt ?? Number.NEGATIVE_INFINITY);
+  if (now - lastTouch >= policy.coldIdleMs) return true;
   // Two recent large prompts that read (almost) nothing from the cache: it is not working in this session.
   const recent = assistants.slice(-2);
   if (recent.length < 2) return false;
@@ -314,10 +338,29 @@ export class LazyOutputProjector {
     return prepared;
   }
 
+  /**
+   * The prompt size of the last answered request plus what was added since. Read from the messages
+   * themselves, walking back only to that answer, so no session-wide computation runs per request.
+   */
+  #reportedContext(messages: MessageLike[]): number | undefined {
+    let addedChars = 0;
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index]!;
+      const usage = message.usage;
+      if (message.role === "assistant" && usage) {
+        const prompt = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+        if (prompt > 0) return prompt + estimateTokens(addedChars);
+      }
+      addedChars += messageChars(message);
+    }
+    return undefined;
+  }
+
   #sweep(messages: MessageLike[], environment: ProjectionEnvironment, result: Projection<unknown>): void {
     const policy = this.#policy;
-    // The reported size is free; the estimate walks the history, so it is only needed without one.
-    if (environment.contextTokens !== undefined && environment.contextTokens < policy.triggerTokens) return;
+    // Cheap guard first; the estimate walks the history, so it is only needed without any reported size.
+    const reported = environment.contextTokens ?? this.#reportedContext(messages);
+    if (reported !== undefined && reported < policy.triggerTokens) return;
     const protectedFrom = this.#protectedFrom(messages);
     const candidates: Candidate[] = [];
     let totalChars = 0;
@@ -332,26 +375,46 @@ export class LazyOutputProjector {
       candidates.push({ message, index, text, saved: estimateTokens(text.length) - estimateTokens(policy.previewChars + 220) });
     });
     if (!candidates.length) return;
-    const context = environment.contextTokens ?? estimateTokens(totalChars);
+    const context = reported ?? estimateTokens(totalChars);
     if (context < policy.triggerTokens) return;
-    const saved = candidates.reduce((sum, candidate) => sum + candidate.saved, 0);
-    const suffixTokens = estimateTokens(totalChars - prefixChars[candidates[0]!.index]!);
-    if (!this.#worthSweeping(messages, environment, saved, suffixTokens)) return;
+    const suffixFrom = (candidate: Candidate) => estimateTokens(totalChars - prefixChars[candidate.index]!);
+    // A cheap first look at the full set avoids writing files for a sweep that cannot pay off.
+    const wanted = candidates.reduce((sum, candidate) => sum + candidate.saved, 0);
+    if (!this.#worthSweeping(messages, environment, wanted, suffixFrom(candidates[0]!))) return;
+
+    // Stage every copy first. What matters is what actually reached the disk: a partial success rewrites
+    // the prefix from its own first result and saves only its own total, so it is judged again.
+    const staged: { candidate: Candidate; stub: Stub }[] = [];
+    for (const candidate of candidates) {
+      const stub = this.#prepare(candidate.message, candidate.text, environment, result);
+      if (stub) staged.push({ candidate, stub });
+      else this.#refused.add(candidate.message.toolCallId!);
+    }
+    const savedByStaged = staged.reduce((sum, item) => sum + item.stub.saved, 0);
+    if (!staged.length || !this.#worthSweeping(messages, environment, savedByStaged, suffixFrom(staged[0]!.candidate))) {
+      // Not replaced, so nothing refers to these copies; give their budget back and let a later sweep retry.
+      for (const item of staged) this.#discard(item.candidate);
+      return;
+    }
 
     this.#lastSweepCall = this.#calls;
-    for (const candidate of candidates) {
-      const prepared = this.#prepare(candidate.message, candidate.text, environment, result);
-      if (!prepared) { this.#refused.add(candidate.message.toolCallId!); continue; }
+    for (const { candidate, stub } of staged) {
       // Only a verified copy makes the replacement permanent.
       this.#replaced.add(candidate.message.toolCallId!);
       result.newlyReplaced.push(candidate.message.toolCallId!);
-      result.savedTokens += prepared.saved;
+      result.savedTokens += stub.saved;
     }
+  }
+
+  #discard(candidate: Candidate): void {
+    const id = candidate.message.toolCallId!;
+    this.#stubs.delete(id);
+    this.#spilledBytes = Math.max(0, this.#spilledBytes - Buffer.byteLength(candidate.text));
   }
 
   #worthSweeping(messages: MessageLike[], environment: ProjectionEnvironment, saved: number, suffixTokens: number): boolean {
     const policy = this.#policy;
-    if (cacheIsCold(messages, environment.now, policy)) return saved >= policy.coldMinSavedTokens;
+    if (cacheIsCold(messages, environment.now, environment.lastWarmAt, policy)) return saved >= policy.coldMinSavedTokens;
     if (saved < policy.warmMinSavedTokens) return false;
     if (this.#calls - this.#lastSweepCall < policy.warmCooldownCalls) return false;
     // Rewriting the suffix costs (1 - r) per token once; each later call saves r per removed token.
@@ -398,10 +461,12 @@ export function registerLazyOutput(pi: ExtensionAPI, options: LazyOutputOptions)
   const spillRoot = options.spillRoot ?? join(getAgentDir(), "pi-jar-spill");
   const retentionMs = options.retentionMs ?? 7 * 24 * 3_600_000;
   let warned = false;
+  let lastWarmAt: number | undefined;
   const restore = (_event: unknown, ctx: ExtensionContext) => {
     projector.reset();
     projector.restore(persistedIds(ctx));
     warned = false;
+    lastWarmAt = undefined;
   };
   pi.on("session_start", (event, ctx) => {
     restore(event, ctx);
@@ -409,14 +474,16 @@ export function registerLazyOutput(pi: ExtensionAPI, options: LazyOutputOptions)
     catch (error) { console.error("pi-jar: could not clean old spilled tool output", error); }
   });
   pi.on("session_tree", restore);
+  // Pi can keep the provider cache warm while the session is idle; that is not a cold cache.
+  pi.on("cache_warming_decision", (event) => { if (event.action === "warm") lastWarmAt = Date.now(); });
   pi.on("context", (event, ctx) => {
     const sweep = options.enabled();
     if (!sweep && !projector.replacedCount) return;
-    const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+    // No getContextUsage(): Pi computes it by walking the session, and this runs before every request.
     const outcome = projector.project(event.messages, {
       spillDirectory: () => join(spillRoot, sha256(ctx.sessionManager.getSessionId()).slice(0, 32)),
-      contextTokens: usage?.tokens ?? undefined,
       now: Date.now(),
+      lastWarmAt,
       sweep
     });
     if (outcome.newlyReplaced.length) pi.appendEntry(LAZY_OUTPUT_ENTRY, { ids: outcome.newlyReplaced, savedTokens: outcome.savedTokens });

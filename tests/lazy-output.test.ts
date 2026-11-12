@@ -3,7 +3,10 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DEFAULT_LAZY_OUTPUT_POLICY, diskSpill, LazyOutputProjector, pruneSpill, registerLazyOutput, stubText, type ProjectionEnvironment, type SpillStore } from "../src/lazy-output.ts";
+import { writeSync } from "node:fs";
+
+const writeFromDescriptor = (descriptor: number, bytes: Buffer) => writeSync(descriptor, bytes);
+import { createDiskSpill, DEFAULT_LAZY_OUTPUT_POLICY, diskSpill, writeFully, LazyOutputProjector, pruneSpill, registerLazyOutput, stubText, type ProjectionEnvironment, type SpillStore } from "../src/lazy-output.ts";
 
 const NOW = 1_000_000_000_000;
 const MINUTE = 60_000;
@@ -19,7 +22,7 @@ const result = (id: string, text: string, tool = "read") => ({ role: "toolResult
 const coldOnly = { ...policy, warmMinSavedTokens: Number.POSITIVE_INFINITY };
 const WARM = { input: 500, cacheRead: 90_000, cacheWrite: 0 };
 const assistant = (at: number, usage: object = WARM) => ({ role: "assistant", timestamp: at, usage, content: [{ type: "text", text: "ok" }] });
-const environment = (now: number, contextTokens?: number, sweep = true, directory = "/spill"): ProjectionEnvironment => ({ spillDirectory: () => directory, now, contextTokens, sweep });
+const environment = (now: number, contextTokens?: number, sweep = true, directory = "/spill", lastWarmAt?: number): ProjectionEnvironment => ({ spillDirectory: () => directory, now, contextTokens, sweep, lastWarmAt });
 const textOf = (message: unknown) => (message as { content?: { text?: string }[] }).content?.[0]?.text ?? "";
 
 /** Two large old results, a small one, then a working set of two assistant turns. */
@@ -60,6 +63,38 @@ test("two recent large prompts that read nothing from the cache prove it is not 
   const oneMiss = conversation(NOW - MINUTE);
   oneMiss[2] = assistant(NOW - MINUTE, dead);
   assert.equal(new LazyOutputProjector(coldOnly, memorySpill()).project(oneMiss, environment(NOW, 5000)).messages, undefined, "one miss is not evidence");
+});
+
+test("a recent keep-warm request keeps an idle cache warm; a stale one does not", () => {
+  const idle = conversation(NOW - 120 * MINUTE);
+  assert.equal(new LazyOutputProjector(coldOnly, memorySpill()).project(idle, environment(NOW, 5000, true, "/spill", NOW - 5 * MINUTE)).messages, undefined);
+  assert.equal(new LazyOutputProjector(coldOnly, memorySpill()).project(idle, environment(NOW, 5000, true, "/spill", NOW - 80 * MINUTE)).newlyReplaced.length, 2);
+});
+
+test("a warm partial success is judged again on what reached the disk", () => {
+  const big = (id: string, ch: string) => result(id, ch.repeat(50_000));
+  // Two results save ~24k tokens together (passes the 2k floor and the horizon); only one is written.
+  const messages = [assistant(NOW), big("one", "1"), big("two", "2"), assistant(NOW), assistant(NOW)];
+  let writes = 0;
+  const flaky: SpillStore = { ensure() { writes++; if (writes === 2) throw new Error("ENOSPC"); } };
+  const strict = { ...policy, warmMinSavedTokens: 20_000 };
+  const outcome = new LazyOutputProjector(strict, flaky).project(messages, environment(NOW, 80_000));
+  assert.deepEqual(outcome.newlyReplaced, [], "one 12k-token saving no longer clears the 20k floor");
+  assert.equal(outcome.messages, undefined, "nothing is rewritten");
+  assert.equal(outcome.failures.length, 1);
+
+  const relaxed = { ...policy, warmMinSavedTokens: 5_000 };
+  writes = 0;
+  const kept = new LazyOutputProjector(relaxed, flaky).project(messages, environment(NOW, 80_000));
+  assert.deepEqual(kept.newlyReplaced, ["one"], "a subset that still pays is committed on its own");
+});
+
+test("a budget that stops a sweep halfway leaves no replacement when the remainder is not worth it", () => {
+  const messages = [assistant(NOW), result("one", "1".repeat(50_000)), result("two", "2".repeat(50_000)), assistant(NOW), assistant(NOW)];
+  const capped = { ...policy, warmMinSavedTokens: 20_000, maxSessionBytes: 60_000 };
+  const outcome = new LazyOutputProjector(capped, memorySpill()).project(messages, environment(NOW, 80_000));
+  assert.deepEqual(outcome.newlyReplaced, []);
+  assert.match(outcome.failures[0]!, /session spill limit/);
 });
 
 test("nothing is swept below the trigger size", () => {
@@ -154,6 +189,25 @@ test("the session spill budget stops further replacements", () => {
   const outcome = projector.project(conversation(NOW - 90 * MINUTE), environment(NOW, 5000));
   assert.equal(outcome.newlyReplaced.length, 1);
   assert.match(outcome.failures[0]!, /session spill limit/);
+});
+
+test("a short write is completed, a stalled write fails, and a truncated file is never trusted", () => {
+  const sink: Buffer[] = [];
+  const stingy = (_descriptor: number, bytes: Buffer, offset: number) => { const take = Math.min(3, bytes.length - offset); sink.push(bytes.subarray(offset, offset + take)); return take; };
+  writeFully(0, Buffer.from("hello world"), stingy);
+  assert.equal(Buffer.concat(sink).toString(), "hello world");
+  assert.throws(() => writeFully(0, Buffer.from("abc"), () => 0), /write stopped after 0 of 3 bytes/);
+
+  const root = mkdtempSync(join(tmpdir(), "pi-jar-short-test-"));
+  try {
+    // A writer that claims success but drops the tail: the verification after the write rejects it.
+    const lying = createDiskSpill((descriptor, bytes, offset) => { const half = Math.ceil((bytes.length - offset) / 2); return writeFromDescriptor(descriptor, bytes.subarray(offset, offset + half)) && bytes.length - offset; });
+    assert.throws(() => lying.ensure(join(root, "d", "f.txt"), "x".repeat(1000)), /does not hold the saved text/);
+    // A writer that is only slow (short writes) still produces a complete, verified file.
+    const slow = createDiskSpill((descriptor, bytes, offset) => writeFromDescriptor(descriptor, bytes.subarray(offset, offset + 7)));
+    slow.ensure(join(root, "d", "g.txt"), "y".repeat(1000));
+    assert.equal(readFileSync(join(root, "d", "g.txt"), "utf8"), "y".repeat(1000));
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("the stub is deterministic and bounded", () => {
