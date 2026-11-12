@@ -32,6 +32,7 @@ import { jarCommit } from "../src/commit.ts";
 import { registerAdvisor } from "../src/advisor.ts";
 import { registerCacheBreaks } from "../src/cache-breaks.ts";
 import { registerInfoPanels } from "../src/info-panels.ts";
+import { registerLazyOutput } from "../src/lazy-output.ts";
 import { SideUsage } from "../src/side-model.ts";
 import { PlanMode } from "../src/plan.ts";
 import { openRolesUi } from "../src/roles-ui.ts";
@@ -382,7 +383,8 @@ export default function piJar(pi: ExtensionAPI): void {
   // Observe-only: explains costly prompt-cache breaks; subagent processes have no UI to tell.
   const cacheBreaks = registerCacheBreaks(pi, { enabled: () => !delegatedChild && visualSettings.cacheDiagnostics !== false });
   const advisor = registerAdvisor(pi, modelRoles, { enabled: () => !delegatedChild && visualSettings.advisor, gates: () => !delegatedChild && visualSettings.advisorGates, usage: sideUsage });
-  registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
+  registerLazyOutput(pi, { enabled: () => visualSettings.lazyToolOutput !== false });
+  const infoPanels = registerInfoPanels(pi, { side: sideUsage, quotaEnabled: () => quotaCache?.enabled ?? false,
     routed: (ctx) => accounts.routesProvider(ctx.model?.provider),
     quota: (ctx) => quotaFor(ctx, welcomeStatuses(), Date.now()),
     accountQuotas: (ctx) => {
@@ -467,7 +469,6 @@ export default function piJar(pi: ExtensionAPI): void {
     discussionEnv: (key, name) => ({ ...discussion?.childEnv(key, name), ...accounts.environment() }),
     withheldEnv: () => accounts.withheldEnvironment(),
     discussionRetire: (key) => discussion?.retire(key),
-    discussionUnread: (key) => discussion?.unreadFor(key) ?? 0,
     discussionDigest: () => discussion?.digest(),
     getSubagentConfig: () => loadSubagentConfig(getAgentDir()),
     loadResources: (cwd) => loadResourceCatalog(cwd, getAgentDir()),
@@ -1256,6 +1257,7 @@ export default function piJar(pi: ExtensionAPI): void {
         ctx.ui.notify(`pi-jar: UI ${enabled ? "on" : "off"}; animations ${animations ? "on" : "off"}; quota ${quotaCache?.enabled ? "on" : "off"} (session-only); composer ${composer.enabled ? "on" : "off"}; mascot ${visualSettings.mascot ? "on" : "off"}; suggestions ${visualSettings.suggestions ? "on" : "off"}; ${todos?.all().length ?? 0} to-dos; demo ${demo ? "on" : "off"}`, "info");
         return;
       }
+      if (command === "token-audit" || command === "audit") { await infoPanels.openTokenAudit(ctx); return; }
       if (command === "perf") {
         // On demand only: one `ps` call for live children; everything else is an in-memory counter.
         const subagentStats = subagents.stats();

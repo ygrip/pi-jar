@@ -939,21 +939,48 @@ test("delegation routing guidance is present before any agent is launched", () =
   assert.equal(result.message, undefined, "initial guidance does not add hidden transcript messages");
 });
 
-test("stale moderator context is pruned on every LLM call while the fleet is retained", async () => {
+test("moderator roster keeps older copies for a stable prefix and drops only identical repeats", async () => {
   const fake = fakeSpawn((child) => { say(child, "ready"); settle(child); });
   const host = moderatorHost(fake.spawn);
   await host.delegate.execute("d", { tasks: [{ task: "inspect" }] }, undefined, undefined, quiet);
   const messages = [
     { customType: "pi-jar.moderator-context", content: "old fleet" },
     { role: "user", content: "normal" },
+    { customType: "pi-jar.moderator-context", content: "old fleet" },
     { customType: "pi-jar.moderator-context", content: "new fleet" }
   ];
-  // Pi re-sends the full persisted history to the context hook before each LLM call.
+  // Pi re-sends the full persisted history to the context hook before each LLM call. Dropping the
+  // older roster would rewrite the cached prefix, so only the identical repeat goes.
   for (let call = 1; call <= 3; call++) {
-    const pruned = host.events.get("context")!({ messages });
-    assert.deepEqual(pruned?.messages.map((item) => (item as { content: string }).content), ["normal", "new fleet"], `call ${call}`);
+    const projected = host.events.get("context")!({ messages });
+    assert.deepEqual(projected?.messages.map((item) => (item as { content: string }).content), ["old fleet", "normal", "new fleet"], `call ${call}`);
   }
   await host.registry.records()[0]!.stop();
+});
+
+test("an emptied fleet supersedes a stale roster once, and a fresh session never sees the notice", async () => {
+  const host = moderatorHost(fakeSpawn(() => {}).spawn);
+  const start = host.events.get("before_agent_start") as unknown as (event: { systemPrompt: string }, ctx: unknown) => { message?: { content: string } };
+  const withBranch = (branch: unknown[]) => ({ ...quiet, sessionManager: { getBranch: () => branch } });
+  const roster = { type: "custom_message", customType: "pi-jar.moderator-context", content: "[PI-JAR MODERATOR MODE]\nRetained fleet:\n- a" };
+  assert.equal(start({ systemPrompt: "s" }, withBranch([])).message, undefined, "a session that never had a fleet pays nothing");
+  assert.match(start({ systemPrompt: "s" }, withBranch([roster])).message!.content, /No retained subagents/);
+  const notice = { ...roster, content: start({ systemPrompt: "s" }, withBranch([roster])).message!.content };
+  assert.equal(start({ systemPrompt: "s" }, withBranch([roster, notice])).message, undefined, "the notice is sent once");
+  assert.equal(start({ systemPrompt: "s" }, withBranch([])).message, undefined, "no state leaks into the next session");
+});
+
+test("prompts without a fleet scan the session branch once, not once per prompt", () => {
+  const host = moderatorHost(fakeSpawn(() => {}).spawn);
+  const start = host.events.get("before_agent_start") as unknown as (event: { systemPrompt: string }, ctx: unknown) => { message?: { content: string } };
+  const branch = Array.from({ length: 20_000 }, (_unused, index) => ({ type: "message", id: String(index) }));
+  let reads = 0;
+  const ctx = { ...quiet, sessionManager: { getBranch: () => { reads++; return branch; } } };
+  for (let prompt = 0; prompt < 500; prompt++) assert.equal(start({ systemPrompt: "s" }, ctx).message, undefined);
+  assert.equal(reads, 1);
+  (host.events.get("session_tree") as unknown as (event: object, ctx: unknown) => void)({}, ctx);
+  start({ systemPrompt: "s" }, ctx);
+  assert.equal(reads, 2, "a tree change scans again");
 });
 
 test("jar_delegate returns before the first turn ends so the moderator can steer", async (t) => {
