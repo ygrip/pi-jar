@@ -2,7 +2,7 @@ import type { AuthInteraction, Provider } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AccountStore, type AccountDefinition } from "./account-store.ts";
 import { AccountRouter } from "./account-router.ts";
-import { QUOTA_PREFIX, QUOTA_TTL_MS } from "./quota.ts";
+import { activeQuota, QUOTA_PREFIX, QUOTA_TTL_MS } from "./quota.ts";
 import { promptText } from "./dialogs.ts";
 import { showDeviceCodeDialog } from "./device-login.ts";
 import { cleanText } from "./status.ts";
@@ -89,8 +89,9 @@ export class Accounts {
       if (!ctx.hasUI || typeof ctx.ui.setStatus !== "function") return;
       ctx.ui.setStatus("pi-jar.account", `account:${name}`);
       let status: string | undefined;
-      if (health.quota && health.checkedAt && health.checkedAt + QUOTA_TTL_MS > Date.now()) {
-        status = JSON.stringify({ ...health.quota, expiresAt: health.checkedAt + QUOTA_TTL_MS });
+      const quota = activeQuota(health.quota, Date.now());
+      if (quota && health.checkedAt && health.checkedAt + QUOTA_TTL_MS > Date.now()) {
+        status = JSON.stringify({ ...quota, expiresAt: health.checkedAt + QUOTA_TTL_MS });
       }
       ctx.ui.setStatus(QUOTA_PREFIX + provider, status);
       this.onQuotaChange?.();
@@ -318,6 +319,71 @@ export class Accounts {
     await this.command(`mode ${mode}`, ctx);
     ctx.ui.notify(`Account routing: ${mode}`, "info");
   }
+  /**
+   * Re-discovers each account's model catalog so a newly released model becomes routable without a
+   * restart. Routing policy, pins and the profile allowlist are not touched.
+   */
+  async refreshModels(providerId: string | undefined, ctx: ExtensionContext, includeQuota = false): Promise<void> {
+    const configured = [...new Set(this.store.list().map(account => account.provider))];
+    const providerIds = providerId ? [providerId] : configured;
+    if (!providerIds.length) {
+      ctx.ui.notify("No accounts configured", "warning");
+      return;
+    }
+    const lines: string[] = [];
+    let allOk = true;
+    for (const id of providerIds) {
+      const provider = this.originals.get(id) ?? ctx.modelRegistry.getProvider(id);
+      if (!provider) {
+        // An explicit, mistyped provider is an error; in bulk mode an unavailable one must not stop the rest.
+        if (providerId) throw new Error(`Unknown provider ${id}`);
+        lines.push(`${id}: skipped, provider is not registered in Pi`);
+        allOk = false;
+        continue;
+      }
+      allOk = await this.refreshProvider(id, provider, ctx, includeQuota, lines) && allOk;
+    }
+    ctx.ui.notify(`Refresh\n${lines.join("\n")}`, allOk ? "info" : "warning");
+  }
+  /** Returns whether every step for this provider succeeded; appends one report line per step. */
+  private async refreshProvider(id: string, provider: Provider, ctx: ExtensionContext, includeQuota: boolean, lines: string[]): Promise<boolean> {
+    let allOk = await this.refreshSessionRegistry(id, ctx, lines);
+    const models = await this.router.refreshModels(id, provider);
+    if (!models.length) lines.push(`${id}: no accounts configured`);
+    for (const report of models) {
+      lines.push(`${report.account} (${id}): models ${report.status}`);
+      allOk = allOk && report.ok;
+    }
+    if (!includeQuota) return allOk;
+    for (const report of await this.router.refreshQuotaNow(id, provider)) {
+      lines.push(`${report.account} (${id}): quota ${report.status}`);
+      allOk = allOk && report.ok;
+    }
+    return allOk;
+  }
+  /**
+   * Pi selects models from its own session registry, so a model that is not in it can never reach
+   * routing. Refresh it through Pi's supported API; this uses Pi's own provider authentication and
+   * never another account's credentials.
+   */
+  private async refreshSessionRegistry(id: string, ctx: ExtensionContext, lines: string[]): Promise<boolean> {
+    try {
+      const result = await ctx.modelRegistry.refresh({ providers: [id], allowNetwork: true, force: true });
+      if (result.errors.has(id)) {
+        lines.push(`${id}: Pi model list refresh failed (provider discovery error)`);
+        return false;
+      }
+      if (result.aborted) {
+        lines.push(`${id}: Pi model list refresh timed out`);
+        return false;
+      }
+      lines.push(`${id}: Pi model list refreshed`);
+      return true;
+    } catch {
+      lines.push(`${id}: Pi model list refresh failed`);
+      return false;
+    }
+  }
   async command(args: string, ctx: ExtensionContext): Promise<void> {
     const [action, providerId, name, env, ...extra] = args.trim().split(/\s+/);
     if (!action || action === "list") {
@@ -328,7 +394,11 @@ export class Accounts {
         if ((account.blockedUntil ?? 0) > Date.now()) quota = `cooldown until ${new Date(account.blockedUntil!).toISOString()}`;
         let warning = "";
         if (account.warning) warning = ` · ${account.warning}`;
-        return `${account.name}: ${account.provider} · ${quota}${account.lastUsed ? " · last used" : ""}${warning}`;
+        let catalog = "";
+        if (account.catalogRefreshedAt !== undefined) {
+          catalog = ` · models ${account.catalogStatus ?? "refreshed"} ${new Date(account.catalogRefreshedAt).toISOString()}`;
+        }
+        return `${account.name}: ${account.provider} · ${quota}${account.lastUsed ? " · last used" : ""}${catalog}${warning}`;
       });
       const policy = this.settings();
       const state = isUnsafeRouting(policy) ? `BLOCKED, unsafe policy (${policy.invalid}); reset with /jar accounts mode off|sticky|round-robin|quota-first` : policy.mode;
@@ -348,6 +418,10 @@ export class Accounts {
       if (!ctx.isIdle()) throw new Error("Finish active model work before recovering an incomplete reservation");
       this.store.discardEmptyReservation(providerId);
       ctx.ui.notify(`Empty reservation ${providerId} cleared; you can retry login with this label`, "info");
+      return;
+    }
+    if (action === "refresh-models" && !name) {
+      await this.refreshModels(providerId, ctx);
       return;
     }
     if (action === "pin" && providerId && name && !env && !extra.length) {
@@ -380,7 +454,7 @@ export class Accounts {
     }
     if (!["add", "login", "login-device"].includes(action) || !providerId || !name || extra.length
       || (action === "add" && (!env || !/^[A-Z_][A-Z0-9_]{0,127}$/.test(env))) || (action !== "add" && env)) {
-      throw new Error("Usage: /jar accounts [manage|list|logout NAME|remove NAME|recover NAME|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME]");
+      throw new Error("Usage: /jar accounts [manage|list|logout NAME|remove NAME|recover NAME|mode off/sticky/round-robin/quota-first|use all/name1,name2|pin PROVIDER NAME|auto PROVIDER|add PROVIDER NAME ENV_VAR|login PROVIDER NAME|login-device PROVIDER NAME|refresh-models [PROVIDER]]");
     }
     if (!ctx.isIdle()) throw new Error("Wait for active model work before adding an account");
     const provider = this.originals.get(providerId) ?? ctx.modelRegistry.getProvider(providerId);
