@@ -33,6 +33,8 @@ interface AccountState {
   pending?: Promise<void>;
   invalidated?: boolean;
   nextCheck: number;
+  /** Sanitized result of the last usage lookup; read by the explicit refresh report. */
+  quotaOutcome?: QuotaOutcome;
   /** When a snapshot that had already reset was last re-probed. */
   resetProbeAt?: number;
   unavailableUntil?: number;
@@ -48,7 +50,9 @@ export interface AccountRouteStatus {
   name: string; provider: string; blockedUntil?: number; remaining?: number; inFlight: number; lastUsed: boolean; warning?: string;
   catalogRefreshedAt?: number; catalogStatus?: string;
 }
-export interface ModelRefreshReport { account: string; status: string }
+type QuotaOutcome = "updated" | "failed" | "no-data";
+export interface ModelRefreshReport { account: string; status: string; ok: boolean }
+export interface QuotaRefreshReport { account: string; status: string; ok: boolean }
 
 export function remainingQuota(quota: Quota | undefined, now: number): number | undefined {
   let remaining: number | undefined;
@@ -190,7 +194,9 @@ export class AccountRouter {
           return this.quotaFetcher(provider as QuotaProvider, async (id) => (await state.models).getAuth(id), AbortSignal.timeout(5000));
         });
         state.quotaError = undefined;
+        state.quotaOutcome = quota ? "updated" : "no-data";
       } catch {
+        state.quotaOutcome = "failed";
         // Preserve known limits during endpoint outages; do not mistake unknown quota for zero.
         state.quotaError = "Quota lookup unavailable; provider limits still apply";
       }
@@ -341,35 +347,53 @@ export class AccountRouter {
    * blocking healthy accounts behind it.
    */
   private async firstEligible(ordered: AccountState[], provider: Provider, model: AnyModel, rejections: string[], signal?: AbortSignal): Promise<AccountState | undefined> {
+    // Pass 1 reads catalogs only, in preference order: a healthy fallback is never delayed by
+    // another account's network discovery.
+    const misses: AccountState[] = [];
     for (const state of ordered) {
       signal?.throwIfAborted();
       try {
-        const rejection = await this.catalogRejection(state, provider, model, signal);
-        if (!rejection) return state;
-        rejections.push(`${state.definition.name}: ${rejection}`);
+        const miss = await this.checkCatalog(state, provider, model, signal);
+        if (!miss) return state;
+        misses.push(state);
       } catch {
         signal?.throwIfAborted();
-        state.unavailableUntil = this.now() + 60_000;
-        rejections.push(`${state.definition.name}: model catalog lookup failed or timed out`);
+        this.recordCatalogFailure(state, rejections);
+      }
+    }
+    return this.recoverFromStaleCatalogs(misses, provider, model, rejections, signal);
+  }
+  private recordCatalogFailure(state: AccountState, rejections: string[]): void {
+    state.unavailableUntil = this.now() + 60_000;
+    rejections.push(`${state.definition.name}: model catalog lookup failed or timed out`);
+  }
+  /**
+   * Pass 2, only when no account serves the model: a model released after the runtime was built is
+   * missing from a stale catalog. Every missed account is re-discovered at once (each bounded,
+   * coalesced and rate-limited, so the wait is one timeout, not one per account), then re-checked in
+   * preference order.
+   */
+  private async recoverFromStaleCatalogs(misses: AccountState[], provider: Provider, model: AnyModel, rejections: string[], signal?: AbortSignal): Promise<AccountState | undefined> {
+    if (!misses.length) return undefined;
+    await Promise.all(misses.map(state => this.refreshCatalog(state, provider, false, signal)));
+    for (const state of misses) {
+      signal?.throwIfAborted();
+      try {
+        const miss = await this.checkCatalog(state, provider, model, signal);
+        if (!miss) return state;
+        rejections.push(`${state.definition.name}: ${this.withRefreshStatus(miss, state)}`);
+      } catch {
+        signal?.throwIfAborted();
+        this.recordCatalogFailure(state, rejections);
       }
     }
     return undefined;
   }
-  /**
-   * Undefined when this account's catalog serves the exact model. On a miss the account's catalog is
-   * re-discovered once (bounded, coalesced and rate-limited), because a model released after the
-   * runtime was built is missing from a stale catalog, then checked again.
-   */
-  private async catalogRejection(state: AccountState, provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<string | undefined> {
-    const firstMiss = await this.checkCatalog(state, provider, model, signal);
-    if (!firstMiss) return undefined;
-    await this.refreshCatalog(state, provider, false, signal);
-    const secondMiss = await this.checkCatalog(state, provider, model, signal);
-    if (!secondMiss) return undefined;
+  private withRefreshStatus(miss: string, state: AccountState): string {
     if (state.catalogStatus?.startsWith("refresh failed") || state.catalogStatus?.startsWith("refresh timed out")) {
-      return `${secondMiss}; ${state.catalogStatus}`;
+      return `${miss}; ${state.catalogStatus}`;
     }
-    return secondMiss;
+    return miss;
   }
   /** A reason string when the account catalog does not serve this exact model, undefined when it does. */
   private checkCatalog(state: AccountState, provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<string | undefined> {
@@ -422,12 +446,12 @@ export class AccountRouter {
     const unreadable: string[] = [];
     const accounts = this.store.list().filter(account => account.provider === providerId);
     return Promise.all(accounts.map(async account => {
-      if (!this.hasUsableCredentials(account, unreadable)) return { account: account.name, status: "skipped: not signed in or credential unreadable" };
+      if (!this.hasUsableCredentials(account, unreadable)) return { account: account.name, status: "skipped: not signed in or credential unreadable", ok: false };
       const state = this.state(account, provider);
       await this.refreshCatalog(state, provider, true);
       // A successful refresh also clears a catalog-failure cooldown so the account is tried again at once.
       if (state.catalogStatus === "refreshed") state.unavailableUntil = undefined;
-      return { account: account.name, status: state.catalogStatus ?? "unknown" };
+      return { account: account.name, status: state.catalogStatus ?? "unknown", ok: state.catalogStatus === "refreshed" };
     }));
   }
   private isCurrentRoute(state: AccountState): boolean {
@@ -453,11 +477,26 @@ export class AccountRouter {
       return this.refreshQuota(this.state(account, provider));
     }));
   }
-  /** Explicit refresh: probes every supported OAuth account of one provider now, ignoring the snapshot TTL. */
-  async refreshQuotaNow(providerId: string, provider: Provider): Promise<void> {
-    if (!["anthropic", "openai-codex"].includes(providerId) || provider.id !== providerId) return;
-    const accounts = this.store.list().filter(account => account.provider === providerId && account.auth === "oauth");
-    await Promise.all(accounts.map(account => this.refreshQuota(this.state(account, provider), undefined, true)));
+  /**
+   * Explicit refresh: probes every OAuth account of one provider now, ignoring the snapshot TTL, and
+   * reports a sanitized per-account outcome. A lookup that returned nothing or failed is not "ok".
+   */
+  async refreshQuotaNow(providerId: string, provider: Provider): Promise<QuotaRefreshReport[]> {
+    const accounts = this.store.list().filter(account => account.provider === providerId);
+    const supported = ["anthropic", "openai-codex"].includes(providerId) && provider.id === providerId;
+    const unreadable: string[] = [];
+    return Promise.all(accounts.map(async (account): Promise<QuotaRefreshReport> => {
+      if (!supported) return { account: account.name, status: "skipped: provider has no usage endpoint", ok: false };
+      if (account.auth !== "oauth") return { account: account.name, status: "skipped: usage lookup needs an OAuth login", ok: false };
+      if (!this.hasUsableCredentials(account, unreadable)) return { account: account.name, status: "skipped: not signed in or credential unreadable", ok: false };
+      const state = this.state(account, provider);
+      state.quotaOutcome = undefined;
+      await this.refreshQuota(state, undefined, true);
+      if (state.quotaOutcome === "updated") return { account: account.name, status: "updated", ok: true };
+      if (state.quotaOutcome === "failed") return { account: account.name, status: "failed or timed out; provider limits still apply", ok: false };
+      if (state.quotaOutcome === "no-data") return { account: account.name, status: "usage endpoint returned no limits", ok: false };
+      return { account: account.name, status: "skipped: account was replaced during refresh", ok: false };
+    }));
   }
   invalidate(name: string): void {
     const state = this.states.get(name);

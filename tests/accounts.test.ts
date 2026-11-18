@@ -1236,7 +1236,7 @@ test("rejections name profile exclusions and pins, and never route to an exclude
   assert.deepEqual(pinned.used, [], "the allowed pinned account lacks the model and the excluded one is never used");
 });
 
-test("refreshModels refreshes every account of a provider and clears a catalog cooldown", async () => {
+test("refreshModels refreshes every account of a provider and reports per-account status", async () => {
   let released = false;
   const { router, native, routed, used } = catalogRouter([
     { name: "a", catalog: () => released ? [newModel] : [], refresh: async () => { released = true; return { aborted: false, errors: new Map() }; } },
@@ -1244,12 +1244,155 @@ test("refreshModels refreshes every account of a provider and clears a catalog c
   ]);
   const reports = await router.refreshModels(CODEX, native);
   assert.deepEqual(reports, [
-    { account: "a", status: "refreshed" },
-    { account: "b", status: "refresh failed (provider discovery error)" }
+    { account: "a", status: "refreshed", ok: true },
+    { account: "b", status: "refresh failed (provider discovery error)", ok: false }
   ]);
   assert.equal((await routed.streamSimple(newModel, context).result()).stopReason, "stop");
   assert.deepEqual(used, ["a"]);
   assert.ok(router.status().every(entry => entry.catalogRefreshedAt !== undefined));
+});
+
+test("manual refresh clears a real catalog-failure cooldown without advancing the clock", async () => {
+  let broken = true;
+  const clock = 5_000_000;
+  const { router, native, routed, used } = catalogRouter([{
+    name: "a", catalog: () => { if (broken) throw new Error("discovery down"); return [newModel]; }
+  }], { mode: "sticky", accounts: [] }, () => clock);
+  const first = await routed.streamSimple(newModel, context).result();
+  assert.match(first.errorMessage!, /a: model catalog lookup failed or timed out/);
+  const second = await routed.streamSimple(newModel, context).result();
+  assert.match(second.errorMessage!, /a: model catalog lookup failed or timed out; retrying shortly/, "the account stays excluded during its cooldown");
+  assert.deepEqual(used, []);
+  broken = false;
+  assert.deepEqual(await router.refreshModels(CODEX, native), [{ account: "a", status: "refreshed", ok: true }]);
+  assert.equal((await routed.streamSimple(newModel, context).result()).stopReason, "stop", "routes again immediately");
+  assert.deepEqual(used, ["a"]);
+});
+
+test("concurrent refreshes of one account share a single discovery", async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const { router, native, refreshes } = catalogRouter([{
+    name: "a", catalog: () => [newModel],
+    refresh: async () => { await gate; return { aborted: false, errors: new Map() }; }
+  }]);
+  const calls = [router.refreshModels(CODEX, native), router.refreshModels(CODEX, native), router.refreshModels(CODEX, native)];
+  await new Promise(resolve => setTimeout(resolve, 20));
+  finish();
+  const results = await Promise.all(calls);
+  assert.equal(refreshes.length, 1);
+  assert.ok(results.every(report => report[0]!.status === "refreshed"));
+});
+
+test("a hung discovery on a preferred account never delays a healthy fallback", async () => {
+  const never = () => new Promise<never>(() => {});
+  const { routed, used, refreshes } = catalogRouter([
+    { name: "stale", catalog: () => [], refresh: never },
+    { name: "healthy", catalog: () => [newModel] }
+  ]);
+  const started = Date.now();
+  assert.equal((await routed.streamSimple(newModel, context).result()).stopReason, "stop");
+  assert.ok(Date.now() - started < 150, "the fallback is served from catalogs alone, before any network discovery");
+  assert.deepEqual(used, ["healthy"]);
+  assert.deepEqual(refreshes, [], "no discovery runs while some account already serves the model");
+});
+
+test("when no account serves the model, hung discoveries run together and cost one timeout", async () => {
+  const never = () => new Promise<never>(() => {});
+  const { routed } = catalogRouter([
+    { name: "a", catalog: () => [], refresh: never }, { name: "b", catalog: () => [], refresh: never }, { name: "c", catalog: () => [], refresh: never }
+  ]);
+  const started = Date.now();
+  const failed = await routed.streamSimple(newModel, context).result();
+  const elapsed = Date.now() - started;
+  assert.equal(failed.stopReason, "error");
+  assert.match(failed.errorMessage!, /a: model missing from the account's catalog; refresh failed or timed out/);
+  assert.ok(elapsed < 500, `three hung discoveries took ${elapsed}ms; expected about one 200ms timeout`);
+});
+
+test("cancelling a request does not wait for an uncooperative discovery", async () => {
+  const { routed } = catalogRouter([{ name: "a", catalog: () => [], refresh: () => new Promise<never>(() => {}) }]);
+  const abort = new AbortController();
+  const pending = routed.streamSimple(newModel, context, { signal: abort.signal }).result();
+  setTimeout(() => abort.abort(), 30);
+  const started = Date.now();
+  const result = await pending;
+  assert.equal(result.stopReason, "aborted");
+  assert.ok(Date.now() - started < 150);
+});
+
+function sessionContext(f: ReturnType<typeof fixture>, registry: Model<Api>[], notices: { text: string; level: string }[], refreshOutcome: "ok" | "error" | "throw" = "ok") {
+  const refreshCalls: unknown[] = [];
+  const modelRegistry = {
+    getAll: () => registry,
+    getProvider: (id: string) => id === "openai" ? f.provider : undefined,
+    refresh: async (options: unknown) => {
+      refreshCalls.push(options);
+      if (refreshOutcome === "throw") throw new Error("secret-token-xyz");
+      if (refreshOutcome === "error") return { aborted: false, errors: new Map([["openai", new Error("secret-token-xyz")]]) };
+      registry.push({ ...model, id: "brand-new-model" });
+      return { aborted: false, errors: new Map<string, Error>() };
+    }
+  };
+  const ctx = { ui: { notify: (text: string, level: string) => notices.push({ text, level }) }, modelRegistry };
+  return { ctx: ctx as never, refreshCalls };
+}
+
+test("refresh publishes models missing from Pi's session registry using Pi's supported refresh", async t => {
+  const f = fixture(t);
+  const accounts = new Accounts({} as never, () => ({ mode: "sticky", accounts: [] }), () => {}, f.directory);
+  const registry: Model<Api>[] = [model];
+  const notices: { text: string; level: string }[] = [];
+  const { ctx, refreshCalls } = sessionContext(f, registry, notices);
+  assert.equal(registry.some(entry => entry.id === "brand-new-model"), false, "starts absent from the session registry");
+  await accounts.refreshModels("openai", ctx);
+  assert.deepEqual(refreshCalls, [{ providers: ["openai"], allowNetwork: true, force: true }]);
+  assert.equal(registry.some(entry => entry.id === "brand-new-model"), true);
+  assert.equal(notices[0]!.level, "info");
+  assert.match(notices[0]!.text, /Pi model list refreshed/);
+  assert.match(notices[0]!.text, /a \(openai\): models refreshed/);
+});
+
+test("a failed session-registry refresh is reported without secrets and warns", async t => {
+  for (const outcome of ["error", "throw"] as const) {
+    const f = fixture(t);
+    const accounts = new Accounts({} as never, () => ({ mode: "sticky", accounts: [] }), () => {}, f.directory);
+    const notices: { text: string; level: string }[] = [];
+    const { ctx } = sessionContext(f, [model], notices, outcome);
+    await accounts.refreshModels("openai", ctx);
+    assert.equal(notices[0]!.level, "warning");
+    assert.match(notices[0]!.text, /Pi model list refresh failed/);
+    assert.doesNotMatch(notices[0]!.text, /secret-token-xyz/);
+  }
+});
+
+test("bulk refresh skips an unavailable provider and still refreshes the healthy one", async t => {
+  const f = fixture(t);
+  process.env.JAR_TEST_G = "key-g";
+  t.after(() => { delete process.env.JAR_TEST_G; });
+  f.store.reserve("ghost-account");
+  f.store.save({ version: 1, name: "ghost-account", provider: "aaa-ghost", auth: "env", env: "JAR_TEST_G" });
+  const accounts = new Accounts({} as never, () => ({ mode: "sticky", accounts: [] }), () => {}, f.directory);
+  const notices: { text: string; level: string }[] = [];
+  const { ctx, refreshCalls } = sessionContext(f, [model], notices);
+  await accounts.refreshModels(undefined, ctx);
+  assert.equal(refreshCalls.length, 1, "the healthy provider is still refreshed");
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0]!.level, "warning");
+  assert.match(notices[0]!.text, /aaa-ghost: skipped, provider is not registered in Pi/);
+  assert.match(notices[0]!.text, /a \(openai\): models refreshed/);
+  await assert.rejects(accounts.refreshModels("aaa-ghost", ctx), /Unknown provider aaa-ghost/);
+});
+
+test("quota refresh reports unsupported providers instead of claiming success", async t => {
+  const f = fixture(t);
+  const accounts = new Accounts({} as never, () => ({ mode: "sticky", accounts: [] }), () => {}, f.directory);
+  const notices: { text: string; level: string }[] = [];
+  const { ctx } = sessionContext(f, [model], notices);
+  await accounts.refreshModels("openai", ctx, true);
+  assert.equal(notices[0]!.level, "warning");
+  assert.match(notices[0]!.text, /a \(openai\): quota skipped: provider has no usage endpoint/);
+  assert.doesNotMatch(notices[0]!.text, /re-checked/);
 });
 
 // ---- Quota reset detection ----
@@ -1317,4 +1460,46 @@ test("refreshQuotaNow probes even when the snapshot is fresh", async () => {
   const { router, native } = quotaRouter(() => 950_000, fetched);
   await router.refreshQuotaNow(CODEX, native);
   assert.equal(fetched.length, 1);
+});
+
+function quotaReportRouter(definitions: { name: string; auth: "oauth" | "env"; credentials: boolean }[], fetcher: () => Promise<unknown>) {
+  const health = { credentialGeneration: "g" };
+  const list = definitions.map(item => ({ version: 1 as const, name: item.name, provider: CODEX, auth: item.auth, env: item.auth === "env" ? "X" : undefined }));
+  const fakeStore = {
+    list: () => list,
+    hasCredentials: (account: { name: string }) => definitions.find(item => item.name === account.name)!.credentials,
+    health: () => health,
+    updateHealth: (_name: string, change: (current: object) => object) => change(health),
+    ensureCredentialGeneration: () => {},
+    models: () => Promise.resolve({ getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }) })
+  } as unknown as AccountStore;
+  const native: Provider = {
+    id: CODEX, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] }, getModels: () => [newModel],
+    stream: () => { throw new Error("not called"); }, streamSimple: () => { throw new Error("not called"); }
+  };
+  const router = new AccountRouter(fakeStore, () => ({ mode: "sticky", accounts: [] }), Date.now, fetcher as never, 200);
+  return { router, native };
+}
+
+test("quota refresh reports updated, failed, empty, env-only and signed-out accounts distinctly", async () => {
+  const outcomes: Record<string, () => Promise<unknown>> = {
+    updated: async () => ({ fiveHour: { used: 1 } }),
+    failed: async () => { throw new Error("secret-token-xyz"); },
+    empty: async () => undefined
+  };
+  for (const [key, expected] of [["updated", { status: "updated", ok: true }],
+    ["failed", { status: "failed or timed out; provider limits still apply", ok: false }],
+    ["empty", { status: "usage endpoint returned no limits", ok: false }]] as const) {
+    const { router, native } = quotaReportRouter([{ name: "a", auth: "oauth", credentials: true }], outcomes[key]!);
+    const reports = await router.refreshQuotaNow(CODEX, native);
+    assert.deepEqual(reports, [{ account: "a", ...expected }], key);
+    assert.doesNotMatch(JSON.stringify(reports), /secret-token-xyz/);
+  }
+  const { router, native } = quotaReportRouter([
+    { name: "env", auth: "env", credentials: true }, { name: "out", auth: "oauth", credentials: false }
+  ], async () => ({ fiveHour: { used: 1 } }));
+  assert.deepEqual(await router.refreshQuotaNow(CODEX, native), [
+    { account: "env", status: "skipped: usage lookup needs an OAuth login", ok: false },
+    { account: "out", status: "skipped: not signed in or credential unreadable", ok: false }
+  ]);
 });

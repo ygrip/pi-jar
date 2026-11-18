@@ -331,18 +331,58 @@ export class Accounts {
       return;
     }
     const lines: string[] = [];
+    let allOk = true;
     for (const id of providerIds) {
       const provider = this.originals.get(id) ?? ctx.modelRegistry.getProvider(id);
-      if (!provider) throw new Error(`Unknown provider ${id}`);
-      const reports = await this.router.refreshModels(id, provider);
-      if (!reports.length) lines.push(`${id}: no accounts configured`);
-      for (const report of reports) lines.push(`${report.account} (${id}): models ${report.status}`);
-      if (includeQuota) {
-        await this.router.refreshQuotaNow(id, provider);
-        lines.push(`${id}: quota and reset times re-checked`);
+      if (!provider) {
+        // An explicit, mistyped provider is an error; in bulk mode an unavailable one must not stop the rest.
+        if (providerId) throw new Error(`Unknown provider ${id}`);
+        lines.push(`${id}: skipped, provider is not registered in Pi`);
+        allOk = false;
+        continue;
       }
+      allOk = await this.refreshProvider(id, provider, ctx, includeQuota, lines) && allOk;
     }
-    ctx.ui.notify(`Refresh\n${lines.join("\n")}`, "info");
+    ctx.ui.notify(`Refresh\n${lines.join("\n")}`, allOk ? "info" : "warning");
+  }
+  /** Returns whether every step for this provider succeeded; appends one report line per step. */
+  private async refreshProvider(id: string, provider: Provider, ctx: ExtensionContext, includeQuota: boolean, lines: string[]): Promise<boolean> {
+    let allOk = await this.refreshSessionRegistry(id, ctx, lines);
+    const models = await this.router.refreshModels(id, provider);
+    if (!models.length) lines.push(`${id}: no accounts configured`);
+    for (const report of models) {
+      lines.push(`${report.account} (${id}): models ${report.status}`);
+      allOk = allOk && report.ok;
+    }
+    if (!includeQuota) return allOk;
+    for (const report of await this.router.refreshQuotaNow(id, provider)) {
+      lines.push(`${report.account} (${id}): quota ${report.status}`);
+      allOk = allOk && report.ok;
+    }
+    return allOk;
+  }
+  /**
+   * Pi selects models from its own session registry, so a model that is not in it can never reach
+   * routing. Refresh it through Pi's supported API; this uses Pi's own provider authentication and
+   * never another account's credentials.
+   */
+  private async refreshSessionRegistry(id: string, ctx: ExtensionContext, lines: string[]): Promise<boolean> {
+    try {
+      const result = await ctx.modelRegistry.refresh({ providers: [id], allowNetwork: true, force: true });
+      if (result.errors.has(id)) {
+        lines.push(`${id}: Pi model list refresh failed (provider discovery error)`);
+        return false;
+      }
+      if (result.aborted) {
+        lines.push(`${id}: Pi model list refresh timed out`);
+        return false;
+      }
+      lines.push(`${id}: Pi model list refreshed`);
+      return true;
+    } catch {
+      lines.push(`${id}: Pi model list refresh failed`);
+      return false;
+    }
   }
   async command(args: string, ctx: ExtensionContext): Promise<void> {
     const [action, providerId, name, env, ...extra] = args.trim().split(/\s+/);
