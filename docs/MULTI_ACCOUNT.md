@@ -61,6 +61,8 @@ Open **`/jar settings` → Pi → Account routing policy**, or use:
 - **round-robin** — rotate eligible accounts in each process.
 - **quota-first** — prefer the account with the most remaining quota in its most constrained active window; prefer fewer local in-flight requests when quota ties. Known quota ranks above unknown quota.
 
+**Refreshing models and quota:** A model released after Pi started (for example a new Codex model) is picked up automatically: on a catalog miss Pi Jar re-discovers that account's catalog once (coalesced, at most every 30 s per account) before rejecting it. To force it, press **F** in `/jar accounts`, choose **Refresh models and quota now**, or run `/jar accounts refresh-models [PROVIDER]`. Refreshing never changes routing mode, pins or the profile allowlist. A quota snapshot whose reset time has passed is re-probed immediately instead of waiting for its 5-minute TTL. When no account qualifies, the error lists a sanitized reason per account (profile exclusion, pin, missing login, quota, cooldown, model missing, API/type mismatch, discovery failure).
+
 **Switching versus routing:** Open **Switch active account** and select a provider. Choose **Automatic** to keep `sticky`, `round-robin`, or `quota-first` routing across all eligible accounts **of that provider**, including safe pre-output HTTP 429 failover. Choosing an individual account **pins only that provider** and intentionally disables automatic failover to another account until you unpin it. The same options are available as commands:
 
 ```text

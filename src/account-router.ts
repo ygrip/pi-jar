@@ -5,12 +5,22 @@ import {
 } from "@earendil-works/pi-ai";
 import type { AccountDefinition, AccountHealth, AccountStore } from "./account-store.ts";
 import { isUnsafeRouting, type AccountRoutingSettings } from "./account-settings.ts";
-import { fetchQuota, QUOTA_TTL_MS, type Quota, type QuotaProvider } from "./quota.ts";
+import { fetchQuota, quotaWindowReset, QUOTA_TTL_MS, type Quota, type QuotaProvider } from "./quota.ts";
 
 /** Longest a quota-first request waits for first-ever quota probes. */
 const COLD_QUOTA_WAIT_MS = 500;
 /** One account's catalog check may not hold up the others: a slow or hung account is skipped after this. */
 const CATALOG_CHECK_TIMEOUT_MS = 5000;
+/**
+ * After a catalog miss the account's catalog is re-discovered, but at most this often per account,
+ * so a typo or unsupported model never turns every prompt into a network request.
+ */
+const CATALOG_REFRESH_MIN_INTERVAL_MS = 30_000;
+/**
+ * A quota snapshot whose reset time has passed is re-probed at once instead of waiting out its TTL,
+ * but never more often than this, so an endpoint that still reports the old window is not hammered.
+ */
+const QUOTA_RESET_REPROBE_MIN_MS = 30_000;
 /** Usage-endpoint lookups running at once per provider; a large pool queues instead of bursting. */
 const QUOTA_PROBE_CONCURRENCY = 4;
 type StreamOptions = SimpleStreamOptions | ApiStreamOptions<Api>;
@@ -23,11 +33,22 @@ interface AccountState {
   pending?: Promise<void>;
   invalidated?: boolean;
   nextCheck: number;
+  /** When a snapshot that had already reset was last re-probed. */
+  resetProbeAt?: number;
   unavailableUntil?: number;
   quotaError?: string;
   inFlight: number;
+  /** Coalesces concurrent catalog refreshes of this account into one network lookup. */
+  catalogRefresh?: Promise<void>;
+  catalogRefreshedAt?: number;
+  /** Sanitized outcome of the last catalog refresh; never contains provider error text. */
+  catalogStatus?: string;
 }
-export interface AccountRouteStatus { name: string; provider: string; blockedUntil?: number; remaining?: number; inFlight: number; lastUsed: boolean; warning?: string }
+export interface AccountRouteStatus {
+  name: string; provider: string; blockedUntil?: number; remaining?: number; inFlight: number; lastUsed: boolean; warning?: string;
+  catalogRefreshedAt?: number; catalogStatus?: string;
+}
+export interface ModelRefreshReport { account: string; status: string }
 
 export function remainingQuota(quota: Quota | undefined, now: number): number | undefined {
   let remaining: number | undefined;
@@ -139,7 +160,8 @@ export class AccountRouter {
       if (next) next(); else slot.active--;
     }
   }
-  private async refreshQuota(state: AccountState, signal?: AbortSignal): Promise<void> {
+  /** `force` (an explicit user refresh) ignores the snapshot TTL and backoff. */
+  private async refreshQuota(state: AccountState, signal?: AbortSignal, force = false): Promise<void> {
     const provider = state.definition.provider;
     if (state.definition.auth !== "oauth" || !["anthropic", "openai-codex"].includes(provider)) return;
     const now = this.now();
@@ -151,11 +173,13 @@ export class AccountRouter {
       return;
     }
     state.health = shared;
-    if (typeof shared.checkedAt === "number" && shared.checkedAt <= now && shared.checkedAt + QUOTA_TTL_MS > now) {
+    const reset = this.resetSnapshotDue(state, shared.quota, now);
+    if (!force && !reset && typeof shared.checkedAt === "number" && shared.checkedAt <= now && shared.checkedAt + QUOTA_TTL_MS > now) {
       if (this.isCurrentRoute(state)) this.onRoute?.(state.definition.name, provider, shared);
       return;
     }
-    if (state.nextCheck > now) return;
+    if (!force && !reset && state.nextCheck > now) return;
+    if (reset) state.resetProbeAt = now;
     const generation = shared.credentialGeneration;
     state.pending = (async () => {
       let quota: Quota | undefined;
@@ -194,6 +218,11 @@ export class AccountRouter {
     })().finally(() => { state.pending = undefined; });
     return waitForQuota(state.pending, signal);
   }
+  /** True when the stored snapshot has a window that already reset and a re-probe is not rate-limited. */
+  private resetSnapshotDue(state: AccountState, quota: Quota | undefined, now: number): boolean {
+    if (!quotaWindowReset(quota, now)) return false;
+    return state.resetProbeAt === undefined || now - state.resetProbeAt >= QUOTA_RESET_REPROBE_MIN_MS;
+  }
   /** `settings` is the policy captured when the request was dispatched; retries reuse it. */
   private async select(provider: Provider, model: AnyModel, tried: Set<string>, settings: AccountRoutingSettings, signal?: AbortSignal): Promise<AccountState> {
     if (this.configurationError) throw new RoutingError(this.configurationError);
@@ -205,11 +234,22 @@ export class AccountRouter {
     }
     const pinnedName = settings.pinned?.[provider.id];
     const unreadable: string[] = [];
-    const accounts = this.store.list().filter(account => account.provider === provider.id
-      && (!settings.accounts.length || settings.accounts.includes(account.name))
-      && (!pinnedName || account.name === pinnedName)
-      && !tried.has(account.name)
-      && this.hasUsableCredentials(account, unreadable));
+    // Sanitized per-account reasons, so a rejection says which rule excluded which account.
+    const rejections: string[] = [];
+    const accounts: AccountDefinition[] = [];
+    for (const account of this.store.list()) {
+      if (account.provider !== provider.id) continue;
+      const exclusion = this.exclusionReason(account, settings, pinnedName, tried);
+      if (exclusion) {
+        rejections.push(`${account.name}: ${exclusion}`);
+        continue;
+      }
+      if (this.hasUsableCredentials(account, unreadable)) {
+        accounts.push(account);
+        continue;
+      }
+      if (!unreadable.includes(account.name)) rejections.push(`${account.name}: not signed in or credential missing`);
+    }
     const states = accounts.map(account => this.state(account, provider));
     // Remote quota endpoints can stall for seconds. Routing uses the latest shared
     // quota snapshot and starts coalesced refreshes asynchronously, never gating
@@ -229,20 +269,38 @@ export class AccountRouter {
       for (const state of states) state.health = this.store.health(state.definition.name);
     }
     signal?.throwIfAborted();
-    const candidates = states.filter(state =>
-      (state.health.blockedUntil ?? 0) <= this.now()
-      && remainingQuota(state.health.quota, this.now()) !== 0
-      && (state.unavailableUntil ?? 0) <= this.now());
-    const selected = await this.firstEligible(this.preferenceOrder(candidates, provider.id, settings), provider, model, signal);
+    const candidates: AccountState[] = [];
+    for (const state of states) {
+      const unavailable = this.unavailableReason(state);
+      if (unavailable) rejections.push(`${state.definition.name}: ${unavailable}`);
+      else candidates.push(state);
+    }
+    const selected = await this.firstEligible(this.preferenceOrder(candidates, provider.id, settings), provider, model, rejections, signal);
     if (!selected) {
       const skipped = unreadable.length ? ` (skipped accounts with unreadable credentials: ${unreadable.join(", ")})` : "";
-      throw new RoutingError(`No eligible ${provider.id} account for ${model.id}; check /jar accounts, profile allowlist, login and quota resets${skipped}`);
+      const reasons = rejections.length ? ` Rejected: ${rejections.join("; ")}.` : "";
+      throw new RoutingError(`No eligible ${provider.id} account for ${model.id}; check /jar accounts, profile allowlist, login and quota resets${skipped}.${reasons}`);
     }
     this.sticky.set(provider.id, selected.definition.name);
     selected.health = this.store.health(selected.definition.name);
     if (this.isCurrentRoute(selected)) this.onRoute?.(selected.definition.name, provider.id, selected.health);
     selected.inFlight++;
     return selected;
+  }
+  /** Why the profile allowlist, a pin or an earlier failed attempt excludes this account; undefined when none does. */
+  private exclusionReason(account: AccountDefinition, settings: AccountRoutingSettings, pinnedName: string | undefined, tried: Set<string>): string | undefined {
+    if (settings.accounts.length && !settings.accounts.includes(account.name)) return "excluded by profile allowlist";
+    if (pinnedName && account.name !== pinnedName) return `provider is pinned to ${pinnedName}`;
+    if (tried.has(account.name)) return "already failed for this request";
+    return undefined;
+  }
+  /** Why a credentialed account cannot take the request right now; undefined when it can. */
+  private unavailableReason(state: AccountState): string | undefined {
+    const now = this.now();
+    if ((state.health.blockedUntil ?? 0) > now) return "cooling down after a provider rate limit";
+    if (remainingQuota(state.health.quota, now) === 0) return "quota exhausted until its window resets";
+    if ((state.unavailableUntil ?? 0) > now) return "model catalog lookup failed or timed out; retrying shortly";
+    return undefined;
   }
   /**
    * The ModelRuntime may hold a credential in memory after another Pi process signs out or an
@@ -282,31 +340,95 @@ export class AccountRouter {
    * Each check is time-limited, so a hung account is skipped (and cooled down) instead of
    * blocking healthy accounts behind it.
    */
-  private async firstEligible(ordered: AccountState[], provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<AccountState | undefined> {
+  private async firstEligible(ordered: AccountState[], provider: Provider, model: AnyModel, rejections: string[], signal?: AbortSignal): Promise<AccountState | undefined> {
     for (const state of ordered) {
       signal?.throwIfAborted();
       try {
-        if (await this.servesModel(state, provider, model, signal)) return state;
+        const rejection = await this.catalogRejection(state, provider, model, signal);
+        if (!rejection) return state;
+        rejections.push(`${state.definition.name}: ${rejection}`);
       } catch {
         signal?.throwIfAborted();
         state.unavailableUntil = this.now() + 60_000;
+        rejections.push(`${state.definition.name}: model catalog lookup failed or timed out`);
       }
     }
     return undefined;
   }
-  private async servesModel(state: AccountState, provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<boolean> {
+  /**
+   * Undefined when this account's catalog serves the exact model. On a miss the account's catalog is
+   * re-discovered once (bounded, coalesced and rate-limited), because a model released after the
+   * runtime was built is missing from a stale catalog, then checked again.
+   */
+  private async catalogRejection(state: AccountState, provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<string | undefined> {
+    const firstMiss = await this.checkCatalog(state, provider, model, signal);
+    if (!firstMiss) return undefined;
+    await this.refreshCatalog(state, provider, false, signal);
+    const secondMiss = await this.checkCatalog(state, provider, model, signal);
+    if (!secondMiss) return undefined;
+    if (state.catalogStatus?.startsWith("refresh failed") || state.catalogStatus?.startsWith("refresh timed out")) {
+      return `${secondMiss}; ${state.catalogStatus}`;
+    }
+    return secondMiss;
+  }
+  /** A reason string when the account catalog does not serve this exact model, undefined when it does. */
+  private checkCatalog(state: AccountState, provider: Provider, model: AnyModel, signal?: AbortSignal): Promise<string | undefined> {
+    return this.withinCatalogTimeout(signal, async checkSignal => {
+      const models = await (await state.models).getAllAvailable(provider.id, { signal: checkSignal });
+      const sameId = models.filter(candidate => candidate.provider === provider.id && candidate.id === model.id);
+      if (!sameId.length) return "model missing from the account's catalog";
+      const requestedType = model.type ?? "chat";
+      if (sameId.some(candidate => (candidate.type ?? "chat") === requestedType && candidate.api === model.api)) return undefined;
+      const offered = sameId.map(candidate => `${candidate.api}/${candidate.type ?? "chat"}`).join(", ");
+      return `API/type mismatch (account catalog offers ${offered}; request uses ${model.api}/${requestedType})`;
+    });
+  }
+  private async withinCatalogTimeout<T>(signal: AbortSignal | undefined, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const limit = AbortSignal.timeout(this.catalogTimeoutMs);
     const checkSignal = signal ? AbortSignal.any([signal, limit]) : limit;
     // A catalog check that ignores its abort signal must still lose the race.
     const timedOut = new Promise<never>((_, reject) => {
       limit.addEventListener("abort", () => reject(new Error("model catalog check timed out")), { once: true });
     });
-    const check = (async () => {
-      const models = await (await state.models).getAllAvailable(provider.id, { signal: checkSignal });
-      return models.some(candidate => candidate.provider === provider.id && candidate.id === model.id
-        && (candidate.type ?? "chat") === (model.type ?? "chat") && candidate.api === model.api);
-    })();
-    return Promise.race([check, timedOut]);
+    return Promise.race([work(checkSignal), timedOut]);
+  }
+  /**
+   * Re-discovers one account's model catalog with that account's own credentials. Concurrent callers
+   * share one lookup. Unless `force`, an account refreshed recently is left alone. Failures are
+   * recorded in `catalogStatus` (sanitized) and never block routing to other accounts.
+   */
+  private refreshCatalog(state: AccountState, provider: Provider, force: boolean, signal?: AbortSignal): Promise<void> {
+    if (state.catalogRefresh) return waitForQuota(state.catalogRefresh, signal);
+    const last = state.catalogRefreshedAt;
+    if (!force && last !== undefined && this.now() - last < CATALOG_REFRESH_MIN_INTERVAL_MS) return Promise.resolve();
+    state.catalogRefresh = (async () => {
+      try {
+        const result = await this.withinCatalogTimeout(undefined, async refreshSignal => {
+          const models = await state.models;
+          return models.refresh({ providers: [provider.id], allowNetwork: true, force: true, signal: refreshSignal });
+        });
+        if (result.errors.has(provider.id)) state.catalogStatus = "refresh failed (provider discovery error)";
+        else if (result.aborted) state.catalogStatus = "refresh timed out";
+        else state.catalogStatus = "refreshed";
+      } catch {
+        state.catalogStatus = "refresh failed or timed out";
+      }
+      state.catalogRefreshedAt = this.now();
+    })().finally(() => { state.catalogRefresh = undefined; });
+    return waitForQuota(state.catalogRefresh, signal);
+  }
+  /** Explicit refresh of every credentialed account of one provider; the result is reported per account. */
+  async refreshModels(providerId: string, provider: Provider): Promise<ModelRefreshReport[]> {
+    const unreadable: string[] = [];
+    const accounts = this.store.list().filter(account => account.provider === providerId);
+    return Promise.all(accounts.map(async account => {
+      if (!this.hasUsableCredentials(account, unreadable)) return { account: account.name, status: "skipped: not signed in or credential unreadable" };
+      const state = this.state(account, provider);
+      await this.refreshCatalog(state, provider, true);
+      // A successful refresh also clears a catalog-failure cooldown so the account is tried again at once.
+      if (state.catalogStatus === "refreshed") state.unavailableUntil = undefined;
+      return { account: account.name, status: state.catalogStatus ?? "unknown" };
+    }));
   }
   private isCurrentRoute(state: AccountState): boolean {
     const policy = this.settings();
@@ -331,6 +453,12 @@ export class AccountRouter {
       return this.refreshQuota(this.state(account, provider));
     }));
   }
+  /** Explicit refresh: probes every supported OAuth account of one provider now, ignoring the snapshot TTL. */
+  async refreshQuotaNow(providerId: string, provider: Provider): Promise<void> {
+    if (!["anthropic", "openai-codex"].includes(providerId) || provider.id !== providerId) return;
+    const accounts = this.store.list().filter(account => account.provider === providerId && account.auth === "oauth");
+    await Promise.all(accounts.map(account => this.refreshQuota(this.state(account, provider), undefined, true)));
+  }
   invalidate(name: string): void {
     const state = this.states.get(name);
     if (state) {
@@ -349,7 +477,9 @@ export class AccountRouter {
       return { name: account.name, provider: account.provider, blockedUntil: health.blockedUntil,
         remaining: remainingQuota(health.quota, this.now()), inFlight: this.states.get(account.name)?.inFlight ?? 0,
         lastUsed: this.settings().mode !== "off" && this.sticky.get(account.provider) === account.name,
-        warning: this.states.get(account.name)?.quotaError };
+        warning: this.states.get(account.name)?.quotaError,
+        catalogRefreshedAt: this.states.get(account.name)?.catalogRefreshedAt,
+        catalogStatus: this.states.get(account.name)?.catalogStatus };
     });
   }
   private cleanOptions<T extends { apiKey?: string; headers?: ProviderHeaders; env?: Record<string, string> }>(options: T = {} as T): T {

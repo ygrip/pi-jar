@@ -34,6 +34,20 @@ function parseQuota(value: unknown): Quota | undefined {
   return fiveHour || week ? { ...(fiveHour ? { fiveHour } : {}), ...(week ? { week } : {}) } : undefined;
 }
 
+/** True when a window's reset time has passed, so the snapshot no longer describes the provider's current limits. */
+export function quotaWindowReset(quota: Quota | undefined, now: number): boolean {
+  return [quota?.fiveHour, quota?.week].some(window => window?.resetsAt !== undefined && window.resetsAt <= now);
+}
+/** The snapshot without windows that already reset; undefined when nothing known remains. */
+export function activeQuota(quota: Quota | undefined, now: number): Quota | undefined {
+  if (!quota) return undefined;
+  const active: Quota = {};
+  if (quota.fiveHour && !(quota.fiveHour.resetsAt !== undefined && quota.fiveHour.resetsAt <= now)) active.fiveHour = quota.fiveHour;
+  if (quota.week && !(quota.week.resetsAt !== undefined && quota.week.resetsAt <= now)) active.week = quota.week;
+  if (!active.fiveHour && !active.week) return undefined;
+  return active;
+}
+
 const publishedCache = new Map<string, { raw: string; expiresAt?: number; value?: Quota }>();
 
 /** Public statuses are authoritative only when valid and fresh. No arbitrary status prose is parsed. */
@@ -43,7 +57,8 @@ export function publishedQuota(statuses: ReadonlyMap<string, string>, provider: 
   const cached = publishedCache.get(provider);
   if (cached?.raw === raw) {
     const { expiresAt, value } = cached;
-    return value && expiresAt != null && expiresAt > now && expiresAt <= now + QUOTA_TTL_MS ? value : undefined;
+    if (value && expiresAt != null && expiresAt > now && expiresAt <= now + QUOTA_TTL_MS) return activeQuota(value, now);
+    return undefined;
   }
   try {
     const data: unknown = JSON.parse(raw);
@@ -53,7 +68,8 @@ export function publishedQuota(statuses: ReadonlyMap<string, string>, provider: 
     const value = parseQuota(obj);
     if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || !value) { publishedCache.set(provider, { raw }); return undefined; }
     publishedCache.set(provider, { raw, expiresAt, value });
-    return expiresAt > now && expiresAt <= now + QUOTA_TTL_MS ? value : undefined;
+    if (expiresAt > now && expiresAt <= now + QUOTA_TTL_MS) return activeQuota(value, now);
+    return undefined;
   } catch { publishedCache.set(provider, { raw }); return undefined; }
 }
 

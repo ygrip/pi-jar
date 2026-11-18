@@ -7,7 +7,7 @@ import type { AccountRouteStatus } from "./account-router.ts";
 import { isUnsafeRouting, type AccountRoutingSettings } from "./account-settings.ts";
 
 export type AccountHubAction =
-  | { kind: "close" | "add" | "routing" | "allowlist" | "switch" | "limits"; provider?: string }
+  | { kind: "close" | "add" | "routing" | "allowlist" | "switch" | "limits" | "refresh"; provider?: string }
   | { kind: "account"; provider: string; name: string }
   | { kind: "auto"; provider: string };
 
@@ -108,12 +108,13 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         ...(registered ? [
           { kind: "add" as const, label: "＋ Add account to this provider" },
           { kind: "switch" as const, label: "Switch / pin provider account…" },
-          { kind: "limits" as const, label: "Quota and cooldown details…" }
+          { kind: "limits" as const, label: "Quota and cooldown details…" },
+          { kind: "refresh" as const, label: "Refresh models and quota now" }
         ] : [{ kind: "close" as const, label: "Provider unavailable · choose account above to remove" }])
       ];
     };
 
-    const act = (kind: "close" | "add" | "routing" | "allowlist" | "switch" | "limits", provider?: string) => {
+    const act = (kind: "close" | "add" | "routing" | "allowlist" | "switch" | "limits" | "refresh", provider?: string) => {
       state.pane = pane;
       state.accountIndex = accountIndex;
       done(provider ? { kind, provider } : { kind });
@@ -141,7 +142,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         done({ kind: "account", provider, name: selected.name });
         return;
       }
-      if (selected.kind === "add" || selected.kind === "switch" || selected.kind === "limits") act(selected.kind, provider);
+      if (selected.kind === "add" || selected.kind === "switch" || selected.kind === "limits" || selected.kind === "refresh") act(selected.kind, provider);
     };
     const selectProvider = (delta: number) => {
       const all = matching();
@@ -192,6 +193,9 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
         else if (shortcut === "q") {
           const provider = currentProvider();
           if (provider && ctx.modelRegistry.getProvider(provider)) act("limits", provider);
+        } else if (shortcut === "f") {
+          const provider = currentProvider();
+          if (provider && ctx.modelRegistry.getProvider(provider)) act("refresh", provider);
         }
         tui.requestRender();
       },
@@ -255,7 +259,7 @@ export async function openAccountHub(ctx: ExtensionContext, accounts: Accounts, 
           });
         }
         out.push(theme.fg("dim", "─".repeat(available)));
-        out.push(normal(" A add · S switch · R routing · P profile · Q quota · / search · Esc close", available));
+        out.push(normal(" A add · S switch · R routing · P profile · Q quota · F refresh · / search · Esc close", available));
         return out.map(line => truncateToWidth(line, available));
       }
     };

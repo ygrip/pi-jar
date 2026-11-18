@@ -219,6 +219,7 @@ export async function openAccountManager(ctx: ExtensionContext, accounts: Accoun
       else if (action.kind === "routing") await routingPolicy();
       else if (action.kind === "allowlist") await allowlist();
       else if (action.kind === "limits") await showLimits(action.provider);
+      else if (action.kind === "refresh") await accounts.refreshModels(action.provider, ctx, true);
       else if (action.kind === "account") {
         const account = definitions().find(item => item.provider === action.provider && item.name === action.name);
         if (account) await manageAccount(account);

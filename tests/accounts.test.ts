@@ -1135,3 +1135,186 @@ test("an unreadable inherited policy locks the child instead of failing the exte
   try { assert.ok(inheritedAccountRouting()?.invalid); }
   finally { if (previous === undefined) delete process.env[ACCOUNT_ROUTING_ENV]; else process.env[ACCOUNT_ROUTING_ENV] = previous; }
 });
+
+// ---- Dynamic model catalog (issue #22) ----
+const CODEX = "openai-codex";
+const newModel: Model<Api> = { ...model, provider: CODEX, id: "gpt-6.2-sol", api: "openai-codex-responses" };
+interface CatalogAccount { name: string; catalog: () => Model<Api>[]; refresh?: () => Promise<{ aborted: boolean; errors: Map<string, Error> }> }
+function catalogRouter(accounts: CatalogAccount[], settings: AccountRoutingSettings = { mode: "sticky", accounts: [] }, now: () => number = Date.now) {
+  const used: string[] = [];
+  const refreshes: string[] = [];
+  const definitions = accounts.map(account => ({ version: 1 as const, name: account.name, provider: CODEX, auth: "oauth" as const }));
+  const fakeStore = {
+    list: () => definitions,
+    hasCredentials: () => true,
+    health: () => ({}),
+    updateHealth: (_name: string, change: (health: object) => object) => change({}),
+    ensureCredentialGeneration: () => {},
+    models: (definition: { name: string }) => {
+      const account = accounts.find(item => item.name === definition.name)!;
+      return Promise.resolve({
+        getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
+        getAllAvailable: async () => account.catalog(),
+        refresh: async () => {
+          refreshes.push(account.name);
+          return account.refresh ? account.refresh() : { aborted: false, errors: new Map<string, Error>() };
+        },
+        streamSimple: () => {
+          used.push(account.name);
+          const stream = createAssistantMessageEventStream();
+          stream.push({ type: "done", reason: "stop", message: { ...message("routed"), provider: CODEX, model: newModel.id } });
+          stream.end();
+          return stream;
+        }
+      });
+    }
+  } as unknown as AccountStore;
+  const native: Provider = {
+    id: CODEX, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] },
+    getModels: () => [newModel],
+    stream: () => { throw new Error("not called"); },
+    streamSimple: () => { throw new Error("not called"); }
+  };
+  const router = new AccountRouter(fakeStore, () => settings, now, async () => ({ fiveHour: { used: 0 } }), 200);
+  return { router, routed: router.wrap(native), native, used, refreshes };
+}
+
+test("a stale account catalog recovers a newly released model after one refresh", async () => {
+  let released = false;
+  const { routed, used, refreshes } = catalogRouter([{
+    name: "a", catalog: () => released ? [newModel] : [],
+    refresh: async () => { released = true; return { aborted: false, errors: new Map() }; }
+  }]);
+  assert.equal((await routed.streamSimple(newModel, context).result()).stopReason, "stop");
+  assert.deepEqual(used, ["a"]);
+  assert.deepEqual(refreshes, ["a"]);
+});
+
+test("catalog misses refresh at most once per interval and report per-account reasons", async () => {
+  let clock = 1_000_000;
+  const { routed, refreshes } = catalogRouter([
+    { name: "a", catalog: () => [] },
+    { name: "b", catalog: () => [{ ...newModel, api: "openai-completions" }] }
+  ], { mode: "sticky", accounts: [] }, () => clock);
+  const first = await routed.streamSimple(newModel, context).result();
+  assert.equal(first.stopReason, "error");
+  assert.match(first.errorMessage!, /a: model missing from the account's catalog/);
+  assert.match(first.errorMessage!, /b: API\/type mismatch \(account catalog offers openai-completions\/chat; request uses openai-codex-responses\/chat\)/);
+  assert.deepEqual(refreshes.sort(), ["a", "b"]);
+  await routed.streamSimple(newModel, context).result();
+  assert.equal(refreshes.length, 2, "a repeated miss inside the interval does not hit the network again");
+  clock += 31_000;
+  await routed.streamSimple(newModel, context).result();
+  assert.equal(refreshes.length, 4, "negative results are not cached past the interval");
+});
+
+test("a failed refresh is reported without blocking a healthy account", async () => {
+  const { routed, used } = catalogRouter([
+    { name: "broken", catalog: () => [], refresh: async () => { throw new Error("secret-token-xyz"); } },
+    { name: "healthy", catalog: () => [newModel] }
+  ]);
+  assert.equal((await routed.streamSimple(newModel, context).result()).stopReason, "stop");
+  assert.deepEqual(used, ["healthy"]);
+  const { routed: onlyBroken } = catalogRouter([
+    { name: "broken", catalog: () => [], refresh: async () => { throw new Error("secret-token-xyz"); } }
+  ]);
+  const failed = await onlyBroken.streamSimple(newModel, context).result();
+  assert.match(failed.errorMessage!, /broken: model missing from the account's catalog; refresh failed or timed out/);
+  assert.doesNotMatch(failed.errorMessage!, /secret-token-xyz/);
+});
+
+test("rejections name profile exclusions and pins, and never route to an excluded account", async () => {
+  const accounts = [{ name: "a", catalog: () => [newModel] }, { name: "b", catalog: () => [newModel] }, { name: "c", catalog: () => [newModel] }];
+  const allowlisted = catalogRouter(accounts, { mode: "sticky", accounts: ["a"] });
+  assert.equal((await allowlisted.routed.streamSimple(newModel, context).result()).stopReason, "stop");
+  assert.deepEqual(allowlisted.used, ["a"]);
+  const pinned = catalogRouter([{ name: "a", catalog: () => [] }, { name: "b", catalog: () => [newModel] }],
+    { mode: "sticky", accounts: ["a"], pinned: { [CODEX]: "a" } });
+  const failed = await pinned.routed.streamSimple(newModel, context).result();
+  assert.equal(failed.stopReason, "error");
+  assert.match(failed.errorMessage!, /b: excluded by profile allowlist/);
+  assert.deepEqual(pinned.used, [], "the allowed pinned account lacks the model and the excluded one is never used");
+});
+
+test("refreshModels refreshes every account of a provider and clears a catalog cooldown", async () => {
+  let released = false;
+  const { router, native, routed, used } = catalogRouter([
+    { name: "a", catalog: () => released ? [newModel] : [], refresh: async () => { released = true; return { aborted: false, errors: new Map() }; } },
+    { name: "b", catalog: () => [], refresh: async () => ({ aborted: false, errors: new Map([[CODEX, new Error("boom")]]) }) }
+  ]);
+  const reports = await router.refreshModels(CODEX, native);
+  assert.deepEqual(reports, [
+    { account: "a", status: "refreshed" },
+    { account: "b", status: "refresh failed (provider discovery error)" }
+  ]);
+  assert.equal((await routed.streamSimple(newModel, context).result()).stopReason, "stop");
+  assert.deepEqual(used, ["a"]);
+  assert.ok(router.status().every(entry => entry.catalogRefreshedAt !== undefined));
+});
+
+// ---- Quota reset detection ----
+import { activeQuota, quotaWindowReset } from "../src/quota.ts";
+
+test("windows whose reset time passed are dropped from a quota snapshot", () => {
+  const quota = { fiveHour: { used: 100, resetsAt: 1000 }, week: { used: 40, resetsAt: 5000 } };
+  assert.equal(quotaWindowReset(quota, 999), false);
+  assert.equal(quotaWindowReset(quota, 1000), true);
+  assert.equal(quotaWindowReset({ fiveHour: { used: 10 } }, 1e15), false, "a window without a reset time never expires");
+  assert.deepEqual(activeQuota(quota, 2000), { week: { used: 40, resetsAt: 5000 } });
+  assert.equal(activeQuota(quota, 6000), undefined);
+  assert.equal(activeQuota(undefined, 1), undefined);
+});
+
+function quotaRouter(now: () => number, fetched: string[]) {
+  const health = { credentialGeneration: "g", checkedAt: 900_000, quota: { fiveHour: { used: 100, resetsAt: 1_000_000 } } };
+  const definition = { version: 1 as const, name: "a", provider: CODEX, auth: "oauth" as const };
+  const fakeStore = {
+    list: () => [definition],
+    hasCredentials: () => true,
+    health: () => health,
+    updateHealth: (_name: string, change: (current: object) => object) => change(health),
+    ensureCredentialGeneration: () => {},
+    models: () => Promise.resolve({
+      getAuth: async () => ({ auth: { apiKey: "unused" }, source: "oauth" }),
+      getAllAvailable: async () => [newModel],
+      streamSimple: () => {
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: "done", reason: "stop", message: { ...message("routed"), provider: CODEX, model: newModel.id } });
+        stream.end();
+        return stream;
+      }
+    })
+  } as unknown as AccountStore;
+  const native: Provider = {
+    id: CODEX, name: "Codex", auth: { oauth: {} as Provider["auth"]["oauth"] }, getModels: () => [newModel],
+    stream: () => { throw new Error("not called"); }, streamSimple: () => { throw new Error("not called"); }
+  };
+  const fetcher = async () => { fetched.push("probe"); return { fiveHour: { used: 0, resetsAt: 9_000_000 } }; };
+  const router = new AccountRouter(fakeStore, () => ({ mode: "sticky", accounts: [] }), now, fetcher, 200);
+  return { router, routed: router.wrap(native), native };
+}
+
+test("a fresh snapshot is re-probed as soon as its window resets, but not on every request", async () => {
+  let clock = 950_000;
+  const fetched: string[] = [];
+  const { routed } = quotaRouter(() => clock, fetched);
+  await routed.streamSimple(newModel, context).result();
+  assert.equal(fetched.length, 0, "inside the TTL and before the reset the snapshot is trusted");
+  clock = 1_000_001;
+  await routed.streamSimple(newModel, context).result();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(fetched.length, 1, "the reset triggers a probe without waiting for the TTL");
+  await routed.streamSimple(newModel, context).result();
+  assert.equal(fetched.length, 1, "the probe is rate-limited while the endpoint still reports the old window");
+  clock += 31_000;
+  await routed.streamSimple(newModel, context).result();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(fetched.length, 2);
+});
+
+test("refreshQuotaNow probes even when the snapshot is fresh", async () => {
+  const fetched: string[] = [];
+  const { router, native } = quotaRouter(() => 950_000, fetched);
+  await router.refreshQuotaNow(CODEX, native);
+  assert.equal(fetched.length, 1);
+});
